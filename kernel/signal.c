@@ -197,13 +197,23 @@ void check_signals(void) {
 
         uint64_t new_rsp = user_rsp - frame_size;
 
+        /* Validate new_rsp is still in user address space (not wrapped to kernel) */
+        if (new_rsp > user_rsp) {
+            log_printf(LOG_LEVEL_ERR, "signal: stack underflow detected\n");
+            do_signal_default(s);
+            return;
+        }
+
         /* Write trampoline code at new_rsp + 8 */
         uint8_t *tramp = (uint8_t *)(uintptr_t)(new_rsp + 8);
         tramp[0] = 0xB8;                        /* mov eax, imm32 */
-        tramp[1] = (uint8_t)(SYS_SIGRETURN);    /* SYS_SIGRETURN low byte */
-        tramp[2] = 0x00;
-        tramp[3] = 0x00;
-        tramp[4] = 0x00;
+        {
+            uint32_t sigret = (uint32_t)SYS_SIGRETURN;
+            tramp[1] = (uint8_t)(sigret);
+            tramp[2] = (uint8_t)(sigret >> 8);
+            tramp[3] = (uint8_t)(sigret >> 16);
+            tramp[4] = (uint8_t)(sigret >> 24);
+        }
         tramp[5] = 0x0F;                        /* syscall */
         tramp[6] = 0x05;
         /* tramp[7..15] = 0 (padding) */

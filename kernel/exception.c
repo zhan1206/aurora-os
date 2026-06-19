@@ -12,7 +12,7 @@
 #include "include/assert.h"
 #include <stdint.h>
 
-/* Exception names for logging */
+/* Exception names for logging — all 32 entries explicitly initialized */
 static const char * const exception_names[32] = {
     [0]  = "Divide Error (#DE)",
     [1]  = "Debug (#DB)",
@@ -29,12 +29,23 @@ static const char * const exception_names[32] = {
     [12] = "Stack Fault (#SS)",
     [13] = "General Protection (#GP)",
     [14] = "Page Fault (#PF)",
+    [15] = "(Reserved #15)",
     [16] = "x87 FPU Error (#MF)",
     [17] = "Alignment Check (#AC)",
     [18] = "Machine Check (#MC)",
     [19] = "SIMD Exception (#XM)",
     [20] = "Virtualization (#VE)",
+    [21] = "Control Protection (#CP)",
+    [22] = "(Reserved #22)",
+    [23] = "(Reserved #23)",
+    [24] = "(Reserved #24)",
+    [25] = "(Reserved #25)",
+    [26] = "(Reserved #26)",
+    [27] = "(Reserved #27)",
+    [28] = "Hypervisor Injection (#HV)",
+    [29] = "VMM Communication (#VC)",
     [30] = "Security Exception (#SX)",
+    [31] = "(Reserved #31)",
 };
 
 /*

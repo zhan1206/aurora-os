@@ -24,6 +24,7 @@ int netdev_register(struct net_device *netdev) {
 }
 
 struct net_device *netdev_find(const char *name) {
+    if (!name) return NULL;
     struct net_device *netdev = netdev_list;
     while (netdev) {
         if (strcmp(netdev->name, name) == 0) return netdev;
@@ -33,11 +34,13 @@ struct net_device *netdev_find(const char *name) {
 }
 
 int netdev_send(struct net_device *netdev, const void *data, int len) {
-    if (!netdev || !netdev->send) return -1;
+    if (!netdev || !netdev->send || !data) return -1;
+    if (len <= 0) return -1;
     return netdev->send(netdev, data, len);
 }
 
 int netdev_recv(struct net_device *netdev, void *buf, int max_len) {
-    if (!netdev || !netdev->recv) return -1;
+    if (!netdev || !netdev->recv || !buf) return -1;
+    if (max_len <= 0) return -1;
     return netdev->recv(netdev, buf, max_len);
 }

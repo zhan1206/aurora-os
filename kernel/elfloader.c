@@ -6,6 +6,7 @@
 #include "pagetable.h"
 #include "user.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 /*
@@ -30,9 +31,13 @@ void *elf_load(const char *path, uint64_t *pml4_out) {
     }
     if (ehdr.e_machine != 0x3E) { vfs_close(f); log_printf(LOG_LEVEL_ERR, "elf_load: not x86-64\n"); return NULL; }
 
+    /* Validate program header table bounds */
+    if (ehdr.e_phnum > 128) { vfs_close(f); log_printf(LOG_LEVEL_ERR, "elf_load: too many program headers %u\n", ehdr.e_phnum); return NULL; }
+    if (ehdr.e_phentsize < sizeof(Elf64_Phdr)) { vfs_close(f); log_printf(LOG_LEVEL_ERR, "elf_load: bad phentsize %u\n", ehdr.e_phentsize); return NULL; }
+
     /* first pass: find loadable segments */
     Elf64_Phdr phdr;
-    uint64_t min_vaddr = (uint64_t)-1;
+    uint64_t min_vaddr = UINT64_MAX;
     uint64_t max_vaddr = 0;
     for (int i = 0; i < ehdr.e_phnum; ++i) {
         f->offset = ehdr.e_phoff + i * ehdr.e_phentsize;
@@ -44,7 +49,7 @@ void *elf_load(const char *path, uint64_t *pml4_out) {
         if (phdr.p_vaddr < min_vaddr) min_vaddr = phdr.p_vaddr;
         if (phdr.p_vaddr + phdr.p_memsz > max_vaddr) max_vaddr = phdr.p_vaddr + phdr.p_memsz;
     }
-    if (min_vaddr == (uint64_t)-1) { vfs_close(f); log_printf(LOG_LEVEL_ERR, "elf_load: no loadable segments\n"); return NULL; }
+    if (min_vaddr == UINT64_MAX) { vfs_close(f); log_printf(LOG_LEVEL_ERR, "elf_load: no loadable segments\n"); return NULL; }
 
     /* create a new PML4 for this program (kernel-only, fresh user space) */
     uint64_t new_pml4 = clone_kernel_pml4();

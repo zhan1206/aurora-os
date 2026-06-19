@@ -26,14 +26,13 @@
 int seccomp_set_filter(struct task_struct *task, struct seccomp_filter *filter) {
     if (!task) return -1;
 
-    /* Free existing filter if any */
-    if (task->seccomp) {
-        kfree(task->seccomp);
-        task->seccomp = NULL;
-    }
-
-    /* If filter is NULL, just remove the existing filter */
+    /* If filter is NULL, just remove the existing filter.
+     * Use atomic pointer swap to avoid use-after-free race with
+     * seccomp_check() running on another CPU. */
     if (!filter) {
+        struct seccomp_filter *old = (struct seccomp_filter *)
+            __sync_lock_test_and_set((void **)&task->seccomp, NULL);
+        if (old) kfree(old);
         log_printf(LOG_LEVEL_INFO, "seccomp: filter removed for pid=%d\n",
                    task->pid);
         return 0;
@@ -44,7 +43,12 @@ int seccomp_set_filter(struct task_struct *task, struct seccomp_filter *filter) 
     if (!new_filter) return -1;
 
     memcpy(new_filter, filter, sizeof(struct seccomp_filter));
-    task->seccomp = new_filter;
+
+    /* Atomically swap in the new filter, free the old one.
+     * The atomic swap ensures seccomp_check() never sees a freed pointer. */
+    struct seccomp_filter *old = (struct seccomp_filter *)
+        __sync_lock_test_and_set((void **)&task->seccomp, new_filter);
+    if (old) kfree(old);
 
     log_printf(LOG_LEVEL_INFO, "seccomp: filter installed for pid=%d (mask=%p %p %p %p)\n",
                task->pid,

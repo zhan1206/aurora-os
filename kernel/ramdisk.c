@@ -26,11 +26,14 @@ static uint32_t g_ramdisk_block_size = 512;
 
 static int ramdisk_read(void *buf, uint64_t sector, int count) {
     if (!g_ramdisk_priv) return -1;
+    if (!buf) return -1;
+    if (count <= 0) return -1;
 
     uint64_t byte_offset = sector * g_ramdisk_block_size;
     uint64_t byte_count  = (uint64_t)count * g_ramdisk_block_size;
 
     if (byte_offset + byte_count > g_ramdisk_priv->size) return -1;
+    if (byte_offset + byte_count < byte_offset) return -1;  /* overflow check */
 
     memcpy(buf, g_ramdisk_priv->data + byte_offset, (size_t)byte_count);
     return 0;
@@ -38,11 +41,14 @@ static int ramdisk_read(void *buf, uint64_t sector, int count) {
 
 static int ramdisk_write(const void *buf, uint64_t sector, int count) {
     if (!g_ramdisk_priv) return -1;
+    if (!buf) return -1;
+    if (count <= 0) return -1;
 
     uint64_t byte_offset = sector * g_ramdisk_block_size;
     uint64_t byte_count  = (uint64_t)count * g_ramdisk_block_size;
 
     if (byte_offset + byte_count > g_ramdisk_priv->size) return -1;
+    if (byte_offset + byte_count < byte_offset) return -1;  /* overflow check */
 
     memcpy(g_ramdisk_priv->data + byte_offset, buf, (size_t)byte_count);
     return 0;

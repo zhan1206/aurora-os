@@ -22,6 +22,7 @@ int block_dev_register(struct block_device *bdev) {
 }
 
 struct block_device *block_dev_find(const char *name) {
+    if (!name) return NULL;
     struct block_device *bdev = block_dev_list;
     while (bdev) {
         if (strcmp(bdev->name, name) == 0) return bdev;
@@ -32,12 +33,16 @@ struct block_device *block_dev_find(const char *name) {
 
 int block_dev_read(struct block_device *bdev, void *buf, uint64_t sector,
                    int count) {
-    if (!bdev || !bdev->read) return -1;
+    if (!bdev || !bdev->read || !buf) return -1;
+    if (count <= 0) return -1;
+    if (sector + (uint64_t)count > bdev->total_sectors) return -1;
     return bdev->read(buf, sector, count);
 }
 
 int block_dev_write(struct block_device *bdev, const void *buf,
                     uint64_t sector, int count) {
-    if (!bdev || !bdev->write) return -1;
+    if (!bdev || !bdev->write || !buf) return -1;
+    if (count <= 0) return -1;
+    if (sector + (uint64_t)count > bdev->total_sectors) return -1;
     return bdev->write(buf, sector, count);
 }

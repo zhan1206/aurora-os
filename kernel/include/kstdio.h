@@ -25,8 +25,15 @@ static inline int uitoa(uint64_t val, char *buf, size_t bufsz) {
 /* Convert signed integer to decimal string. Returns length. */
 static inline int itoa(int val, char *buf, size_t bufsz) {
     int n = 0;
-    if (val < 0) { if (n < (int)bufsz-1) buf[n++] = '-'; val = -val; }
-    n += uitoa((uint64_t)val, buf + n, bufsz - (size_t)n);
+    if (val < 0) {
+        if (n < (int)bufsz-1) buf[n++] = '-';
+        /* Avoid undefined behavior: -INT_MIN overflows.
+         * Use unsigned arithmetic: -(v+1)+1 is safe even for INT_MIN. */
+        unsigned int uv = (unsigned int)(-(val + 1)) + 1U;
+        n += uitoa(uv, buf + n, bufsz - (size_t)n);
+    } else {
+        n += uitoa((uint64_t)val, buf + n, bufsz - (size_t)n);
+    }
     return n;
 }
 

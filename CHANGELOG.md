@@ -1,6 +1,30 @@
 # AuroraOS Changelog
 
-## v3.0.0 (2026-06-19) — Comprehensive System Enhancement
+## v3.0.2 (2026-06-19) — Code Quality & Security Hardening
+
+### Critical Bug Fixes
+- **ramdisk**: 修复 count 为负数时的整数溢出（`(uint64_t)(int)` 转换），增加 NULL 检查、溢出检查和 count<=0 边界检查
+- **block_dev**: 增加 name/buf 的 NULL 检查，增加 sector 越界检查，拒绝 count<=0
+- **netdev**: 增加 name/data/buf 的 NULL 检查，增加 len<=0 边界检查
+- **log.c**: 修复 `%d` 格式化时 INT_MIN 取反的未定义行为（使用无符号算术）
+- **kstdio.h**: 修复 `itoa` 函数中 INT_MIN 取反的未定义行为
+- **pipe.c**: 修复 `fd_alloc` 失败时的文件结构体资源泄漏
+- **signal.c**: 修复 SYS_SIGRETURN 被截断为单字节的 bug（写入完整 4 字节立即数），增加栈下溢边界检查
+- **elfloader**: 增加 e_phnum>128 和 e_phentsize 有效性检查，使用 UINT64_MAX 替代 `(uint64_t)-1`
+- **perf.c**: 修复 TSC 校准超时样本污染平均值的问题，增加 tsc_diff==0 检查
+- **seccomp.c**: 使用原子指针交换避免 use-after-free 竞态条件
+
+### SMP Race Condition Fixes
+- **pit_handler**: `need_resched` 和 `smp_balance_counter` 改为原子操作，确保多核可见性
+- **seccomp**: 使用 `__sync_lock_test_and_set` 原子交换指针，消除 use-after-free 窗口
+
+### Code Quality
+- **exception.c**: 异常名称数组全部 32 个条目显式初始化，消除未初始化间隙
+- 构建: Release + Debug + ISO + UEFI 全部零警告零错误
+
+---
+
+## v3.0.1 (2026-06-19) — Developer Contribution Guide & Community Building
 
 ### Short-term Improvements
 - **docs**: 修复 README.md 和 CONTRIBUTING.md 中所有 `用户名/AuroraOS` 占位符为实际仓库 `zhan1206/aurora-os`

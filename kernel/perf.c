@@ -95,8 +95,8 @@ static void tsc_calibrate(void) {
         while (!(inb(0x61) & 0x20)) {
             timeout++;
             if (timeout > 10000000) {
-                log_printf(LOG_LEVEL_WARN, "perf: TSC calibration PIT timeout\n");
-                break;
+                log_printf(LOG_LEVEL_WARN, "perf: TSC calibration PIT timeout, skipping sample\n");
+                goto next_sample;  /* skip this sample, don't use bad data */
             }
         }
 
@@ -104,10 +104,18 @@ static void tsc_calibrate(void) {
         uint64_t tsc_end = read_tsc();
         uint64_t tsc_diff = tsc_end - tsc_start;
 
+        /* Skip if TSC didn't advance (shouldn't happen normally) */
+        if (tsc_diff == 0) {
+            log_printf(LOG_LEVEL_WARN, "perf: TSC calibration zero diff, skipping\n");
+            goto next_sample;
+        }
+
         /* Calculate TSC frequency: tsc_diff ticks in (divisor / 1193180) seconds.
          * tsc_freq = tsc_diff * 1193180 / divisor */
         uint64_t sample_freq = (tsc_diff * 1193180ULL) / divisor;
         best_tsc_freq += sample_freq;
+    next_sample:
+        continue;
     }
 
     tsc_freq_hz = best_tsc_freq / 3;

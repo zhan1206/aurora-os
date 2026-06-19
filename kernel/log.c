@@ -85,8 +85,10 @@ void log_vprintf(int level, const char *fmt, va_list ap) {
                 if (v == 0) { buf[n++] = '0'; }
                 else {
                     char tmp[32]; int tn = 0; int neg = v < 0;
-                    if (neg) v = -v;
-                    while (v && tn < (int)sizeof(tmp)) { tmp[tn++] = '0' + (v % 10); v /= 10; }
+                    /* Avoid undefined behavior when v == INT_MIN:
+                     * -v would overflow, so use unsigned arithmetic */
+                    unsigned int uv = neg ? (unsigned int)(-(v + 1)) + 1U : (unsigned int)v;
+                    while (uv && tn < (int)sizeof(tmp)) { tmp[tn++] = '0' + (uv % 10); uv /= 10; }
                     if (neg) tmp[tn++] = '-';
                     for (int i = tn - 1; i >= 0; --i) buf[n++] = tmp[i];
                 }

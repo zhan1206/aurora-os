@@ -13,11 +13,12 @@
 #include "sched.h"
 #include "perf.h"
 
-/* Reschedule flag: set by interrupt handlers, checked at safe points */
+/* Reschedule flag: set by interrupt handlers, checked at safe points.
+ * SMP: use atomic operations to ensure visibility across cores. */
 volatile int need_resched = 0;
 
-/* SMP load balancing counter */
-static int smp_balance_counter = 0;
+/* SMP load balancing counter — atomic increment for correctness */
+static volatile int smp_balance_counter = 0;
 #define SMP_BALANCE_INTERVAL 100  /* every 100 ticks (~1 sec at 100 Hz) */
 
 void pit_irq_c_handler(void *rsp) {
@@ -30,13 +31,14 @@ void pit_irq_c_handler(void *rsp) {
 
     /* Set flag instead of calling schedule() directly.
      * The interrupted code will check need_resched at its next
-     * safe point (iretq return path in the IRQ wrapper). */
-    need_resched = 1;
+     * safe point (iretq return path in the IRQ wrapper).
+     * Use atomic store for SMP visibility. */
+    __sync_lock_test_and_set(&need_resched, 1);
 
     /* Periodically run SMP load balancing */
-    smp_balance_counter++;
-    if (smp_balance_counter >= SMP_BALANCE_INTERVAL) {
-        smp_balance_counter = 0;
+    int count = __sync_fetch_and_add(&smp_balance_counter, 1);
+    if (count + 1 >= SMP_BALANCE_INTERVAL) {
+        __sync_lock_test_and_set(&smp_balance_counter, 0);
         /* Run load balancing for CPU 0 (BSP).
          * On SMP, the APIC timer handler on each CPU will also
          * do per-CPU balancing. */

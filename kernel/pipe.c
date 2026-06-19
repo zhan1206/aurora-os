@@ -223,7 +223,9 @@ int sys_pipe(int *fds) {
     int wfd = fd_alloc(current, wfilp);
     if (rfd < 0 || wfd < 0) {
         if (rfd >= 0) fd_close(current, rfd);
+        else if (rfilp) { kfree(rfilp); rfilp = NULL; }
         if (wfd >= 0) fd_close(current, wfd);
+        else if (wfilp) { kfree(wfilp); wfilp = NULL; }
         return -1;
     }
 
