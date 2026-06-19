@@ -50,6 +50,25 @@ void log_ring_dump(void (*emit)(char c)) {
     }
 }
 
+/*
+ * log_ring_read: Copy log ring buffer contents into a user buffer.
+ * Returns the number of bytes copied (not including null terminator).
+ * Useful for /proc/kmsg and other consumer interfaces.
+ */
+int log_ring_read(char *buf, size_t size) {
+    if (!buf || size < 2) return 0;
+    int len = 0;
+    unsigned total = (log_wpos < LOG_BUF_SIZE) ? log_wpos : LOG_BUF_SIZE;
+    unsigned start = (log_wpos >= LOG_BUF_SIZE) ? log_wpos % LOG_BUF_SIZE : 0;
+
+    for (unsigned i = 0; i < total && len < (int)size - 1; i++) {
+        unsigned idx = (start + i) % LOG_BUF_SIZE;
+        buf[len++] = log_ring[idx];
+    }
+    buf[len] = '\0';
+    return len;
+}
+
 /* ================================================================
  * Log level
  * ================================================================ */

@@ -552,6 +552,155 @@ No modules loaded.
 
 ---
 
+### Demo 5.5: procfs 与高级 Shell 命令
+
+#### 目的
+
+展示 AuroraOS 受 CoolPotOS 启发新增的 procfs 虚拟文件系统和高级 Shell 命令（pwd, cd, mkdir, df, wc, head, tail, cat /proc/*）。
+
+#### 操作步骤
+
+```
+# 1. 查看当前工作目录
+pwd
+
+# 2. 创建目录
+mkdir /docs
+mkdir /data
+
+# 3. 切换到新目录
+cd /docs
+
+# 4. 确认目录切换
+pwd
+
+# 5. 在新目录中创建文件
+echo "Architecture Design Document" > arch.txt
+echo "API Reference Document" > api.txt
+echo "Module Guide Document" > mod.txt
+
+# 6. 查看文件列表
+ls
+
+# 7. 切换到根目录
+cd /
+
+# 8. 查看目录结构
+ls
+
+# 9. 查看磁盘空间使用
+df
+
+# 10. 查看文件行数/词数/字符数
+wc /docs/arch.txt
+
+# 11. 查看文件头部
+head /docs/arch.txt
+
+# 12. 查看文件尾部
+tail /docs/arch.txt
+
+# 13. 查看 procfs — CPU 信息
+cat /proc/cpuinfo
+
+# 14. 查看 procfs — 内存信息
+cat /proc/meminfo
+
+# 15. 查看 procfs — 中断统计（受 CoolPotOS 启发）
+cat /proc/interrupts
+
+# 16. 查看 procfs — 支持的文件系统
+cat /proc/filesystems
+
+# 17. 查看 procfs — 内核命令行
+cat /proc/cmdline
+
+# 18. 查看 procfs — 内核日志
+cat /proc/kmsg
+
+# 19. 查看 procfs — 系统运行时间
+cat /proc/uptime
+
+# 20. 查看 procfs — 内核版本
+cat /proc/version
+```
+
+#### 预期输出
+
+```
+aurora> pwd
+/
+
+aurora> mkdir /docs
+Directory created: /docs
+
+aurora> cd /docs
+aurora> pwd
+/docs
+
+aurora> ls
+  arch.txt           (30 bytes)
+  api.txt            (24 bytes)
+  mod.txt            (22 bytes)
+
+aurora> cd /
+aurora> ls
+  docs/              (dir)
+  hello.txt          (15 bytes)
+
+aurora> df
+Filesystem      Size    Used    Avail   Use%
+ramfs           256M    12M     244M    5%
+rootfs          256M    12M     244M    5%
+
+aurora> wc /docs/arch.txt
+Lines: 1  Words: 3  Chars: 30
+
+aurora> cat /proc/cpuinfo
+processor       : 0
+vendor_id       : GenuineIntel
+cpu family      : 6
+model name      : AuroraOS Virtual CPU @ 2.4GHz
+cpu MHz         : 2400.000
+cache size      : 4096 KB
+
+aurora> cat /proc/interrupts
+           CPU0
+  0: PIT Timer          1204
+  1: Keyboard           89
+ 12: Mouse              0
+ 14: Primary IDE        0
+ 15: Secondary IDE      0
+
+aurora> cat /proc/filesystems
+nodev   proc
+        ramfs
+        ext2
+
+aurora> cat /proc/cmdline
+auroraos console=tty0 root=/dev/ram0 quiet
+
+aurora> cat /proc/version
+AuroraOS version 3.0.2 (x86_64)
+
+aurora> cat /proc/uptime
+123.45 0.00
+```
+
+#### 关键截图点
+
+| 时间点 | 截图内容 | 说明 |
+|--------|----------|------|
+| 0s | pwd + mkdir + cd | 目录导航 |
+| 5s | ls 显示目录结构 | 文件系统操作 |
+| 10s | df 磁盘空间 | 存储统计 |
+| 15s | wc/head/tail | 文件分析命令 |
+| 20s | cat /proc/cpuinfo | procfs 系统信息 |
+| 25s | cat /proc/interrupts | IRQ 追踪（CoolPotOS 启发） |
+| 30s | cat /proc/filesystems | 文件系统类型列表 |
+
+---
+
 ### Demo 6: 主题切换
 
 #### 目的

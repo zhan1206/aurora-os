@@ -31,6 +31,7 @@
 #include "mem.h"
 #include "perf.h"
 #include "module.h"
+#include "rtc.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -153,6 +154,18 @@ static void do_kill(const char *args);
 static void do_theme(const char *args);
 static void do_perf_cmd(const char *args);
 static void do_mod(const char *args);
+static void do_uname_cmd(const char *args);
+static void do_free_cmd(const char *args);
+static void do_uptime_cmd(const char *args);
+static void do_env_cmd(const char *args);
+static void do_which_cmd(const char *args);
+static void do_pwd_cmd(const char *args);
+static void do_cd_cmd(const char *args);
+static void do_mkdir_cmd(const char *args);
+static void do_df_cmd(const char *args);
+static void do_wc_cmd(const char *args);
+static void do_head_cmd(const char *args);
+static void do_tail_cmd(const char *args);
 
 struct cmd_entry {
     const char *name;
@@ -165,27 +178,41 @@ static const struct cmd_entry cmd_table[] = {
     { "a11y",    do_a11y,      "Accessibility settings" },
     { "about",   do_about_cmd, "About AuroraOS" },
     { "cat",     do_cat,       "Display file contents" },
+    { "cd",      do_cd_cmd,    "Change current directory" },
     { "clear",   do_clear_cmd, "Clear the screen" },
     { "cp",      do_cp_cmd,    "Copy a file" },
     { "date",    do_date_cmd,  "Show current date/time" },
+    { "df",      do_df_cmd,    "Display disk space usage" },
     { "echo",    do_echo,      "Print text to console" },
+    { "env",     do_env_cmd,   "Show environment variables" },
     { "exec",    do_exec,      "Execute an ELF program" },
     { "exit",    do_exit_cmd,  "Exit the shell" },
+    { "free",    do_free_cmd,  "Display memory usage in human-readable format" },
+    { "head",    do_head_cmd,  "Display first lines of a file" },
     { "help",    do_help_cmd,  "Show available commands" },
     { "history", do_history_cmd,"Show command history" },
     { "kill",    do_kill,      "Send a signal to a process" },
+    { "la",      do_ls_cmd,    "Alias for ls -a" },
+    { "ll",      do_ls_cmd,    "Alias for ls -l" },
     { "lock",    do_lock_cmd,  "Lock the screen" },
     { "ls",      do_ls_cmd,    "List directory contents" },
     { "mem",     do_mem_cmd,   "Show memory usage" },
+    { "mkdir",   do_mkdir_cmd, "Create a directory" },
     { "mod",     do_mod,       "Module management (list|load|unload)" },
     { "perf",    do_perf_cmd,  "Performance statistics" },
     { "ps",      do_ps_cmd,    "List running processes" },
+    { "pwd",     do_pwd_cmd,   "Print working directory" },
     { "rm",      do_rm_cmd,    "Remove a file" },
     { "sysinfo", do_sysinfo_cmd,"Show system information" },
+    { "tail",    do_tail_cmd,  "Display last lines of a file" },
     { "theme",   do_theme,     "Switch color theme" },
     { "touch",   do_touch_cmd, "Create an empty file" },
+    { "uname",   do_uname_cmd, "Print system information" },
+    { "uptime",  do_uptime_cmd,"Show how long the system has been running" },
     { "wait",    do_wait_cmd,  "Wait for a background process" },
+    { "wc",      do_wc_cmd,    "Count lines, words, chars in a file" },
     { "welcome", do_welcome_cmd,"Show welcome message" },
+    { "which",   do_which_cmd, "Locate a command" },
 };
 
 #define CMD_COUNT (sizeof(cmd_table) / sizeof(cmd_table[0]))
@@ -506,7 +533,7 @@ static void show_welcome(void) {
  * Commands
  * ================================================================ */
 static void do_help(void) {
-    console_draw_box_top_double(" Help ");
+    console_draw_box_top_double(" Help - Available Commands ");
     console_write_ansi(SGR_RESET);
 
     console_write_ansi(CLR_PRIMARY_BOLD);
@@ -515,10 +542,16 @@ static void do_help(void) {
     console_write("    help    - Show this help\n");
     console_write("    about   - About AuroraOS\n");
     console_write("    sysinfo - System dashboard\n");
+    console_write("    uname   - Print system information\n");
+    console_write("    uptime  - Show system uptime\n");
+    console_write("    date    - Show current date/time\n");
+    console_write("    free    - Display memory usage\n");
+    console_write("    df      - Display disk space usage\n");
     console_write("    clear   - Clear screen\n");
     console_write("    lock    - Lock screen\n");
     console_write("    theme   - Switch theme (dark|light|hc)\n");
     console_write("    a11y    - Accessibility (hc|motion)\n");
+    console_write("    welcome - Show welcome message\n");
 
     console_write_ansi(CLR_PRIMARY_BOLD);
     console_write("  Process Management\n");
@@ -533,21 +566,29 @@ static void do_help(void) {
     console_write("  File System\n");
     console_write_ansi(SGR_RESET);
     console_write("    ls      - List files\n");
+    console_write("    ll      - List files (ls -l alias)\n");
+    console_write("    la      - List files (ls -a alias)\n");
     console_write("    cat     - Show file contents\n");
     console_write("    echo    - Print text\n");
     console_write("    touch   - Create empty file\n");
     console_write("    rm      - Remove a file\n");
+    console_write("    cp      - Copy a file\n");
+    console_write("    pwd     - Print working directory\n");
+    console_write("    cd      - Change directory\n");
+    console_write("    mkdir   - Create a directory\n");
+    console_write("    wc      - Count lines/words/chars\n");
+    console_write("    head    - Show first lines of file\n");
+    console_write("    tail    - Show last lines of file\n");
 
     console_write_ansi(CLR_PRIMARY_BOLD);
-    console_write("  Memory\n");
+    console_write("  Debug / System\n");
     console_write_ansi(SGR_RESET);
     console_write("    mem     - Memory usage\n");
-
-    console_write_ansi(CLR_PRIMARY_BOLD);
-    console_write("  History\n");
-    console_write_ansi(SGR_RESET);
     console_write("    history - Show command history\n");
-    console_write("    date    - Show current date/time\n");
+    console_write("    env     - Show environment variables\n");
+    console_write("    which   - Locate a command\n");
+    console_write("    perf    - Performance statistics\n");
+    console_write("    mod     - Module management\n");
 
     console_draw_box_bottom_double();
 }
@@ -609,6 +650,86 @@ static void do_cat(const char *path) {
         console_error_with_hint("cat: missing path", "Usage: cat <filename>");
         return;
     }
+
+    /* Handle /proc/cpuinfo */
+    if (strcmp(path, "/proc/cpuinfo") == 0) {
+        console_write_ansi(CLR_INFO);
+        console_write("processor       : 0\n");
+        console_write("vendor_id       : GenuineIntel\n");
+        console_write("cpu family      : 6\n");
+        console_write("model name      : AuroraOS Virtual CPU @ 2.4GHz\n");
+        console_write("cpu MHz         : 2400.000\n");
+        console_write("cache size      : 4096 KB\n");
+        console_write("physical id     : 0\n");
+        console_write("siblings        : 1\n");
+        console_write("core id         : 0\n");
+        console_write("cpu cores       : 1\n");
+        console_write("bogomips        : 4800.00\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    /* Handle /proc/meminfo */
+    if (strcmp(path, "/proc/meminfo") == 0) {
+        uint64_t total, fre, used;
+        mem_get_stats(&total, &fre, &used);
+        console_write_ansi(CLR_INFO);
+        /* MemTotal in kB */
+        console_write("MemTotal:       ");
+        print_uint64(total / 1024);
+        console_write(" kB\n");
+        console_write("MemFree:        ");
+        print_uint64(fre / 1024);
+        console_write(" kB\n");
+        console_write("MemAvailable:   ");
+        print_uint64(fre / 1024);
+        console_write(" kB\n");
+        console_write("Buffers:        0 kB\n");
+        console_write("Cached:         0 kB\n");
+        console_write("SwapTotal:      0 kB\n");
+        console_write("SwapFree:       0 kB\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    /* Handle /proc/interrupts (CoolPotOS-inspired) */
+    if (strcmp(path, "/proc/interrupts") == 0) {
+        extern void perf_irq_dump(void);
+        perf_irq_dump();
+        return;
+    }
+
+    /* Handle /proc/filesystems */
+    if (strcmp(path, "/proc/filesystems") == 0) {
+        console_write_ansi(CLR_INFO);
+        console_write("nodev   proc\n");
+        console_write("        ramfs\n");
+        console_write("        ext2\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    /* Handle /proc/cmdline */
+    if (strcmp(path, "/proc/cmdline") == 0) {
+        console_write_ansi(CLR_INFO);
+        console_write("auroraos console=tty0 root=/dev/ram0 quiet\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    /* Handle /proc/kmsg (CoolPotOS-inspired) */
+    if (strcmp(path, "/proc/kmsg") == 0) {
+        extern int log_ring_read(char *buf, size_t size);
+        char buf[512];
+        int len = log_ring_read(buf, sizeof(buf));
+        if (len > 0) {
+            console_write_ansi(CLR_MUTED);
+            for (int i = 0; i < len; i++) console_putc(buf[i]);
+            console_write_ansi(SGR_RESET);
+        }
+        return;
+    }
+
     struct file *f = vfs_open(path, 0);
     if (!f) {
         console_error_with_hint("cat: open failed", "Check if the file exists (use 'ls' to list files)");
@@ -1130,10 +1251,51 @@ static void do_login(void) {
  * ================================================================ */
 static void do_date_cmd(const char *args) {
     (void)args;
-    console_write_ansi(SHELL_CMD_OK);
-    console_write("2026-06-19  Friday  ");
-    console_write_ansi(SGR_RESET);
-    console_putc('\n');
+    struct rtc_time tm;
+    if (rtc_read_time(&tm) == 0) {
+        const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        /* Simple day-of-week calculation (Zeller-like for simplicity) */
+        int m = tm.month, y = tm.year;
+        if (m < 3) { m += 12; y -= 1; }
+        int k = y % 100;
+        int j = y / 100;
+        int dow = (tm.day + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
+        if (dow < 0) dow += 7;
+        /* Zeller's: 0=Sat,1=Sun,...,6=Fri. Map to days[0]=Sun */
+        int dow_idx = (dow + 1) % 7;
+
+        console_write_ansi(SHELL_CMD_OK);
+        char buf[64];
+        int n = 0;
+        /* Format: 2026-06-19 Thu 14:30:45 */
+        n += itoa((int)tm.year, buf, sizeof(buf));
+        buf[n++] = '-';
+        if (tm.month < 10) buf[n++] = '0';
+        n += itoa(tm.month, buf + n, sizeof(buf) - (size_t)n);
+        buf[n++] = '-';
+        if (tm.day < 10) buf[n++] = '0';
+        n += itoa(tm.day, buf + n, sizeof(buf) - (size_t)n);
+        buf[n++] = ' ';
+        for (int i = 0; i < 3 && days[dow_idx][i]; i++) buf[n++] = days[dow_idx][i];
+        buf[n++] = ' ';
+        if (tm.hour < 10) buf[n++] = '0';
+        n += itoa(tm.hour, buf + n, sizeof(buf) - (size_t)n);
+        buf[n++] = ':';
+        if (tm.minute < 10) buf[n++] = '0';
+        n += itoa(tm.minute, buf + n, sizeof(buf) - (size_t)n);
+        buf[n++] = ':';
+        if (tm.second < 10) buf[n++] = '0';
+        n += itoa(tm.second, buf + n, sizeof(buf) - (size_t)n);
+        buf[n] = '\0';
+        console_write(buf);
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    } else {
+        console_write_ansi(SHELL_CMD_WARN);
+        console_write("2026-06-19  Friday  (RTC not available)");
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    }
 }
 
 static void do_touch_cmd(const char *args) {
@@ -1256,6 +1418,501 @@ static void do_welcome_cmd(const char *args) {
     show_welcome();
 }
 
+/* ================================================================
+ * New commands: uname, free, uptime, env, which
+ * ================================================================ */
+
+static void do_uname(const char *args) {
+    (void)args;
+    console_write_ansi(CLR_INFO);
+    console_write("AuroraOS ");
+    console_write_ansi(SGR_RESET);
+    /* Check for -a flag */
+    while (*args == ' ') args++;
+    if (args && strcmp(args, "-a") == 0) {
+        console_write("AuroraOS aurora 2.3.0 #1 SMP 2026-06-19 x86_64\n");
+    } else {
+        console_write("AuroraOS\n");
+    }
+}
+
+static void do_free(const char *args) {
+    (void)args;
+    uint64_t total, fre, used;
+    mem_get_stats(&total, &fre, &used);
+
+    /* Convert to human-readable KiB */
+    uint64_t total_k = total / 1024;
+    uint64_t used_k = used / 1024;
+    uint64_t free_k = fre / 1024;
+
+    console_write_ansi(CLR_MUTED);
+    console_write("               total        used        free\n");
+    console_write_ansi(SGR_RESET);
+
+    console_write("Mem:       ");
+    print_uint64(total_k);
+    console_write(" KiB    ");
+    print_uint64(used_k);
+    console_write(" KiB    ");
+    console_write_ansi(CLR_SUCCESS);
+    print_uint64(free_k);
+    console_write(" KiB");
+    console_write_ansi(SGR_RESET);
+    console_putc('\n');
+
+    /* Also show in MiB for larger values */
+    if (total_k >= 1024) {
+        console_write_ansi(CLR_MUTED);
+        console_write("           ");
+        print_uint64(total_k / 1024);
+        console_write(" MiB        ");
+        print_uint64(used_k / 1024);
+        console_write(" MiB        ");
+        print_uint64(free_k / 1024);
+        console_write(" MiB\n");
+        console_write_ansi(SGR_RESET);
+    }
+}
+
+static void do_uptime(const char *args) {
+    (void)args;
+    uint64_t secs = rtc_get_uptime_seconds();
+    uint64_t days = secs / 86400;
+    uint64_t hours = (secs % 86400) / 3600;
+    uint64_t mins = (secs % 3600) / 60;
+    uint64_t remaining_secs = secs % 60;
+
+    console_write_ansi(CLR_INFO);
+    console_write("up ");
+    if (days > 0) {
+        print_uint64(days);
+        console_write(" day");
+        if (days > 1) console_write("s");
+        console_write(", ");
+    }
+    if (hours < 10) console_putc('0');
+    print_uint64(hours);
+    console_putc(':');
+    if (mins < 10) console_putc('0');
+    print_uint64(mins);
+    console_putc(':');
+    if (remaining_secs < 10) console_putc('0');
+    print_uint64(remaining_secs);
+    console_write_ansi(SGR_RESET);
+    console_putc('\n');
+}
+
+/* Simple environment variable store (key=value pairs) */
+#define ENV_MAX 32
+static char g_env_keys[ENV_MAX][64];
+static char g_env_vals[ENV_MAX][256];
+static int  g_env_count = 0;
+
+static void env_set(const char *key, const char *val) {
+    for (int i = 0; i < g_env_count; i++) {
+        if (strcmp(g_env_keys[i], key) == 0) {
+            strcpy(g_env_vals[i], val);
+            return;
+        }
+    }
+    if (g_env_count < ENV_MAX) {
+        strcpy(g_env_keys[g_env_count], key);
+        strcpy(g_env_vals[g_env_count], val);
+        g_env_count++;
+    }
+}
+
+static __attribute__((unused)) const char *env_get(const char *key) {
+    for (int i = 0; i < g_env_count; i++) {
+        if (strcmp(g_env_keys[i], key) == 0) return g_env_vals[i];
+    }
+    return NULL;
+}
+
+static void do_env(const char *args) {
+    (void)args;
+    /* Initialize some default env vars if not set */
+    if (g_env_count == 0) {
+        env_set("HOME", "/");
+        env_set("USER", "guest");
+        env_set("SHELL", "/bin/aurora-sh");
+        env_set("PWD", "/");
+        env_set("TERM", "aurora-console");
+        env_set("PATH", "/bin:/usr/bin");
+        env_set("LANG", "en_US.UTF-8");
+        env_set("HOSTNAME", "aurora");
+    }
+
+    if (g_env_count == 0) {
+        console_write_ansi(CLR_MUTED);
+        console_write("  No environment variables set\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    for (int i = 0; i < g_env_count; i++) {
+        console_write_ansi(CLR_INFO);
+        console_write("  ");
+        console_write(g_env_keys[i]);
+        console_write_ansi(SGR_RESET);
+        console_write("=");
+        console_write_ansi(CLR_TEXT_PRIMARY);
+        console_write(g_env_vals[i]);
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    }
+}
+
+static void do_which(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("which: missing argument", "Usage: which <command>");
+        return;
+    }
+
+    /* Check if it's a built-in command */
+    for (size_t i = 0; i < CMD_COUNT; i++) {
+        if (strcmp(cmd_table[i].name, args) == 0) {
+            console_write_ansi(CLR_SUCCESS);
+            console_write(args);
+            console_write(": shell built-in command\n");
+            console_write_ansi(SGR_RESET);
+            return;
+        }
+    }
+
+    /* Check if it's an alias */
+    if (strcmp(args, "ll") == 0 || strcmp(args, "la") == 0) {
+        console_write_ansi(CLR_SUCCESS);
+        console_write(args);
+        console_write(": aliased to ls\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    console_write_ansi(CLR_MUTED);
+    console_write(args);
+    console_write(" not found\n");
+    console_write_ansi(SGR_RESET);
+}
+
+/* ================================================================
+ * pwd: Print current working directory
+ * ================================================================ */
+static void do_pwd(const char *args) {
+    (void)args;
+    if (current && current->cwd[0]) {
+        console_write_ansi(CLR_INFO);
+        console_write(current->cwd);
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    } else {
+        console_write("/\n");
+    }
+}
+
+/* ================================================================
+ * cd: Change current working directory
+ * ================================================================ */
+static void do_cd(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        /* cd with no args goes to root */
+        if (current) {
+            current->cwd[0] = '/';
+            current->cwd[1] = '\0';
+        }
+        return;
+    }
+
+    if (!current) return;
+
+    /* Simple path handling */
+    if (strcmp(args, "/") == 0) {
+        current->cwd[0] = '/';
+        current->cwd[1] = '\0';
+    } else if (strcmp(args, "..") == 0) {
+        /* Go up one directory */
+        int len = 0;
+        while (current->cwd[len]) len++;
+        if (len > 1) {
+            /* Find last '/' */
+            int last = len - 1;
+            while (last > 0 && current->cwd[last] != '/') last--;
+            if (last == 0) {
+                current->cwd[0] = '/';
+                current->cwd[1] = '\0';
+            } else {
+                current->cwd[last] = '\0';
+            }
+        }
+    } else if (args[0] == '/') {
+        /* Absolute path */
+        size_t i;
+        for (i = 0; args[i] && i < sizeof(current->cwd) - 1; i++)
+            current->cwd[i] = args[i];
+        current->cwd[i] = '\0';
+    } else {
+        /* Relative path: append to current cwd */
+        int len = 0;
+        while (current->cwd[len]) len++;
+        if (len > 0 && current->cwd[len - 1] != '/') {
+            if ((size_t)len < sizeof(current->cwd) - 1) current->cwd[len++] = '/';
+        }
+        size_t i;
+        for (i = 0; args[i] && (size_t)len + i < sizeof(current->cwd) - 1; i++)
+            current->cwd[len + i] = args[i];
+        current->cwd[len + i] = '\0';
+    }
+}
+
+/* ================================================================
+ * mkdir: Create a directory
+ * ================================================================ */
+static void do_mkdir(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("mkdir: missing operand", "Usage: mkdir <directory>");
+        return;
+    }
+
+    /* Create a directory entry in ramfs */
+    struct super_block *sb = vfs_get_root_sb();
+    if (!sb || !sb->root_dentry) {
+        console_error_with_hint("mkdir: no filesystem", "VFS not initialized");
+        return;
+    }
+
+    /* Create a new dentry */
+    struct dentry *new_dentry = (struct dentry *)kmalloc(sizeof(*new_dentry));
+    if (!new_dentry) {
+        console_error_with_hint("mkdir: out of memory", NULL);
+        return;
+    }
+    memset(new_dentry, 0, sizeof(*new_dentry));
+
+    /* Copy name */
+    size_t i;
+    for (i = 0; args[i] && i < 255; i++)
+        ((char *)new_dentry->name)[i] = args[i];
+    ((char *)new_dentry->name)[i] = '\0';
+
+    /* Create inode */
+    struct inode *new_inode = (struct inode *)kmalloc(sizeof(*new_inode));
+    if (!new_inode) {
+        kfree(new_dentry);
+        console_error_with_hint("mkdir: out of memory", NULL);
+        return;
+    }
+    memset(new_inode, 0, sizeof(*new_inode));
+    new_inode->is_dir = 1;
+    new_inode->name = new_dentry->name;
+    new_dentry->inode = new_inode;
+
+    /* Add to root dentry children */
+    new_dentry->next = sb->root_dentry->child;
+    sb->root_dentry->child = new_dentry;
+
+    console_write_ansi(SHELL_CMD_OK);
+    console_write("Created directory: ");
+    console_write(args);
+    console_write_ansi(SGR_RESET);
+    console_putc('\n');
+}
+
+/* ================================================================
+ * df: Display disk space usage
+ * ================================================================ */
+static void do_df(const char *args) {
+    (void)args;
+    uint64_t total, fre, used;
+    mem_get_stats(&total, &fre, &used);
+
+    console_write_ansi(CLR_MUTED);
+    console_write("Filesystem     1K-blocks      Used Available Use%\n");
+    console_write_ansi(SGR_RESET);
+
+    console_write("ramfs          ");
+    print_uint64(total / 1024);
+    console_write("     ");
+    print_uint64(used / 1024);
+    console_write("     ");
+    console_write_ansi(CLR_SUCCESS);
+    print_uint64(fre / 1024);
+    console_write_ansi(SGR_RESET);
+    console_write("   ");
+    if (total > 0) {
+        print_int((int)(used * 100 / total));
+        console_write("%\n");
+    } else {
+        console_write("0%\n");
+    }
+}
+
+/* ================================================================
+ * wc: Count lines, words, and characters in a file
+ * ================================================================ */
+static void do_wc(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("wc: missing file", "Usage: wc <filename>");
+        return;
+    }
+
+    struct file *f = vfs_open(args, 0);
+    if (!f) {
+        console_error_with_hint("wc: cannot open", args);
+        return;
+    }
+
+    char buf[256];
+    ssize_t r;
+    int lines = 0, words = 0, chars = 0;
+    int in_word = 0;
+
+    while ((r = vfs_read(f, buf, sizeof(buf))) > 0) {
+        chars += (int)r;
+        for (ssize_t i = 0; i < r; i++) {
+            if (buf[i] == '\n') lines++;
+            if (buf[i] == ' ' || buf[i] == '\n' || buf[i] == '\t') {
+                in_word = 0;
+            } else if (!in_word) {
+                in_word = 1;
+                words++;
+            }
+        }
+    }
+    vfs_close(f);
+
+    console_write_ansi(CLR_INFO);
+    console_write("  ");
+    print_int(lines);
+    console_write("  ");
+    print_int(words);
+    console_write("  ");
+    print_int(chars);
+    console_write("  ");
+    console_write(args);
+    console_write_ansi(SGR_RESET);
+    console_putc('\n');
+}
+
+/* ================================================================
+ * head: Display first N lines of a file
+ * ================================================================ */
+static void do_head(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("head: missing file", "Usage: head [-n N] <filename>");
+        return;
+    }
+
+    int nlines = 10;  /* default: 10 lines */
+    const char *filename = args;
+
+    /* Parse -n N flag */
+    if (strncmp(args, "-n", 2) == 0) {
+        args += 2;
+        while (*args == ' ') args++;
+        nlines = atoi_simple(args);
+        while (*args >= '0' && *args <= '9') args++;
+        while (*args == ' ') args++;
+        filename = args;
+    }
+
+    if (!filename || !*filename) {
+        console_error_with_hint("head: missing file", "Usage: head [-n N] <filename>");
+        return;
+    }
+
+    struct file *f = vfs_open(filename, 0);
+    if (!f) {
+        console_error_with_hint("head: cannot open", filename);
+        return;
+    }
+
+    char buf;
+    ssize_t r;
+    int lines = 0;
+    console_write_ansi(CLR_INFO);
+    while ((r = vfs_read(f, &buf, 1)) > 0 && lines < nlines) {
+        console_putc(buf);
+        if (buf == '\n') lines++;
+    }
+    console_write_ansi(SGR_RESET);
+    vfs_close(f);
+}
+
+/* ================================================================
+ * tail: Display last N lines of a file
+ * ================================================================ */
+static void do_tail(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("tail: missing file", "Usage: tail [-n N] <filename>");
+        return;
+    }
+
+    int nlines = 10;  /* default: 10 lines */
+    const char *filename = args;
+
+    /* Parse -n N flag */
+    if (strncmp(args, "-n", 2) == 0) {
+        args += 2;
+        while (*args == ' ') args++;
+        nlines = atoi_simple(args);
+        while (*args >= '0' && *args <= '9') args++;
+        while (*args == ' ') args++;
+        filename = args;
+    }
+
+    if (!filename || !*filename) {
+        console_error_with_hint("tail: missing file", "Usage: tail [-n N] <filename>");
+        return;
+    }
+
+    struct file *f = vfs_open(filename, 0);
+    if (!f) {
+        console_error_with_hint("tail: cannot open", filename);
+        return;
+    }
+
+    /* Read entire file into memory (simple approach) */
+    char fbuf[4096];
+    ssize_t total = 0;
+    while (total < (ssize_t)sizeof(fbuf) - 1) {
+        ssize_t r = vfs_read(f, fbuf + total, 1);
+        if (r <= 0) break;
+        total++;
+    }
+    vfs_close(f);
+    fbuf[total] = '\0';
+
+    /* Count total lines */
+    int total_lines = 0;
+    for (ssize_t i = 0; i < total; i++) {
+        if (fbuf[i] == '\n') total_lines++;
+    }
+
+    /* Find start of last N lines */
+    int skip = (total_lines > nlines) ? total_lines - nlines : 0;
+    int line_count = 0;
+    ssize_t start = 0;
+    for (ssize_t i = 0; i < total; i++) {
+        if (line_count >= skip) break;
+        if (fbuf[i] == '\n') line_count++;
+        start = i + 1;
+    }
+
+    /* Print from start */
+    console_write_ansi(CLR_INFO);
+    for (ssize_t i = start; i < total; i++) {
+        console_putc(fbuf[i]);
+    }
+    console_write_ansi(SGR_RESET);
+}
+
 /* Wrapper functions for void commands to match cmd_func_t signature */
 static void do_help_cmd(const char *args)    { (void)args; do_help(); }
 static void do_about_cmd(const char *args)   { (void)args; do_about(); }
@@ -1268,6 +1925,18 @@ static void do_mem_cmd(const char *args)     { (void)args; do_mem(); }
 static void do_ls_cmd(const char *args)      { (void)args; do_ls(); }
 static void do_history_cmd(const char *args) { (void)args; do_history(); }
 static void do_perf_cmd(const char *args)    { do_perf(args); }
+static void do_uname_cmd(const char *args)   { do_uname(args); }
+static void do_free_cmd(const char *args)    { do_free(args); }
+static void do_uptime_cmd(const char *args)  { do_uptime(args); }
+static void do_env_cmd(const char *args)     { do_env(args); }
+static void do_which_cmd(const char *args)   { do_which(args); }
+static void do_pwd_cmd(const char *args)     { do_pwd(args); }
+static void do_cd_cmd(const char *args)      { do_cd(args); }
+static void do_mkdir_cmd(const char *args)   { do_mkdir(args); }
+static void do_df_cmd(const char *args)      { do_df(args); }
+static void do_wc_cmd(const char *args)      { do_wc(args); }
+static void do_head_cmd(const char *args)    { do_head(args); }
+static void do_tail_cmd(const char *args)    { do_tail(args); }
 
 /* Find command by name using binary search */
 static cmd_func_t cmd_find(const char *name, const char **args) {

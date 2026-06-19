@@ -36,6 +36,9 @@ static struct task_struct *idle_task  = NULL;  /* pid=0, idle loop */
 /* Per-CPU run queues (SMP) */
 struct run_queue per_cpu_rq[MAX_CPUS];
 
+/* Global minimum virtual runtime for CFS/EEVDF fair scheduling */
+uint64_t min_vruntime = 0;
+
 /* Current CPU ID helper (0 = BSP, increments for each AP) */
 static inline int current_cpu_id(void) {
     /* On SMP, we use GS segment to get cpu_data. On single-core, return 0.
@@ -177,6 +180,7 @@ void scheduler_init(void) {
     current->state      = TASK_RUNNING;
     current->priority   = 0;          /* lowest priority */
     current->time_slice = 1;
+    current->vruntime   = 0;
     current->cpu_mask   = 0xFF;       /* all CPUs */
     current->next       = current;
     current->parent     = NULL;
@@ -202,6 +206,7 @@ void scheduler_init(void) {
         init->parent     = current;
         init->children   = NULL;
         init->t_errno    = 0;
+        init->vruntime   = 0;
         strncpy(init->name, "init", sizeof(init->name) - 1);
         fd_table_init(init);
 
@@ -230,6 +235,10 @@ struct task_struct *create_task(void (*fn)(void)) {
     struct task_struct *t = (struct task_struct *)kmalloc(sizeof(*t));
     if (!t) return NULL;
     memset(t, 0, sizeof(*t));
+
+    /* Set default working directory */
+    t->cwd[0] = '/';
+    t->cwd[1] = '\0';
 
     /* Allocate a single page for the kernel stack. */
     void *stack_page = alloc_page();
@@ -315,7 +324,9 @@ struct task_struct *create_task(void (*fn)(void)) {
     t->stack_phys2 = NULL;
     t->state       = TASK_READY;
     t->priority    = 128;        /* default medium priority */
-    t->time_slice  = 10;         /* 10 ticks = 100ms at 100Hz */
+    t->time_slice  = BASE_SLICE * (256 - t->priority) / 256;
+    if (t->time_slice < 1) t->time_slice = 1;
+    t->vruntime    = min_vruntime;  /* start at current min to avoid starvation */
     t->cpu_mask    = 0xFF;       /* allow all CPUs */
     t->parent      = current;
     t->children    = NULL;
@@ -352,7 +363,15 @@ struct task_struct *create_task(void (*fn)(void)) {
 }
 
 /* ================================================================
- * Scheduler core
+ * Scheduler core — VRFair (CFS/EEVDF-inspired)
+ *
+ * Selects the task with the smallest vruntime among READY tasks.
+ * When a task is preempted (time slice exhausted), its vruntime
+ * is increased by its time_slice. Blocked tasks keep their low
+ * vruntime so they get scheduled quickly when they wake up.
+ *
+ * Falls back to simple round-robin if vruntime tracking is not
+ * practical (all tasks have same vruntime, e.g., at boot).
  * ================================================================ */
 
 void schedule(void) {
@@ -367,37 +386,73 @@ void schedule(void) {
         for (;;) asm volatile ("cli; hlt");
     }
 
-    struct task_struct *next = current->next;
+    /*
+     * Find the task with the smallest vruntime among READY tasks.
+     * This is the core of CFS/EEVDF: the task that has received the
+     * least CPU time runs next.
+     */
+    struct task_struct *next = NULL;
+    struct task_struct *candidate = rq->head;
+    uint64_t best_vruntime = UINT64_MAX;
     int scanned = 0;
-    int limit = rq->count + 1;  /* safety limit */
+    int limit = rq->count + 1;
 
-    while (next->state != TASK_READY && next->state != TASK_RUNNING) {
-        next = next->next;
-        scanned++;
-        if (next == current || scanned > limit) {
-            /*
-             * No runnable task found on this CPU.
-             * Switch to idle (pid=0) which loops with HLT.
-             * idle is always in the ready queue and always READY.
-             */
-            if (idle_task && idle_task != current && idle_task->state == TASK_READY) {
-                next = idle_task;
-                break;
+    do {
+        if ((candidate->state == TASK_READY || candidate->state == TASK_RUNNING)
+            && candidate != current) {
+            if (candidate->vruntime < best_vruntime) {
+                best_vruntime = candidate->vruntime;
+                next = candidate;
             }
-            /* Fallback: if even idle is broken, halt */
+        }
+        candidate = candidate->next;
+        scanned++;
+    } while (candidate != rq->head && scanned <= limit);
+
+    /* If no runnable task found (or only current), fall back to idle or round-robin */
+    if (!next) {
+        if (idle_task && idle_task != current && idle_task->state == TASK_READY) {
+            next = idle_task;
+        } else if (current->state == TASK_RUNNING) {
+            /* Only one runnable task — keep it running */
+            current->state = TASK_RUNNING;
+            return;
+        } else {
             log_printf(LOG_LEVEL_ERR, "schedule: CPU %d no runnable tasks, halting\n", cpu_id);
             for (;;) asm volatile ("cli; hlt");
         }
     }
 
     if (next == current) {
-        /* Only one runnable task — keep it running. */
         current->state = TASK_RUNNING;
         return;
     }
 
     struct task_struct *prev = current;
-    prev->state = (prev->state == TASK_RUNNING) ? TASK_READY : prev->state;
+
+    /*
+     * VRFair vruntime update:
+     * - If the task was preempted (still TASK_READY), add its time_slice
+     *   to vruntime to account for the CPU time it consumed.
+     * - If the task blocked (TASK_BLOCKED), don't penalize it — keep
+     *   vruntime low so it gets scheduled quickly when it wakes up.
+     * - Zombie tasks don't get vruntime updates.
+     */
+    int prev_state = prev->state;
+    if (prev_state == TASK_RUNNING) {
+        prev->state = TASK_READY;
+        /* Task was preempted or yielded: add time_slice to vruntime */
+        uint64_t slice_used = (uint64_t)(prev->time_slice > 0 ? prev->time_slice : 1);
+        prev->vruntime += slice_used;
+        perf_inc(PERF_VRUNTIME_UPDATES);
+    }
+    /* If prev->state was TASK_BLOCKED or TASK_ZOMBIE, leave vruntime unchanged */
+
+    /* Update min_vruntime to track the minimum vruntime across all ready tasks */
+    if (prev->state == TASK_READY && prev->vruntime < min_vruntime) {
+        min_vruntime = prev->vruntime;
+    }
+
     next->state = TASK_RUNNING;
     current = next;
 

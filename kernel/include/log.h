@@ -5,6 +5,7 @@
 #define LOG_H
 
 #include <stdarg.h>
+#include <stddef.h>
 
 enum { LOG_LEVEL_ERR = 0, LOG_LEVEL_WARN = 1, LOG_LEVEL_INFO = 2, LOG_LEVEL_DEBUG = 3 };
 
@@ -18,5 +19,12 @@ void log_vprintf(int level, const char *fmt, va_list ap);
  * Useful for panic-time dump or syslog export.
  */
 void log_ring_dump(void (*emit)(char c));
+
+/*
+ * log_ring_read: Copy log ring buffer contents into a user buffer.
+ * Returns the number of bytes copied (not including null terminator).
+ * Useful for /proc/kmsg and other consumer interfaces.
+ */
+int log_ring_read(char *buf, size_t size);
 
 #endif /* LOG_H */

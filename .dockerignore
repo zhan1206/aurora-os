@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+iso/
+*.iso
+
+# Git metadata
+.git/
+.gitignore
+
+# Object files
+*.o
+*.bin
+*.elf
+
+# Generated files
+compile_commands.json
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+.dockerignore

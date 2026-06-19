@@ -33,6 +33,8 @@
 #define ESPIPE   29   /* Illegal seek */
 #define EPIPE    32   /* Broken pipe */
 #define ENOSYS   38   /* Function not implemented */
+#define ENAMETOOLONG 36 /* File name too long */
+#define ERANGE   34   /* Math result not representable */
 #define ENOTSOCK 88   /* Socket operation on non-socket */
 #define EOVERFLOW 75  /* Value too large for defined data type */
 

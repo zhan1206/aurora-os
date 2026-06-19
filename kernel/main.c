@@ -22,9 +22,11 @@
 #include "block_dev.h"
 #include "perf.h"
 #include "sysctl.h"
+#include "procfs.h"
 #include "stack_protect.h"
 #include "aslr.h"
 #include "module.h"
+#include "rtc.h"
 #include "../boot/boot_info.h"
 
 /* ================================================================
@@ -176,7 +178,7 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_write_ansi(SGR_RESET);
     console_vpad(1);
 
-    int boot_step = 0, boot_total = 13;
+    int boot_step = 0, boot_total = 16;
     #define BOOT_STEP() do { \
         boot_step++; \
         console_write_ansi(BOOT_PROGRESS_FILL); \
@@ -262,6 +264,10 @@ void kernel_main(uint32_t magic, void *mb_info) {
 
     pit_init(100);
     console_status_ok("PIT timer (100 Hz)");
+    BOOT_STEP();
+
+    rtc_init();
+    console_status_ok("CMOS RTC driver");
     BOOT_STEP();
 
     perf_init();

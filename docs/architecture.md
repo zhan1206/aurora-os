@@ -2,14 +2,16 @@
 
 ## 1. 概述
 
-AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用宏内核（Monolithic Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载和硬件性能监控。
+AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用混合内核（Hybrid Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载和硬件性能监控。
 
-- **版本**: 3.0.0
+- **版本**: 3.0.2
 - **目标架构**: x86_64 (AMD64)
-- **内核类型**: 宏内核
+- **内核类型**: 混合内核（宏内核 + 可加载模块）
 - **启动方式**: Multiboot1 (GRUB2) / UEFI
 - **许可证**: MIT
 
+> **参考项目**: 本项目受 [CoolPotOS](https://cpos.plos-clan.org) 启发，在 procfs 设计、IRQ 追踪、内核模块签名、CMake 构建系统等方面借鉴了 CoolPotOS 的架构理念。
+>
 > **配套文档**: [架构可视化文档](architecture-visual.md) | [多媒体演示指南](demo-guide.md) | [模块功能说明](modules.md) | [API 文档](api.md)
 
 ## 2. 系统架构图
@@ -346,7 +348,57 @@ ASLR 随机化:
 
 ### 7.6 性能监控
 - 8 类性能计数器：上下文切换、系统调用计数/延迟、缺页、COW、内存分配、释放、中断计数
+- **IRQ 向量追踪**: 256 向量中断计数器，支持 `/proc/interrupts` 导出
 - RDTSC 时间戳计数器，PIT 辅助频率校准
 - 延迟统计：最小/最大/平均延迟
 - 集成到调度器、系统调用、缺页处理、内存分配、中断处理路径
 - `perf` 命令显示统计，`perf reset` 重置计数器
+
+### 7.7 procfs 虚拟文件系统（受 CoolPotOS 启发）
+- `/proc/cpuinfo` — CPU 信息
+- `/proc/meminfo` — 内存统计
+- `/proc/uptime` — 系统运行时间
+- `/proc/version` — 内核版本
+- `/proc/mounts` — 挂载点信息
+- `/proc/interrupts` — IRQ 向量计数（受 CoolPotOS /proc/interrupts 启发）
+- `/proc/filesystems` — 支持的文件系统类型
+- `/proc/cmdline` — 内核命令行参数
+- `/proc/kmsg` — 内核日志环形缓冲区（受 CoolPotOS 内核日志子系统启发）
+- `/proc/self/stat` — 当前进程状态
+
+## 8. 与 CoolPotOS 架构对比
+
+| 特性 | AuroraOS | CoolPotOS | 说明 |
+|------|----------|-----------|------|
+| 内核类型 | 混合内核 | 混合内核 | 均支持内核模块动态加载 |
+| 目标架构 | x86_64 | x86_64, riscv64, loongarch64, aarch64 | CoolPotOS 多架构支持更广 |
+| 调度器 | VRFair (CFS/EEVDF 启发) | EEVDF | 均采用公平调度策略 |
+| 构建系统 | Makefile + CMake | CMake | 均支持 CMake 构建 |
+| 代码质量 | clang-format + clang-tidy | clang-format + clang-tidy | 均采用静态分析工具 |
+| 模块签名 | HMAC 风格 | ECC 密钥验证 | 不同签名方案 |
+| procfs | 10 项 | 丰富 | 均受 Linux procfs 启发 |
+| 文件系统 | VFS + RamFS + EXT2 | VFS + procfs + pipefs + devtmpfs + squashfs | CoolPotOS 文件系统类型更丰富 |
+| 终端 | VGA + 帧缓冲 | flanterm 终端渲染 | 不同终端实现方案 |
+| 容器化 | Dockerfile | Dockerfile | 均支持可复现构建 |
+| 70+ POSIX syscall | 否 | 是 | CoolPotOS 可运行 gcc/lua/bash |
+| 多平台引导 | BIOS + UEFI | UEFI (Limine) | 启动方式不同 |
+
+## 9. 未来规划
+
+### 短期（v3.1）
+- **devtmpfs**: 设备文件系统，自动管理 `/dev` 目录
+- **squashfs**: 只读压缩文件系统，用于 rootfs 镜像
+- **/proc/<pid>/maps**: 进程内存映射信息
+- **更多 POSIX 系统调用**: 扩展至 30+ 系统调用
+
+### 中期（v3.5）
+- **多架构支持**: 初步支持 riscv64 架构
+- **NVMe 驱动**: 内核模块形式的 NVMe SSD 驱动
+- **sysfs**: 内核对象信息导出（设备、总线、驱动）
+- **内核模块独立编译**: 支持 `.km` 格式模块，类似 CoolPotOS 模块系统
+
+### 长期（v4.0）
+- **完整 POSIX 兼容层**: 运行 Linux 静态链接二进制文件
+- **多架构完备支持**: aarch64, loongarch64
+- **DRM/KMS 框架**: 基本图形支持
+- **网络协议栈**: TCP/IP 基础实现

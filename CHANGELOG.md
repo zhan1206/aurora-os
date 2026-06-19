@@ -1,5 +1,21 @@
 # AuroraOS Changelog
 
+## v3.0.3 (2026-06-19) — CoolPotOS-Inspired Enhancements & Documentation
+
+### CoolPotOS 学习成果集成
+- **build.sh**: 新增便捷构建脚本（受 CoolPotOS build.sh 启发），支持一键构建/运行/测试/格式化/Docker
+- **docs/architecture.md**: 新增与 CoolPotOS 架构对比（第 8 节），新增未来规划（第 9 节），更新内核类型为混合内核
+- **docs/modules.md**: 新增 procfs 模块（第 10 节）、性能监控模块（第 11 节）、模块签名模块（第 12 节）、内核日志模块（第 13 节）
+- **docs/demo-guide.md**: 新增 Demo 5.5（procfs 与高级 Shell 命令），涵盖 pwd/cd/mkdir/df/wc/head/tail/cat /proc/*
+- **README.md**: 更新核心特性、Shell 命令参考、procfs 条目说明、构建系统选项
+
+### 文档完善
+- 所有文档交叉引用验证通过，确保链接有效
+- 受 CoolPotOS 启发的功能在文档中标注来源
+- 更新架构文档版本号至 v3.0.2
+
+---
+
 ## v3.0.2 (2026-06-19) — Code Quality & Security Hardening
 
 ### Critical Bug Fixes

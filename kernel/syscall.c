@@ -446,11 +446,78 @@ static long sys_fork(void) {
 }
 
 /* ================================================================
+ * SYS_UNAME — Get system name and information
+ * ================================================================ */
+static long sys_uname(struct utsname *buf) {
+    if (!buf || !user_addr_range_ok(buf, sizeof(struct utsname))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    struct utsname u;
+    memset(&u, 0, sizeof(u));
+    strcpy(u.sysname, "AuroraOS");
+    strcpy(u.nodename, "aurora");
+    strcpy(u.release, "2.3.0");
+    strcpy(u.version, "#1 SMP 2026-06-19");
+    strcpy(u.machine, "x86_64");
+    if (copy_to_user(buf, &u, sizeof(u)) != 0) {
+        current->t_errno = EFAULT; return -1;
+    }
+    return 0;
+}
+
+/* ================================================================
+ * SYS_TIMES — Get process times (dummy values)
+ * ================================================================ */
+static long sys_times(struct tms *buf) {
+    if (!buf || !user_addr_range_ok(buf, sizeof(struct tms))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    struct tms t;
+    t.tms_utime = 0;
+    t.tms_stime = 0;
+    t.tms_cutime = 0;
+    t.tms_cstime = 0;
+    if (copy_to_user(buf, &t, sizeof(t)) != 0) {
+        current->t_errno = EFAULT; return -1;
+    }
+    return 0;
+}
+
+/* ================================================================
+ * SYS_GETCWD — Get current working directory
+ * ================================================================ */
+static long sys_getcwd(char *buf, size_t size) {
+    if (!buf || size == 0) { current->t_errno = EINVAL; return -1; }
+    if (!user_addr_range_ok(buf, size)) { current->t_errno = EFAULT; return -1; }
+    size_t len = strlen(current->cwd);
+    if (len + 1 > size) { current->t_errno = ERANGE; return -1; }
+    if (copy_to_user(buf, current->cwd, len + 1) != 0) {
+        current->t_errno = EFAULT; return -1;
+    }
+    return (long)len;
+}
+
+/* ================================================================
+ * SYS_CHDIR — Change current working directory
+ * ================================================================ */
+static long sys_chdir(const char *path) {
+    if (!path) { current->t_errno = EFAULT; return -1; }
+    char kpath[256];
+    int len = strncpy_from_user(kpath, path, sizeof(kpath) - 1);
+    if (len < 0) { current->t_errno = EFAULT; return -1; }
+    kpath[len] = '\0';
+    if (len > 255) { current->t_errno = ENAMETOOLONG; return -1; }
+    /* Simple: just store the path as-is (no path resolution yet) */
+    strcpy(current->cwd, kpath);
+    return 0;
+}
+
+/* ================================================================
  * Dispatcher
  * ================================================================ */
 
 /* Maximum valid syscall number */
-#define SYS_MAX_NUM  64
+#define SYS_MAX_NUM  128
 
 long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5, uint64_t a6) {
@@ -492,6 +559,10 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
         case SYS_SIGRETURN: ret = wrap_sys_sigreturn(); break;
         case SYS_PIPE:    ret = wrap_sys_pipe((int *)a1); break;
         case SYS_FORK:    ret = sys_fork(); break;
+        case SYS_UNAME:   ret = sys_uname((struct utsname *)a1); break;
+        case SYS_TIMES:   ret = sys_times((struct tms *)a1); break;
+        case SYS_GETCWD:  ret = sys_getcwd((char *)a1, (size_t)a2); break;
+        case SYS_CHDIR:   ret = sys_chdir((const char *)a1); break;
         default:
             current->t_errno = ENOSYS;
             ret = -1;

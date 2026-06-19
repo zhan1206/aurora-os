@@ -18,6 +18,9 @@ enum {
     SYS_MPROTECT  = 10,
     SYS_DUP       = 32,
     SYS_DUP2      = 33,
+    SYS_UNAME     = 63,
+    SYS_GETCWD    = 79,
+    SYS_CHDIR     = 80,
     SYS_GETDENTS  = 78,   /* getdents64 on Linux */
     SYS_FORK      = 57,
     SYS_PIPE      = 22,
@@ -28,6 +31,24 @@ enum {
     SYS_EXECVE    = 59,
     SYS_EXIT      = 60,
     SYS_WAITPID   = 61,
+    SYS_TIMES     = 100,
+};
+
+/* struct utsname — POSIX uname structure */
+struct utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+};
+
+/* struct tms — POSIX times structure */
+struct tms {
+    uint64_t tms_utime;
+    uint64_t tms_stime;
+    uint64_t tms_cutime;
+    uint64_t tms_cstime;
 };
 
 /* Called from syscall_entry.c (MSR setup) */

@@ -12,6 +12,7 @@
 #include "pagetable.h"
 #include "ext2.h"
 #include "block_dev.h"
+#include "procfs.h"
 
 /* ================================================================
  * fs_init — Initialize VFS, RamFS, embedded files, and launch init
@@ -26,6 +27,9 @@ void fs_init(void) {
         if (ext2_sb) {
             vfs_mount_root(ext2_sb);
             log_printf(LOG_LEVEL_INFO, "fs: ext2 mounted from ramdisk0\n");
+
+            /* Mount procfs at /proc */
+            procfs_init();
 
             embed_init();
 
@@ -45,6 +49,9 @@ void fs_init(void) {
         ramfs_add_file("hello.txt", "This is a ramfs file.\n");
         vfs_mount_root(ram);
         log_printf(LOG_LEVEL_INFO, "fs: RamFS mounted\n");
+
+        /* Mount procfs at /proc */
+        procfs_init();
 
         embed_init();
 

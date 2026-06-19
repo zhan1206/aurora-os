@@ -311,15 +311,105 @@ switch(num) → sys_read/sys_write/sys_fork/...
 
 | 类别 | 命令 | 功能 |
 |------|------|------|
-| 系统信息 | help, about, sysinfo, clear, welcome | 帮助、关于、系统仪表盘、清屏、欢迎界面 |
+| 系统信息 | help, about, sysinfo, uname, uptime, date, free, df, clear, welcome | 帮助、关于、系统仪表盘、清屏、欢迎界面 |
 | 进程管理 | ps, exec, wait, kill, exit | 进程列表、执行程序、等待子进程、发送信号、退出 |
-| 文件系统 | ls, cat, echo, cp, touch, rm | 文件列表、文件内容、打印文本、复制文件、创建文件、删除文件 |
+| 文件系统 | ls, ll, la, cat, echo, cp, touch, rm, pwd, cd, mkdir, wc, head, tail | 文件操作、目录管理、文本统计 |
 | 内存 | mem | 内存使用情况 |
+| 调试 | perf, mod, env, which | 性能统计、模块管理、环境变量、命令定位 |
 | 个性化 | theme, a11y, history, lock, date | 主题切换、无障碍、历史、锁屏、日期时间 |
 
 ---
 
-## 10. 模块依赖关系图
+## 10. procfs 虚拟文件系统模块 (procfs.c)
+
+**职责**: 提供 `/proc` 虚拟文件系统，运行时导出内核信息（受 CoolPotOS 启发）。
+
+**核心功能**:
+- `procfs_init()`: 注册 procfs 文件系统类型
+- 静态文件读取：cpuinfo, meminfo, uptime, version, mounts
+- **IRQ 追踪**: `/proc/interrupts` — 256 向量中断计数器（受 CoolPotOS 启发）
+- **文件系统列表**: `/proc/filesystems` — 已注册的文件系统类型
+- **内核命令行**: `/proc/cmdline` — 引导参数
+- **内核日志**: `/proc/kmsg` — 日志环形缓冲区内容（受 CoolPotOS 内核日志子系统启发）
+- **进程信息**: `/proc/self/stat` — 当前运行进程状态
+
+**关键数据结构**:
+```c
+struct procfs_entry {
+    char *name;
+    procfs_read_fn read;
+    int is_dir;
+};
+```
+
+---
+
+## 11. 性能监控模块 (perf.c)
+
+**职责**: 内核性能计数器与 IRQ 追踪（受 CoolPotOS /proc/interrupts 启发）。
+
+**核心功能**:
+- `perf_init()`: 初始化性能计数器，TSC 频率校准
+- `perf_start()` / `perf_end()`: 单次操作延迟测量
+- `perf_irq_inc()`: 递增 IRQ 向量计数器
+- `perf_irq_dump()`: 输出所有 IRQ 计数（用于 `/proc/interrupts`）
+- 8 类性能事件：上下文切换、系统调用、缺页、COW、内存分配/释放、中断
+
+**关键数据结构**:
+```c
+struct perf_counter {
+    uint64_t count;        // 事件计数
+    uint64_t total_latency; // 累积延迟
+    uint64_t min_latency;   // 最小延迟
+    uint64_t max_latency;   // 最大延迟
+    const char *name;       // 计数器名称
+};
+
+struct irq_counter {
+    uint64_t count;        // 中断计数
+    const char *name;      // IRQ 名称
+};
+```
+
+---
+
+## 12. 内核模块签名模块 (module_sign.c)
+
+**职责**: 内核模块签名验证，确保加载模块的完整性（受 CoolPotOS ECC 模块密钥验证机制启发）。
+
+**核心功能**:
+- `module_sign_verify()`: 验证模块签名头
+- `module_sign_is_enabled()`: 检查签名验证是否启用
+- 编译时可选：`MODULE_SIGN_CHECK` 宏控制
+
+**签名格式**:
+```
++------------------+
+| 模块代码 (.text)  |
++------------------+
+| 模块数据 (.data)  |
++------------------+
+| 签名头 (64 bytes) |
+|  - magic          |
+|  - version        |
+|  - signature[64]  |
++------------------+
+```
+
+---
+
+## 13. 内核日志模块 (log.c)
+
+**职责**: 分级日志输出与环形缓冲区管理（受 CoolPotOS 终端会话子系统启发）。
+
+**核心功能**:
+- `log_printf()`: 分级日志输出（DEBUG/INFO/WARN/ERR）
+- `log_ring_read()`: 读取环形缓冲区内容（用于 `/proc/kmsg`）
+- 环形缓冲区：LOG_BUF_SIZE 字节，循环写入
+
+---
+
+## 14. 模块依赖关系图
 
 ```
 main.c

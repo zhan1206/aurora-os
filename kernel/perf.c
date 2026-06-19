@@ -32,7 +32,8 @@ static const char *perf_event_names[PERF_MAX] = {
     "cow_count",
     "malloc_count",
     "free_count",
-    "irq_count"
+    "irq_count",
+    "vruntime_updates"
 };
 
 /* ================================================================
@@ -141,6 +142,12 @@ void perf_init(void) {
     for (int i = 0; i < PERF_MAX; i++) {
         perf.counters[i].name = perf_event_names[i];
         perf.counters[i].min_latency = UINT64_MAX;
+    }
+
+    /* Initialize IRQ counters */
+    for (int i = 0; i < IRQ_MAX_VECTORS; i++) {
+        perf.irq_counts[i].count = 0;
+        perf.irq_counts[i].name = NULL;
     }
 
     /* Record boot time via RDTSC */
@@ -368,4 +375,70 @@ uint64_t perf_tsc_to_ns(uint64_t tsc) {
     if (tsc_freq_hz == 0) return 0;
     /* tsc_ticks * 1e9 / tsc_freq_hz */
     return (tsc * 1000000000ULL) / tsc_freq_hz;
+}
+
+/* ================================================================
+ * IRQ counter tracking (like CoolPotOS /proc/interrupts)
+ * ================================================================ */
+
+void perf_irq_inc(int vector, const char *name) {
+    if (vector < 0 || vector >= IRQ_MAX_VECTORS) return;
+    __sync_fetch_and_add(&perf.irq_counts[vector].count, 1);
+    if (name && !perf.irq_counts[vector].name) {
+        perf.irq_counts[vector].name = name;
+    }
+}
+
+void perf_irq_dump(void) {
+    console_write_ansi(CLR_PRIMARY_BOLD);
+    console_write("           CPU0       \n");
+    console_write_ansi(SGR_RESET);
+
+    int has_any = 0;
+    for (int i = 0; i < IRQ_MAX_VECTORS; i++) {
+        if (perf.irq_counts[i].count > 0 || perf.irq_counts[i].name) {
+            has_any = 1;
+            break;
+        }
+    }
+
+    if (!has_any) {
+        console_write_ansi(CLR_MUTED);
+        console_write("  No interrupts recorded\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+
+    for (int i = 0; i < IRQ_MAX_VECTORS; i++) {
+        if (perf.irq_counts[i].count > 0 || perf.irq_counts[i].name) {
+            char buf[24];
+            char num[8];
+            itoa(i, num, sizeof(num));
+
+            console_write("  ");
+            console_write_ansi(CLR_INFO);
+            console_write(num);
+            console_write_ansi(SGR_RESET);
+            console_write(": ");
+
+            const char *name = perf.irq_counts[i].name;
+            if (name) {
+                console_write(name);
+                int nlen = 0;
+                for (const char *p = name; *p; p++) nlen++;
+                for (int j = nlen; j < 20; j++) console_putc(' ');
+            } else {
+                console_write_ansi(CLR_MUTED);
+                console_write("unknown");
+                console_write_ansi(SGR_RESET);
+                console_write("             ");
+            }
+
+            console_write_ansi(CLR_SUCCESS);
+            uitoa(perf.irq_counts[i].count, buf, sizeof(buf));
+            console_write(buf);
+            console_write_ansi(SGR_RESET);
+            console_putc('\n');
+        }
+    }
 }

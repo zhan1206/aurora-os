@@ -12,6 +12,7 @@
 #include "include/log.h"
 #include "sched.h"
 #include "perf.h"
+#include "rtc.h"
 
 /* Reschedule flag: set by interrupt handlers, checked at safe points.
  * SMP: use atomic operations to ensure visibility across cores. */
@@ -28,6 +29,9 @@ void pit_irq_c_handler(void *rsp) {
 
     /* Update uptime ticks */
     __sync_fetch_and_add(&perf.uptime_ticks, 1);
+
+    /* Update RTC uptime counter */
+    rtc_tick_update();
 
     /* Set flag instead of calling schedule() directly.
      * The interrupted code will check need_resched at its next

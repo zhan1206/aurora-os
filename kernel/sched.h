@@ -6,7 +6,8 @@
  *   - PID 0: idle task (always READY, loops with HLT).
  *   - PID 1: init task (never runs, reaps orphaned children).
  *   - PIDs 2+: user tasks, allocated via bitmap for O(1) lookup.
- *   - Scheduling: Round-Robin with configurable time slices.
+ *   - Scheduling: VRFair (CFS/EEVDF-inspired) with vruntime tracking.
+ *     Falls back to Round-Robin for compatibility.
  *   - Per-task errno (t_errno) for thread safety.
  *   - COW-aware fork: child shares parent's user pages via clone_current_pml4().
  *   - waitpid: true blocking via TASK_BLOCKED; child exit wakes parent.
@@ -24,6 +25,9 @@
 #include "types.h"
 
 #define MAX_FDS 16
+
+/* CFS/EEVDF-inspired scheduling constants */
+#define BASE_SLICE 10  /* base time slice in ticks */
 
 /* Task states */
 typedef enum {
@@ -72,6 +76,7 @@ struct task_struct {
     int       priority;        /* scheduling priority (0=lowest, 255=highest) */
     int       time_slice;      /* remaining ticks in current time slice */
     int       cpu_mask;        /* allowed CPU mask (bitmap, for SMP) */
+    uint64_t  vruntime;        /* virtual runtime for CFS/EEVDF fair scheduling */
 
     /* --- Fork state --- */
     int       is_fork_child;   /* 1 if this task is a fresh fork child (returns 0) */
@@ -81,6 +86,9 @@ struct task_struct {
 
     /* --- Signals --- */
     struct signal_state *sig;  /* per-task signal state (lazy alloc) */
+
+    /* --- Current working directory --- */
+    char      cwd[256];        /* current working directory path */
 
     /* --- Error handling --- */
     int       t_errno;         /* per-task errno (thread-safe) */
@@ -162,5 +170,6 @@ void fd_close_all(struct task_struct *t);
 
 extern struct task_struct *current;
 extern struct run_queue per_cpu_rq[MAX_CPUS];
+extern uint64_t min_vruntime;  /* minimum virtual runtime across all tasks */
 
 #endif /* SCHED_H */

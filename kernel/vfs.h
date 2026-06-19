@@ -9,6 +9,14 @@
 void vfs_init(void);
 int vfs_mount_root(struct super_block *sb);
 
+/*
+ * vfs_mount: Mount a filesystem at a given path.
+ * Creates a directory inode at the specified path (the parent must exist)
+ * and associates it with the given super_block's root inode.
+ * Returns 0 on success, -1 on failure.
+ */
+int vfs_mount(const char *path, struct super_block *sb);
+
 struct inode *vfs_lookup(const char *path);
 struct file *vfs_open(const char *path, int flags);
 ssize_t vfs_read(struct file *filp, void *buf, size_t count);

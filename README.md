@@ -150,6 +150,43 @@ make clean    # 清理所有构建产物
 make help     # 显示帮助信息
 ```
 
+### Docker Build（可复现构建环境）
+
+使用 Docker 在隔离环境中构建，无需手动安装依赖：
+
+```bash
+# 构建 Docker 镜像
+docker build -t aurora-os .
+
+# 运行构建并提取 ISO 产物
+docker run --rm -v $(pwd)/output:/output aurora-os
+```
+
+### CMake Build（可选构建系统）
+
+项目同时支持 Makefile 和 CMake 两种构建系统：
+
+```bash
+# 配置并构建（Release 模式）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# Debug 模式
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+
+# 生成 ISO 镜像
+cmake --build build --target iso
+
+# 在 QEMU 中运行
+cmake --build build --target run
+
+# 导出 compile_commands.json（供 clang-tidy 等工具使用）
+cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+```
+
+> **注意**: Makefile 和 CMake 两种构建方式互不冲突，可根据个人偏好选用。
+
 ---
 
 ## 运行
@@ -226,14 +263,17 @@ AuroraOS
 - **Slab 分配器**: 8 个大小类（32B–4096B），小对象高效复用
 - **E820 解析**: 支持 Multiboot1 和 Multiboot2 内存信息
 - **COW**: 写时复制页面克隆，按需分配
+- **ASLR**: 地址空间布局随机化（xorshift64 PRNG）
 
 ### 进程管理
 - **五状态模型**: RUNNING → READY → BLOCKED → ZOMBIE → DEAD
+- **VRFair 调度器**: CFS/EEVDF 启发式调度，基于 vruntime 公平调度
 - **进程树**: 父子进程链表 + init 收养孤儿
 - **阻塞 waitpid**: 真正阻塞等待，子进程退出时唤醒父进程
 - **Fork**: COW 页面克隆 + 完整寄存器状态复制
+- **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列，负载均衡
 
-### 系统调用（22 个）
+### 系统调用（22+ 个）
 
 | 类别 | 系统调用 |
 |------|----------|
@@ -249,12 +289,43 @@ AuroraOS
 ### 文件系统
 - **VFS 层**: 统一文件系统接口，dentry 缓存
 - **RamFS**: 内存文件系统（读/写/目录）
+- **EXT2**: 持久化文件系统（基本读/写/目录操作）
+- **procfs**: 虚拟文件系统（受 CoolPotOS 启发）
+  - `/proc/cpuinfo` - CPU 信息
+  - `/proc/meminfo` - 内存统计
+  - `/proc/uptime` - 系统运行时间
+  - `/proc/version` - 内核版本
+  - `/proc/mounts` - 挂载点信息
+  - `/proc/interrupts` - IRQ 向量计数
+  - `/proc/filesystems` - 支持的文件系统类型
+  - `/proc/cmdline` - 内核命令行参数
+  - `/proc/kmsg` - 内核日志环形缓冲区
+  - `/proc/self/stat` - 当前进程状态
 - **管道**: 匿名管道，环形缓冲区（4096 字节）
 
 ### 信号
 - **信号类型**: SIGINT(2), SIGKILL(9), SIGSEGV(11), SIGTERM(15), SIGCHLD(17)
 - **用户态 handler**: sigframe 压栈 + 跳板代码 + sigreturn 恢复
 - **默认动作**: 终止/忽略/核心转储
+
+### 安全机制
+- **ASLR**: 地址空间布局随机化
+- **Stack Protector**: 栈溢出保护（canary 检查）
+- **seccomp**: 系统调用过滤
+- **Capability**: 权能安全机制
+- **内核模块签名**: 模块签名验证（受 CoolPotOS 启发）
+
+### 性能监控
+- **性能计数器**: 上下文切换、系统调用、缺页、COW、IRQ 等指标
+- **IRQ 追踪**: 256 向量中断计数器（受 CoolPotOS /proc/interrupts 启发）
+- **TSC 校准**: 基于 PIT 的高精度时间戳计数器校准
+- **内核日志环形缓冲**: 持久化日志存储，支持 /proc/kmsg 导出
+
+### 内核模块系统
+- **ELF 可重定位模块加载**: 支持 .ko 文件动态加载
+- **符号解析**: 内核符号表 + 模块间符号引用
+- **x86_64 重定位**: R_X86_64_64/PC32/32/32S/RELATIVE
+- **模块签名**: HMAC 风格签名验证（可选）
 
 ### 终端与 Shell
 - **VGA 文本模式**: 80×25 彩色字符
@@ -263,6 +334,7 @@ AuroraOS
 - **历史记录**: 32 条环形缓冲区，上下箭头导航
 - **Tab 补全**: 命令名和文件名自动补全
 - **主题系统**: 3 种模式（Dark/Light/High Contrast）
+- **无障碍**: 高对比度模式、减少动画
 
 ---
 
@@ -273,6 +345,11 @@ AuroraOS
 | 系统信息 | `help` | 显示帮助 |
 | | `about` | 关于 AuroraOS |
 | | `sysinfo` | 系统仪表盘 |
+| | `uname` | 系统信息 |
+| | `uptime` | 系统运行时间 |
+| | `date` | 显示日期时间 |
+| | `free` | 内存使用情况 |
+| | `df` | 磁盘空间使用 |
 | | `clear` | 清屏 |
 | | `welcome` | 显示欢迎界面 |
 | 进程管理 | `ps` | 进程列表 |
@@ -280,18 +357,27 @@ AuroraOS
 | | `wait` | 等待子进程 |
 | | `kill <pid>` | 发送信号 |
 | | `exit` | 退出 Shell |
-| 文件系统 | `ls` | 文件列表 |
+| 文件系统 | `ls` / `ll` / `la` | 文件列表 |
 | | `cat <file>` | 查看文件内容 |
 | | `echo <text>` | 打印文本 |
 | | `touch <file>` | 创建空文件 |
 | | `rm <file>` | 删除文件 |
 | | `cp <src> <dst>` | 复制文件 |
+| | `pwd` | 当前工作目录 |
+| | `cd <dir>` | 切换目录 |
+| | `mkdir <dir>` | 创建目录 |
+| | `wc <file>` | 行/词/字符计数 |
+| | `head <file>` | 查看文件头部 |
+| | `tail <file>` | 查看文件尾部 |
 | 内存 | `mem` | 内存使用情况 |
+| 调试 | `perf` | 性能统计 |
+| | `mod list/load` | 模块管理 |
+| | `env` | 环境变量 |
+| | `which` | 命令定位 |
 | 个性化 | `theme [dark\|light\|hc]` | 切换主题 |
 | | `a11y [hc\|motion]` | 无障碍设置 |
 | | `history` | 命令历史 |
 | | `lock` | 锁屏 |
-| | `date` | 显示日期时间 |
 
 ---
 

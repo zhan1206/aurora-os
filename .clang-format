@@ -1,0 +1,20 @@
+---
+# AuroraOS clang-format configuration
+# BasedOnStyle: LLVM
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+PointerAlignment: Right
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+SpaceBeforeParens: ControlStatements
+IndentCaseLabels: true
+AccessModifierOffset: -4
+CommentPragmas: '^ IWYU pragma:'
