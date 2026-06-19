@@ -1,0 +1,13 @@
+CC := x86_64-linux-gnu-gcc
+CFLAGS := -O2 -nostdlib -ffreestanding
+
+all: hello shell
+
+hello: hello.c libc.c
+	$(CC) $(CFLAGS) -static -o hello hello.c libc.c
+
+shell: shell.c libc.c
+	$(CC) $(CFLAGS) -static -o shell shell.c libc.c
+
+clean:
+	rm -f hello shell

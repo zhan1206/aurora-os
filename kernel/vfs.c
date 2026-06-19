@@ -1,0 +1,229 @@
+/*
+ * vfs.c - Virtual File System with dentry cache + multi-level paths (FIXED)
+ *
+ * Phase 1: dentry cache and multi-level path resolution.
+ *   Paths like "/dir/subdir/file" are now supported.
+ *   dentry cache reduces repeated lookups.
+ */
+#include "vfs.h"
+#include "fs.h"
+#include "include/log.h"
+#include "include/userspace.h"
+#include "mem.h"
+#include <string.h>
+#include <stdint.h>
+
+static struct super_block *root_sb = NULL;
+static struct dentry *root_dentry = NULL;
+
+/* ================================================================
+ * Dentry cache
+ * ================================================================ */
+
+static struct dentry *dentry_alloc(const char *name, struct dentry *parent) {
+    struct dentry *d = (struct dentry *)kmalloc(sizeof(*d));
+    if (!d) return NULL;
+    memset(d, 0, sizeof(*d));
+
+    /* Copy the name — we own the memory now, caller can free theirs */
+    size_t name_len = 0;
+    for (const char *p = name; *p; ++p) name_len++;
+    char *name_copy = (char *)kmalloc(name_len + 1);
+    if (!name_copy) {
+        kfree(d);
+        return NULL;
+    }
+    memcpy(name_copy, name, name_len + 1);
+    d->name     = name_copy;
+    d->parent   = parent;
+    d->refcount = 1;
+    return d;
+}
+
+static void dentry_add_child(struct dentry *parent, struct dentry *child) {
+    child->next = parent->child;
+    parent->child = child;
+}
+
+static struct dentry *dentry_lookup_child(struct dentry *parent,
+                                           const char *name) {
+    struct dentry *d = parent->child;
+    while (d) {
+        if (d->name && strcmp(d->name, name) == 0)
+            return d;
+        d = d->next;
+    }
+    return NULL;
+}
+
+/* ================================================================
+ * VFS init
+ * ================================================================ */
+
+void vfs_init(void) {
+    root_sb    = NULL;
+    root_dentry = NULL;
+}
+
+struct super_block *vfs_get_root_sb(void) {
+    return root_sb;
+}
+
+int vfs_mount_root(struct super_block *sb) {
+    if (!sb || !sb->root) return -1;
+    root_sb = sb;
+
+    /* Create root dentry */
+    root_dentry = dentry_alloc("/", NULL);
+    if (!root_dentry) return -1;
+    root_dentry->inode = sb->root;
+    sb->root->dentry = root_dentry;
+    sb->root_dentry  = root_dentry;
+
+    log_printf(LOG_LEVEL_INFO, "VFS: mounted root fs '%s'\n", sb->fs_name);
+    return 0;
+}
+
+/* ================================================================
+ * vfs_lookup: Multi-level path resolution with dentry cache
+ *
+ * Path components are separated by '/'.
+ * Walks the dentry tree from root, creating new dentries as needed.
+ * For each component, asks the parent inode's lookup() op to
+ * resolve the child (if not already cached in dentry).
+ *
+ * Security: Rejects path traversal attempts (".." components).
+ * Paths must be absolute (start with '/').
+ * Component names are limited to 255 bytes.
+ *
+ * Returns the inode for the final component, or NULL.
+ * ================================================================ */
+
+/* Check if a path component is a traversal attempt ("." or "..") */
+static int is_path_traversal(const char *name, size_t len) {
+    if (len == 1 && name[0] == '.') return 1;
+    if (len == 2 && name[0] == '.' && name[1] == '.') return 1;
+    return 0;
+}
+
+struct inode *vfs_lookup(const char *path) {
+    if (!root_sb || !root_dentry) return NULL;
+    if (!path || path[0] != '/') return NULL;
+
+    struct dentry *cur = root_dentry;
+    const char *p = path + 1;  /* skip leading '/' */
+
+    /* Handle root path "/" */
+    if (*p == '\0') return cur->inode;
+
+    while (*p) {
+        /* Extract next component name */
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 0) { p++; continue; }  /* skip "//" */
+        if (len > 255) return NULL;        /* component too long */
+
+        /* Reject path traversal (".", "..") */
+        if (is_path_traversal(start, len)) {
+            log_printf(LOG_LEVEL_WARN, "VFS: path traversal rejected: %.*s\n",
+                       (int)len, start);
+            return NULL;
+        }
+
+        /* Use stack buffer to avoid kmalloc for temporary name */
+        char name[256];
+        memcpy(name, start, len);
+        name[len] = '\0';
+
+        /* Look up in dentry cache */
+        struct dentry *child = dentry_lookup_child(cur, name);
+
+        if (child && child->inode) {
+            /* Cache hit */
+            cur = child;
+        } else {
+            /* Cache miss: ask filesystem */
+            if (!child) {
+                child = dentry_alloc(name, cur);
+                if (!child) return NULL;
+                dentry_add_child(cur, child);
+            }
+
+            /* Ask parent inode to resolve this component */
+            if (cur->inode && cur->inode->ops && cur->inode->ops->lookup) {
+                cur->inode->ops->lookup(cur->inode, child);
+            }
+
+            if (!child->inode) {
+                /* Negative dentry: component not found */
+                return NULL;
+            }
+            cur = child;
+        }
+
+        if (*p == '/') p++;
+    }
+
+    return cur->inode;
+}
+
+/* ================================================================
+ * vfs_open / vfs_read / vfs_close (unchanged API)
+ * ================================================================ */
+
+struct file *vfs_open(const char *path, int flags) {
+    struct inode *inode = vfs_lookup(path);
+    if (!inode) return NULL;
+
+    struct file *filp = (struct file *)kmalloc(sizeof(*filp));
+    if (!filp) return NULL;
+    memset(filp, 0, sizeof(*filp));
+    filp->inode    = inode;
+    filp->flags    = flags;
+    filp->refcount = 1;
+
+    if (inode->ops && inode->ops->open) {
+        if (inode->ops->open(inode, filp) < 0) {
+            kfree(filp);
+            return NULL;
+        }
+    }
+    return filp;
+}
+
+ssize_t vfs_read(struct file *filp, void *buf, size_t count) {
+    if (!filp || !filp->inode || !filp->inode->ops || !filp->inode->ops->read)
+        return -1;
+    return filp->inode->ops->read(filp, buf, count, &filp->offset);
+}
+
+ssize_t vfs_write(struct file *filp, const void *buf, size_t count) {
+    if (!filp || !filp->inode || !filp->inode->ops || !filp->inode->ops->write)
+        return -1;
+    return filp->inode->ops->write(filp, buf, count, &filp->offset);
+}
+
+int vfs_close(struct file *filp) {
+    if (!filp) return -1;
+    if (filp->refcount <= 0) return -1;
+
+    /* Only actually close when last reference is dropped */
+    if (--filp->refcount > 0) return 0;
+
+    if (filp->inode && filp->inode->ops && filp->inode->ops->close)
+        filp->inode->ops->close(filp->inode, filp);
+    kfree(filp);
+    return 0;
+}
+
+/*
+ * vfs_file_dup: Increment refcount for fork/clone fd sharing.
+ * Returns 0 on success, -1 if filp is NULL.
+ */
+int vfs_file_dup(struct file *filp) {
+    if (!filp) return -1;
+    if (filp->refcount <= 0) return -1;
+    filp->refcount++;
+    return 0;
+}

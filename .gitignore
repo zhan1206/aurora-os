@@ -1,0 +1,38 @@
+# Build artifacts
+/build/
+os.iso
+/iso/
+*.o
+*.elf
+
+# Unikernel build artifacts
+/build_unikernel/
+/iso_unikernel/
+unikernel.iso
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.txt
+
+# Generated embedded files
+kernel/embedded_files.c
+
+# Compiled userspace binaries
+userspace/hello
+userspace/shell
+
+# AI assistant data
+.codebuddy/
+.trae/
+
+# OS files
+desktop.ini

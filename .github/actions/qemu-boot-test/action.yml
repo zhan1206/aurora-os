@@ -1,0 +1,150 @@
+name: 'QEMU Boot Test'
+description: 'Boot AuroraOS ISO in QEMU and verify kernel self-tests'
+inputs:
+  iso-path:
+    description: 'Path to the ISO file'
+    required: false
+    default: 'os.iso'
+  boot-timeout:
+    description: 'Maximum seconds to wait for boot'
+    required: false
+    default: '90'
+  memory:
+    description: 'Memory allocated to VM (MB)'
+    required: false
+    default: '256'
+  verify-self-tests:
+    description: 'Whether to verify kernel self-tests'
+    required: false
+    default: 'true'
+outputs:
+  booted:
+    description: 'Whether the kernel booted successfully'
+    value: ${{ steps.boot-check.outputs.booted }}
+  test-failures:
+    description: 'Number of self-test failures'
+    value: ${{ steps.test-verify.outputs.failures }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Boot QEMU
+      id: boot-check
+      shell: bash
+      timeout-minutes: 3
+      run: |
+        set -euo pipefail
+        ISO="${{ inputs.iso-path }}"
+        MEM="${{ inputs.memory }}"
+        TIMEOUT="${{ inputs.boot-timeout }}"
+
+        echo "::group::QEMU Boot — $ISO ($MEM MB, ${TIMEOUT}s timeout)"
+
+        qemu-system-x86_64 -m "${MEM}M" -cdrom "$ISO" -nographic -no-reboot \
+          -serial stdio 2>&1 | tee qemu_output.log &
+        QEMU_PID=$!
+
+        BOOT_OK=0
+        START_TIME=$(date +%s)
+        for i in $(seq 1 "$TIMEOUT"); do
+          if grep -q "System Ready" qemu_output.log 2>/dev/null; then
+            ELAPSED=$(($(date +%s) - START_TIME))
+            echo "PASS: Kernel booted successfully (${ELAPSED}s, ${i} polls)"
+            echo "booted=1" >> "$GITHUB_OUTPUT"
+            BOOT_OK=1
+            break
+          fi
+          if ! kill -0 $QEMU_PID 2>/dev/null; then
+            echo "FAIL: QEMU exited unexpectedly (exit code: $?)"
+            echo "Last 50 lines of output:"
+            tail -50 qemu_output.log
+            echo "booted=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          sleep 1
+        done
+
+        if [ "$BOOT_OK" != "1" ]; then
+          echo "FAIL: Kernel did not reach 'System Ready' within ${TIMEOUT}s"
+          echo "Last 50 lines of output:"
+          tail -50 qemu_output.log
+          echo "booted=0" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        # Give the kernel a moment to finish self-tests
+        sleep 2
+
+        # Cleanup
+        kill $QEMU_PID 2>/dev/null || true
+        wait $QEMU_PID 2>/dev/null || true
+
+        echo "::endgroup::"
+
+    - name: Verify self-tests
+      if: ${{ inputs.verify-self-tests == 'true' }}
+      id: test-verify
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        echo "::group::Self-Test Verification"
+
+        # Define all 16 expected self-tests
+        declare -a TESTS=(
+          "alloc_page/free_page single page"
+          "stress alloc:"
+          "re-alloc after stress"
+          "kmalloc/kfree all size classes"
+          "kmalloc(0) handled"
+          "get_kernel_cr3"
+          "clone_current_pml4"
+          "free_pagetable (COW-aware)"
+          "current task exists"
+          "create_task"
+          "waitpid + exit code collection"
+          "root filesystem mounted"
+          "vfs_lookup(/)"
+          "vfs_lookup nonexistent returns NULL"
+          "sys_pipe create"
+          "pipe write + read roundtrip"
+        )
+
+        FAILS=0
+        PASSED=0
+        for test_name in "${TESTS[@]}"; do
+          if grep -q "\[PASS\] $test_name" qemu_output.log 2>/dev/null; then
+            echo "  [PASS] $test_name"
+            PASSED=$((PASSED + 1))
+          else
+            echo "  [FAIL] $test_name"
+            FAILS=$((FAILS + 1))
+          fi
+        done
+
+        echo "failures=$FAILS" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "Results: $PASSED passed, $FAILS failed (of ${#TESTS[@]} total)"
+
+        if grep -q "All Tests Passed" qemu_output.log 2>/dev/null; then
+          echo "All Tests Passed banner: YES"
+        else
+          echo "All Tests Passed banner: NO (warning only)"
+        fi
+
+        if [ "$FAILS" -gt 0 ]; then
+          echo ""
+          echo "::error::$FAILS self-test(s) failed"
+          exit 1
+        fi
+
+        echo "::endgroup::"
+
+    - name: Generate JUnit report
+      if: ${{ inputs.verify-self-tests == 'true' }}
+      shell: bash
+      run: |
+        python3 scripts/generate_junit_report.py qemu_output.log test-results.xml 2>/dev/null || {
+          echo "::warning::JUnit report generation failed (non-fatal)"
+        }
