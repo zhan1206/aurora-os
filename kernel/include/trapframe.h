@@ -22,7 +22,8 @@ struct trapframe {
     uint64_t rsp; /* user RSP (for signal delivery) */
 };
 
-/* Global trapframe pointer for signal delivery (set by syscall_trap) */
-extern struct trapframe *current_tf;
+/* FIXED (v4.1.4): current_tf moved to task_struct->current_tf for
+ * SMP safety.  The global was shared across all CPUs, causing signal
+ * delivery to the wrong task on SMP systems.  (BUG 4.4) */
 
 #endif

@@ -39,17 +39,23 @@ int seccomp_set_filter(struct task_struct *task, struct seccomp_filter *filter) 
 
     spin_lock((spinlock_t*)&task->seccomp_lock);
 
-    /* If filter is NULL, remove the existing filter */
+    /*
+     * FIXED (v4.1.4): Reject NULL filter removal once a filter is
+     * installed.  seccomp is a one-way door: once a process installs
+     * a filter, it can only be replaced with a more restrictive one
+     * (or the same), never removed.  Passing NULL to remove the filter
+     * would completely bypass the security model.  (BUG 3.8)
+     */
     if (!filter) {
-        struct seccomp_filter *old = task->seccomp;
-        task->seccomp = NULL;
-        spin_unlock((spinlock_t*)&task->seccomp_lock);
-
-        if (old) {
-            kfree(old);
-            log_printf(LOG_LEVEL_INFO, "seccomp: filter removed for pid=%d\n",
+        /* If a filter is already installed, reject the removal */
+        if (task->seccomp) {
+            spin_unlock((spinlock_t*)&task->seccomp_lock);
+            log_printf(LOG_LEVEL_WARN, "seccomp: pid=%d attempted to remove filter\n",
                        task->pid);
+            return -1;
         }
+        /* No filter installed, nothing to remove — OK */
+        spin_unlock((spinlock_t*)&task->seccomp_lock);
         return 0;
     }
 

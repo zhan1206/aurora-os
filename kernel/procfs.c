@@ -600,8 +600,11 @@ static ssize_t procfs_read(struct file *filp, void *buf, size_t count,
     /* Only support reading from the beginning */
     if (*offset > 0) return 0;
 
-    /* Generate content into a temporary buffer, then copy to user buffer */
-    char tmp[1024];
+    /* Generate content into a temporary buffer, then copy to user buffer.
+     * FIXED (v4.1.4): Increased buffer from 1024 to 4096 to prevent
+     * truncation of large procfs entries like /proc/interrupts which
+     * can output up to ~10KB for 256 vectors.  (BUG 3.7) */
+    char tmp[4096];
     int len = 0;
 
     if (data->type == PROC_INODE_FILE && data->entry && data->entry->read_func) {

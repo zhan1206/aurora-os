@@ -6,6 +6,7 @@
 #include "pagetable.h"
 #include "user.h"
 #include "aslr.h"
+#include "sched.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -761,6 +762,22 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
         }
 
         /* zero BSS beyond filesz up to memsz (already zeroed by memset on pages) */
+
+        /* FIXED (v4.1.4): Register VMA for this PT_LOAD segment so the
+         * page fault handler can validate lazy allocations.  The VMA
+         * is temporarily registered on 'current' (the calling task) and
+         * will be transferred to the new task in create_user_task_from_entry.
+         * (BUG 3.1) */
+        {
+            uint64_t vma_flags = VM_READ;
+            if (phdrs[i].p_flags & PF_W) vma_flags |= VM_WRITE;
+            if (phdrs[i].p_flags & PF_X) vma_flags |= VM_EXEC;
+            uint64_t vma_start = page_base;
+            uint64_t vma_end   = page_base + pages * 4096;
+            extern int vma_register(struct task_struct *task, uint64_t start, uint64_t end, uint64_t flags);
+            extern struct task_struct *current;
+            vma_register(current, vma_start, vma_end, vma_flags);
+        }
     }
 
     /* Apply relocations for PIE executables */

@@ -25,7 +25,9 @@
 #include <string.h>
 
 /* Trapframe pointer for signal delivery */
-struct trapframe *current_tf = NULL;
+/* FIXED (v4.1.4): current_tf moved to task_struct->current_tf for
+ * SMP safety.  (BUG 4.4) */
+#define CURRENT_TF()  ((struct trapframe *)current->current_tf)
 
 /* ================================================================
  * I/O syscalls
@@ -44,13 +46,25 @@ static int fd_validate(int fd, uint32_t required_cap) {
     if (fd < 0 || fd >= MAX_FDS) return -EBADF;
     if (current->fd_table[fd] == (uintptr_t)-1) return -EBADF;
 
-    /* Check if this is a capability entry (starts with CAP_ENTRY_MAGIC) */
-    struct cap_entry *entry = (struct cap_entry *)current->fd_table[fd];
-    if (entry->magic == CAP_ENTRY_MAGIC) {
-        if (required_cap && (entry->caps & required_cap) != required_cap)
-            return -EACCES;
+    /*
+     * FIXED (v4.1.4): Type-tag check for fd_table entries.
+     * fd_table stores both file* and cap_entry* pointers.  The lower
+     * 2 bits of any aligned pointer are always 0, so we use bit 0 as
+     * a type tag: 0 = file pointer, 1 = capability entry.
+     * Without this tag, a file pointer could be mistaken for a
+     * cap_entry if its first bytes happen to match CAP_ENTRY_MAGIC,
+     * leading to type confusion and potential UAF.  (BUG 3.9)
+     */
+    uintptr_t entry_raw = current->fd_table[fd];
+    if (entry_raw & 1) {
+        /* Capability entry: strip tag bit, validate magic */
+        struct cap_entry *entry = (struct cap_entry *)(entry_raw & ~1ULL);
+        if (entry->magic == CAP_ENTRY_MAGIC) {
+            if (required_cap && (entry->caps & required_cap) != required_cap)
+                return -EACCES;
+        }
     }
-    /* Raw file pointers have no capability restrictions */
+    /* Raw file pointers (tag bit 0) have no capability restrictions */
     return 0;
 }
 
@@ -362,9 +376,12 @@ static long sys_mmap(void *addr, size_t length, int prot, int flags,
         current->t_errno = ENOMEM; return -1;
     }
 
-    /* Track physical pages for cleanup on failure */
-    void *phys_pages[64];  /* reasonable upper bound for mmap */
-    if (num_pages > 64) { current->t_errno = ENOMEM; return -1; }
+    /* FIXED (v4.1.4): Use dynamic allocation for phys_pages array
+     * instead of a hardcoded 64-page stack limit.  Large mmap calls
+     * (e.g., > 256KB) would fail with the old limit.  (BUG 4.10) */
+    void **phys_pages = (void **)kmalloc(num_pages * sizeof(void *));
+    if (!phys_pages) { current->t_errno = ENOMEM; return -1; }
+    size_t alloced_count = 0;
 
     uint64_t pte_flags = PTE_USER;
     if (prot & 2) pte_flags |= PTE_RW;      /* PROT_WRITE */
@@ -374,28 +391,42 @@ static long sys_mmap(void *addr, size_t length, int prot, int flags,
         void *phys = alloc_page();
         if (!phys) {
             /* Cleanup previously mapped pages on allocation failure */
-            for (size_t j = 0; j < i; j++) {
+            for (size_t j = 0; j < alloced_count; j++) {
                 uint64_t va = map_va + j * PAGE_SIZE;
                 unmap_page(current->cr3, va);
                 free_page(phys_pages[j]);
             }
+            kfree(phys_pages);
             current->t_errno = ENOMEM;
             return -1;
         }
-        phys_pages[i] = phys;
+        phys_pages[alloced_count++] = phys;
         memset(phys, 0, PAGE_SIZE);
         if (map_page(current->cr3, map_va + i * PAGE_SIZE,
                      (uint64_t)(uintptr_t)phys, pte_flags) != 0) {
             free_page(phys);
+            alloced_count--;  /* this page wasn't successfully tracked */
             /* Cleanup previously mapped pages on map failure */
-            for (size_t j = 0; j < i; j++) {
+            for (size_t j = 0; j < alloced_count; j++) {
                 uint64_t va = map_va + j * PAGE_SIZE;
                 unmap_page(current->cr3, va);
                 free_page(phys_pages[j]);
             }
+            kfree(phys_pages);
             current->t_errno = ENOMEM;
             return -1;
         }
+    }
+
+    kfree(phys_pages);
+
+    /* FIXED (v4.1.4): Register VMA for the mapped region so the page
+     * fault handler can validate lazy allocations.  (BUG 3.1) */
+    {
+        uint64_t vma_flags = VM_READ;
+        if (prot & 2) vma_flags |= VM_WRITE;
+        if (prot & 4) vma_flags |= VM_EXEC;
+        vma_register(current, map_va, map_va + num_pages * PAGE_SIZE, vma_flags);
     }
 
     return (long)map_va;
@@ -593,20 +624,21 @@ long sys_fork(void) {
      * The 13 regs are at sp[0..12] in syscall_entry push order:
      *   r15,r14,r13,r12,r11,r10,r9,r8,rsi,rdi,rdx,rcx,rax
      */
-    if (current_tf && child->rsp) {
+    if (current->current_tf && child->rsp) {
+        struct trapframe *parent_tf = (struct trapframe *)current->current_tf;
         uint64_t *child_sp = (uint64_t *)child->rsp;
-        child_sp[0]  = current_tf->r15;
-        child_sp[1]  = current_tf->r14;
-        child_sp[2]  = current_tf->r13;
-        child_sp[3]  = current_tf->r12;
-        child_sp[4]  = current_tf->r11;
-        child_sp[5]  = current_tf->r10;
-        child_sp[6]  = current_tf->r9;
-        child_sp[7]  = current_tf->r8;
-        child_sp[8]  = current_tf->rsi;
-        child_sp[9]  = current_tf->rdi;
-        child_sp[10] = current_tf->rdx;
-        child_sp[11] = current_tf->rcx;   /* user RIP */
+        child_sp[0]  = parent_tf->r15;
+        child_sp[1]  = parent_tf->r14;
+        child_sp[2]  = parent_tf->r13;
+        child_sp[3]  = parent_tf->r12;
+        child_sp[4]  = parent_tf->r11;
+        child_sp[5]  = parent_tf->r10;
+        child_sp[6]  = parent_tf->r9;
+        child_sp[7]  = parent_tf->r8;
+        child_sp[8]  = parent_tf->rsi;
+        child_sp[9]  = parent_tf->rdi;
+        child_sp[10] = parent_tf->rdx;
+        child_sp[11] = parent_tf->rcx;   /* user RIP */
         child_sp[12] = 0;                  /* child returns 0 (but also set in syscall_trap) */
     }
 
@@ -625,6 +657,9 @@ long sys_fork(void) {
             memcpy(child->sig->actions, current->sig->actions, sizeof(current->sig->actions));
         }
     }
+
+    /* FIXED (v4.1.4): Clone parent's VMAs to child (BUG 3.1) */
+    vma_clone(current, child);
 
     return child->pid;  /* parent gets child PID */
 }
@@ -1022,19 +1057,22 @@ static long sys_nanosleep(const struct timespec *req, struct timespec *rem) {
     uint64_t start_ticks = perf.uptime_ticks;
 
     /*
-     * NOTE: nanosleep does not currently handle EINTR (interruption by
-     * a signal).  If a signal is delivered to the process while it is
-     * sleeping, the sleep is not interrupted and the remaining time is
-     * not reported.  POSIX requires nanosleep to return -1 with errno
-     * set to EINTR when interrupted by a signal handler.  A future
-     * implementation should check current->sig->pending after schedule()
-     * returns and, if a signal was delivered, calculate the remaining
-     * sleep time and return -EINTR.
+     * FIXED (v4.1.4): Handle EINTR (interruption by signal).
+     * After schedule() returns, check if a signal is pending.
+     * If a signal was delivered, nanosleep returns -1 with errno
+     * set to EINTR and reports the remaining sleep time in rem.
+     * (BUG 4.6)
      */
     /* Set sleep_until and block */
     current->sleep_until = start_ticks + target_ticks;
     current->state = TASK_BLOCKED;
     schedule();
+
+    /* Check if we were woken by a signal */
+    int interrupted = 0;
+    if (current->sig && current->sig->pending) {
+        interrupted = 1;
+    }
 
     /* Calculate remaining time if interrupted early */
     if (rem && user_addr_range_ok(rem, sizeof(struct timespec))) {
@@ -1049,6 +1087,11 @@ static long sys_nanosleep(const struct timespec *req, struct timespec *rem) {
             struct timespec rts = {0, 0};
             copy_to_user(rem, &rts, sizeof(rts));
         }
+    }
+
+    if (interrupted) {
+        current->t_errno = EINTR;
+        return -1;
     }
 
     return 0;
@@ -1140,6 +1183,16 @@ static long sys_ioctl(int fd, int request, void *arg) {
     struct file *filp = (struct file *)fd_get(current, fd);
     if (!filp) { current->t_errno = EBADF; return -1; }
 
+    /*
+     * FIXED (v4.1.4): Validate the ioctl argument pointer is in user
+     * address space.  Previously the raw user pointer was passed
+     * directly to vfs_ioctl without any validation, bypassing address
+     * checks and potentially allowing kernel access to arbitrary memory
+     * without SMAP protection.  (BUG 3.4)
+     */
+    if (arg && !user_addr_range_ok(arg, 256)) {
+        current->t_errno = EFAULT; return -1;
+    }
     int ret = vfs_ioctl(filp, request, arg);
     if (ret < 0) { current->t_errno = ENOTTY; return -1; }
     return ret;
@@ -1176,11 +1229,25 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
                 ready++;
             }
         } else if (kfds[i].fd > 0) {
-            /* Other fds: check if they exist and are readable */
+            /*
+             * FIXED (v4.1.4): Only return POLLIN if the file has data
+             * available to read (offset < size).  Previously, all valid
+             * fds were marked POLLIN, violating POSIX poll() semantics.
+             * (BUG 5.9)
+             */
             struct file *filp = (struct file *)fd_get(current, kfds[i].fd);
             if (filp) {
-                kfds[i].revents |= POLLIN;
-                ready++;
+                /* Check if data is available: file offset < file size */
+                if (filp->inode && filp->offset < (off_t)filp->inode->size) {
+                    kfds[i].revents |= POLLIN;
+                    ready++;
+                }
+                /* Also check for POLLOUT: writable files */
+                kfds[i].revents |= POLLOUT;
+                /* Check for errors (e.g., closed fd) */
+                if (kfds[i].events & POLLHUP) {
+                    /* POLLHUP not supported yet */
+                }
             }
         }
     }
@@ -1511,6 +1578,12 @@ static long sys_brk(void *addr) {
         current->t_errno = EINVAL;
         return -1;
     }
+
+    /* FIXED (v4.1.4): Register VMA for the brk region (BUG 3.1) */
+    if (new_brk > current->brk) {
+        vma_register(current, 0x70000000ULL, new_brk, VM_READ | VM_WRITE);
+    }
+
     current->brk = new_brk;
     return (long)new_brk;
 }
@@ -1568,6 +1641,9 @@ static long sys_sbrk(intptr_t increment) {
             alloced_pages[alloced_count++] = phys;
         }
         kfree(alloced_pages);
+
+        /* FIXED (v4.1.4): Register VMA for expanded brk region (BUG 3.1) */
+        vma_register(current, 0x70000000ULL, new_brk, VM_READ | VM_WRITE);
     }
 
     current->brk = new_brk;
@@ -2026,8 +2102,8 @@ void syscall_trap(struct trapframe *tf) {
     uint64_t a5   = tf->r8;   /* 5th syscall arg */
     uint64_t a6   = tf->r9;   /* 6th syscall arg */
 
-    /* Set global trapframe for signal delivery */
-    current_tf = tf;
+    /* Set per-task trapframe for signal delivery (FIXED v4.1.4: BUG 4.4) */
+    current->current_tf = tf;
 
     /*
      * Fork child returns 0 to user space.
@@ -2055,5 +2131,5 @@ void syscall_trap(struct trapframe *tf) {
     }
 
     check_signals();
-    current_tf = NULL;
+    current->current_tf = NULL;
 }

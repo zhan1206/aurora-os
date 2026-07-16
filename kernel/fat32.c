@@ -379,11 +379,20 @@ static char utf16_to_ascii(uint16_t ch) {
 static int fat32_parse_lfn(const struct fat32_lfn_entry *lfn_entries,
                            int num_entries, char *out, int out_max) {
     int pos = 0;
+    /*
+     * FIXED (v4.1.4): LFN entries are stored in reverse order on disk —
+     * the last entry (highest sequence number) comes first physically.
+     * The loop iterates from the last entry (index num_entries-1) to the
+     * first (index 0), so the order check must use num_entries - i instead
+     * of i + 1.  Previously, the check expected ascending order numbers
+     * but the buffer has descending order, causing all LFN reads to fail.
+     * (BUG-007 / 2.5)
+     */
     for (int i = num_entries - 1; i >= 0; i--) {
         const struct fat32_lfn_entry *lfn = &lfn_entries[i];
         uint8_t order = lfn->order & 0x3F;
 
-        if (order != (uint8_t)(i + 1))
+        if (order != (uint8_t)(num_entries - i))
             return 0;
 
         /* name1: 5 UTF-16 characters */

@@ -36,6 +36,16 @@
 
 static uint64_t kernel_cr3 = 0;
 
+/*
+ * FIXED (v4.1.4): Global page table lock for SMP safety.
+ * Protects map_page, unmap_page, and clone_current_pml4 from
+ * concurrent modification of page table structures.  Without this
+ * lock, concurrent page table walks on different CPUs can observe
+ * partially-updated intermediate entries, leading to page table
+ * corruption.  (BUG 4.1)
+ */
+static spinlock_t pt_lock = {0};
+
 /* Page table entry flags (internal — use public PTE_* from pagetable.h for user-visible flags) */
 #define PTE_ACCESSED 0x020ULL
 #define PTE_DIRTY    0x040ULL
@@ -45,7 +55,14 @@ static uint64_t kernel_cr3 = 0;
  * Does NOT include PTE_DIRTY (bit 6) — that bit is reserved in non-PT entries
  * and setting it would cause a #PF (reserved bit violation).
  */
-#define PTE_STRUCT_FLAGS       (PTE_PRESENT | PTE_RW | PTE_ACCESSED)
+/*
+ * FIXED (v4.1.4): PTE_STRUCT_FLAGS now includes PTE_USER for intermediate
+ * page table entries.  x86_64 checks the U/S bit at every level of the
+ * page table walk.  Without PTE_USER, any user-mode access to a page
+ * mapped through these intermediate tables would trigger a #PF.
+ * (BUG-001 / 2.1)
+ */
+#define PTE_STRUCT_FLAGS       (PTE_PRESENT | PTE_RW | PTE_ACCESSED | PTE_USER)
 
 /* ================================================================
  * CR3 / TLB
@@ -274,6 +291,9 @@ static uint64_t split_huge_page(uint64_t *pd, int pd_idx, uint64_t vaddr) {
  * ================================================================ */
 
 int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+    uint64_t irq_flags = irq_save();
+    spin_lock(&pt_lock);
+
     uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
     uint64_t pdpt_idx = (vaddr >> 30) & 0x1FF;
     uint64_t pd_idx   = (vaddr >> 21) & 0x1FF;
@@ -295,7 +315,7 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
 
     if (!(entry & PTE_PRESENT)) {
         pdpt_phys = alloc_table_page();
-        if (!pdpt_phys) return -1;
+        if (!pdpt_phys) goto fail;
         pml4[pml4_idx] = pdpt_phys | struct_flags;
     } else {
         pdpt_phys = entry & PTE_ADDR_MASK;
@@ -307,7 +327,7 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
 
     if (!(entry & PTE_PRESENT)) {
         pd_phys = alloc_table_page();
-        if (!pd_phys) return -1;
+        if (!pd_phys) goto fail;
         pdpt[pdpt_idx] = pd_phys | struct_flags;
     } else {
         pd_phys = entry & PTE_ADDR_MASK;
@@ -319,12 +339,12 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
 
     if (!(entry & PTE_PRESENT)) {
         pt_phys = alloc_table_page();
-        if (!pt_phys) return -1;
+        if (!pt_phys) goto fail;
         pd[pd_idx] = pt_phys | struct_flags;
     } else if (entry & PTE_PS) {
         /* 2MB huge page: split into 512 × 4KB pages */
         pt_phys = split_huge_page(pd, (int)pd_idx, vaddr);
-        if (!pt_phys) return -1;
+        if (!pt_phys) goto fail;
     } else {
         pt_phys = entry & PTE_ADDR_MASK;
     }
@@ -368,7 +388,15 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
     page_ref_inc(paddr & PTE_ADDR_MASK);
 
     invlpg(vaddr);
+
+    spin_unlock(&pt_lock);
+    irq_restore(irq_flags);
     return 0;
+
+fail:
+    spin_unlock(&pt_lock);
+    irq_restore(irq_flags);
+    return -1;
 }
 
 int map_user_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
@@ -396,25 +424,28 @@ int map_range(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t size,
  * Returns silently if the page was not mapped.
  */
 void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
+    uint64_t irq_flags = irq_save();
+    spin_lock(&pt_lock);
+
     uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
     uint64_t pdpt_idx = (vaddr >> 30) & 0x1FF;
     uint64_t pd_idx   = (vaddr >> 21) & 0x1FF;
     uint64_t pt_idx   = (vaddr >> 12) & 0x1FF;
 
     uint64_t *pml4 = phys_to_virt(pml4_phys);
-    if (!(pml4[pml4_idx] & PTE_PRESENT)) return;
+    if (!(pml4[pml4_idx] & PTE_PRESENT)) goto out;
 
     uint64_t *pdpt = phys_to_virt(pml4[pml4_idx] & PTE_ADDR_MASK);
-    if (!(pdpt[pdpt_idx] & PTE_PRESENT)) return;
+    if (!(pdpt[pdpt_idx] & PTE_PRESENT)) goto out;
 
     uint64_t *pd = phys_to_virt(pdpt[pdpt_idx] & PTE_ADDR_MASK);
-    if (!(pd[pd_idx] & PTE_PRESENT)) return;
+    if (!(pd[pd_idx] & PTE_PRESENT)) goto out;
 
     /* Skip 2MB huge pages — unmap_page only handles 4KB pages */
-    if (pd[pd_idx] & PTE_PS) return;
+    if (pd[pd_idx] & PTE_PS) goto out;
 
     uint64_t *pt = phys_to_virt(pd[pd_idx] & PTE_ADDR_MASK);
-    if (!(pt[pt_idx] & PTE_PRESENT)) return;
+    if (!(pt[pt_idx] & PTE_PRESENT)) goto out;
 
     /* Clear the PTE and flush TLB on all CPUs.
      *
@@ -424,6 +455,10 @@ void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
      * leading to use-after-free or access to freed physical pages. */
     pt[pt_idx] = 0;
     smp_tlb_shootdown(vaddr);
+
+out:
+    spin_unlock(&pt_lock);
+    irq_restore(irq_flags);
 }
 
 /* ================================================================
@@ -441,9 +476,14 @@ void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
  * ================================================================ */
 
 uint64_t clone_current_pml4(void) {
+    uint64_t irq_flags = irq_save();
+    spin_lock(&pt_lock);
+
     void *newp = alloc_page();
     if (!newp) {
         log_printf(LOG_LEVEL_WARN, "pagetable: clone_current_pml4: alloc_page failed\n");
+        spin_unlock(&pt_lock);
+        irq_restore(irq_flags);
         return kernel_cr3;
     }
 
@@ -578,12 +618,16 @@ uint64_t clone_current_pml4(void) {
 
     log_printf(LOG_LEVEL_DEBUG, "pagetable: COW-cloned pml4 %p -> %p\n",
                (void *)(uintptr_t)current_cr3, (void *)(uintptr_t)new_cr3);
+    spin_unlock(&pt_lock);
+    irq_restore(irq_flags);
     return new_cr3;
 
 fail:
     /* On failure, free the partially-built new PML4 */
     log_printf(LOG_LEVEL_ERR, "pagetable: clone_current_pml4: allocation failed\n");
     free_pagetable(new_cr3);
+    spin_unlock(&pt_lock);
+    irq_restore(irq_flags);
     return kernel_cr3;
 }
 
@@ -647,6 +691,87 @@ int user_page_present(uint64_t vaddr) {
 }
 
 /*
+ * FIXED (v4.1.4): vma_find - Check if a user address falls within any
+ * registered VMA.  This prevents lazy allocation from bypassing guard
+ * pages.  Without this check, any not-present page fault in user space
+ * would trigger allocation, defeating stack guard page protection.
+ * (BUG 3.1)
+ */
+int vma_find(struct task_struct *task, uint64_t addr) {
+    struct vm_area *vma = task->vm_areas;
+    while (vma) {
+        if (addr >= vma->vm_start && addr < vma->vm_end)
+            return 1;
+        vma = vma->next;
+    }
+    return 0;
+}
+
+/*
+ * vma_register: Register a new VMA for a task.  The range [start, end)
+ * must be page-aligned and within user space.
+ * (BUG 3.1)
+ */
+int vma_register(struct task_struct *task, uint64_t start, uint64_t end, uint64_t flags) {
+    if (!task) return -1;
+    if (start >= end) return -1;
+    if (end > 0x00007FFFFFFFFFFFULL) return -1;
+
+    struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(*vma));
+    if (!vma) return -1;
+    memset(vma, 0, sizeof(*vma));
+
+    vma->vm_start = start;
+    vma->vm_end   = end;
+    vma->vm_flags = flags;
+    vma->next     = task->vm_areas;
+    task->vm_areas = vma;
+
+    return 0;
+}
+
+/*
+ * vma_free_all: Free all VMAs for a task.  Called on task exit.
+ * (BUG 3.1)
+ */
+void vma_free_all(struct task_struct *task) {
+    if (!task) return;
+    struct vm_area *vma = task->vm_areas;
+    while (vma) {
+        struct vm_area *next = vma->next;
+        kfree(vma);
+        vma = next;
+    }
+    task->vm_areas = NULL;
+}
+
+/*
+ * vma_clone: Deep-copy all VMAs from parent to child.  Called on fork.
+ * (BUG 3.1)
+ */
+int vma_clone(struct task_struct *parent, struct task_struct *child) {
+    if (!parent || !child) return -1;
+
+    struct vm_area *src = parent->vm_areas;
+    struct vm_area **dst_tail = &child->vm_areas;
+
+    while (src) {
+        struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(*vma));
+        if (!vma) {
+            vma_free_all(child);
+            return -1;
+        }
+        memcpy(vma, src, sizeof(*vma));
+        vma->next = NULL;
+        *dst_tail = vma;
+        dst_tail = &vma->next;
+        src = src->next;
+    }
+
+    return 0;
+}
+
+/*
  * pf_handler_c: Page fault handler with COW + lazy allocation
  *
  * Handles:
@@ -705,6 +830,19 @@ void pf_handler_c(uint64_t error_code) {
             log_printf(LOG_LEVEL_ERR, "Lazy alloc: address %p outside user range, sending SIGSEGV\n",
                        (void *)cr2);
             if (current) do_sys_kill(current->pid, SIGSEGV);
+            return;
+        }
+
+        /*
+         * FIXED (v4.1.4): Check that the fault address falls within a
+         * registered VMA.  Without this check, lazy allocation would
+         * map any not-present page, bypassing guard pages for stack
+         * overflow protection.  (BUG 3.1)
+         */
+        if (current && !vma_find(current, cr2)) {
+            log_printf(LOG_LEVEL_ERR, "Lazy alloc: address %p not in any VMA, sending SIGSEGV\n",
+                       (void *)cr2);
+            do_sys_kill(current->pid, SIGSEGV);
             return;
         }
 
@@ -790,8 +928,16 @@ void pf_handler_c(uint64_t error_code) {
             return;
         }
 
-        /* Copy content from old page to new page */
+        /* Copy content from old page to new page.
+         *
+         * FIXED (v4.1.4): Wrap memcpy from user page with stac()/clac()
+         * to prevent SMAP violation.  When SMAP is enabled, the kernel
+         * cannot directly read user memory.  Without stac(), this memcpy
+         * would trigger a triple fault → kernel crash.  (BUG-005 / 2.2)
+         */
+        stac();
         memcpy(new_page, (void *)(uintptr_t)(cr2 & ~0xFFFULL), PAGE_SIZE);
+        clac();
 
         /* Decrement old page ref_count and free if no longer referenced */
         {

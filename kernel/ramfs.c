@@ -1,9 +1,15 @@
 /*
  * ramfs.c - In-memory filesystem (Phase 1: dentry lookup support)
+ *
+ * FIXED (v4.1.4): Added ramfs_lock spinlock to protect all linked list
+ * operations (lookup, create, mkdir, unlink, write).  Without locking,
+ * concurrent SMP access to the children linked list would cause
+ * corruption.  (BUG 3.11)
  */
 #include "fs.h"
 #include "include/log.h"
 #include "mem.h"
+#include "smp.h"
 #include <string.h>
 
 struct ramfs_node {
@@ -14,6 +20,9 @@ struct ramfs_node {
 };
 
 static struct ramfs_node *ramfs_root = NULL;
+
+/* Protect all ramfs linked list operations (SMP safety) */
+static spinlock_t ramfs_lock = {0};
 
 /* ================================================================
  * File operations
@@ -45,16 +54,19 @@ static int ramfs_close(struct inode *inode, struct file *filp) {
  */
 static int ramfs_lookup(struct inode *dir, struct dentry *dentry) {
     struct ramfs_node *head = (struct ramfs_node *)dir;
+    spin_lock(&ramfs_lock);
     struct ramfs_node *n = head->children;  /* first child */
 
     while (n) {
         if (n->inode.name && strcmp(n->inode.name, dentry->name) == 0) {
             dentry->inode = &n->inode;
             n->inode.dentry = dentry;
+            spin_unlock(&ramfs_lock);
             return 0;
         }
         n = n->next;  /* next sibling */
     }
+    spin_unlock(&ramfs_lock);
     return -1;  /* not found (negative dentry) */
 }
 
@@ -68,20 +80,24 @@ static int ramfs_create(struct inode *dir, const char *name, int flags) {
     struct ramfs_node *head = (struct ramfs_node *)dir;
     if (!head || !head->inode.is_dir || !name) return -1;
 
+    spin_lock(&ramfs_lock);
+
     /* Check for duplicate name */
     struct ramfs_node *existing = head->children;
     while (existing) {
-        if (existing->inode.name && strcmp(existing->inode.name, name) == 0)
+        if (existing->inode.name && strcmp(existing->inode.name, name) == 0) {
+            spin_unlock(&ramfs_lock);
             return -1;  /* Already exists */
+        }
         existing = existing->next;
     }
 
     struct ramfs_node *n = (struct ramfs_node *)kmalloc(sizeof(*n));
-    if (!n) return -1;
+    if (!n) { spin_unlock(&ramfs_lock); return -1; }
     memset(n, 0, sizeof(*n));
 
     n->inode.name = (const char *)kmalloc(strlen(name) + 1);
-    if (!n->inode.name) { kfree(n); return -1; }
+    if (!n->inode.name) { kfree(n); spin_unlock(&ramfs_lock); return -1; }
     strcpy((char *)n->inode.name, name);
 
     n->inode.size   = 0;
@@ -94,6 +110,7 @@ static int ramfs_create(struct inode *dir, const char *name, int flags) {
     n->next = head->children;
     head->children = n;
 
+    spin_unlock(&ramfs_lock);
     return 0;
 }
 
@@ -116,10 +133,12 @@ static ssize_t ramfs_write(struct file *filp, const void *buf, size_t count,
     if ((size_t)(*offset) > SIZE_MAX - count) return -1;
     size_t new_size = (size_t)(*offset) + count;
 
+    spin_lock(&ramfs_lock);
+
     if (new_size > n->inode.size) {
         /* Expand buffer */
         char *new_data = (char *)kmalloc(new_size);
-        if (!new_data) return -1;
+        if (!new_data) { spin_unlock(&ramfs_lock); return -1; }
         if (n->data && n->inode.size > 0)
             memcpy(new_data, n->data, n->inode.size);
         if (n->data) kfree(n->data);
@@ -129,6 +148,8 @@ static ssize_t ramfs_write(struct file *filp, const void *buf, size_t count,
 
     memcpy(n->data + (*offset), buf, count);
     *offset += (off_t)count;
+
+    spin_unlock(&ramfs_lock);
     return (ssize_t)count;
 }
 
@@ -139,20 +160,24 @@ static int ramfs_mkdir(struct inode *dir, const char *name) {
     struct ramfs_node *head = (struct ramfs_node *)dir;
     if (!head || !head->inode.is_dir || !name) return -1;
 
+    spin_lock(&ramfs_lock);
+
     /* Check for duplicate name */
     struct ramfs_node *existing = head->children;
     while (existing) {
-        if (existing->inode.name && strcmp(existing->inode.name, name) == 0)
+        if (existing->inode.name && strcmp(existing->inode.name, name) == 0) {
+            spin_unlock(&ramfs_lock);
             return -1;
+        }
         existing = existing->next;
     }
 
     struct ramfs_node *n = (struct ramfs_node *)kmalloc(sizeof(*n));
-    if (!n) return -1;
+    if (!n) { spin_unlock(&ramfs_lock); return -1; }
     memset(n, 0, sizeof(*n));
 
     n->inode.name = (const char *)kmalloc(strlen(name) + 1);
-    if (!n->inode.name) { kfree(n); return -1; }
+    if (!n->inode.name) { kfree(n); spin_unlock(&ramfs_lock); return -1; }
     strcpy((char *)n->inode.name, name);
 
     n->inode.size   = 0;
@@ -166,6 +191,7 @@ static int ramfs_mkdir(struct inode *dir, const char *name) {
     n->next = head->children;
     head->children = n;
 
+    spin_unlock(&ramfs_lock);
     return 0;
 }
 
@@ -176,11 +202,13 @@ static int ramfs_unlink(struct inode *dir, const char *name) {
     struct ramfs_node *head = (struct ramfs_node *)dir;
     if (!head || !head->inode.is_dir || !name) return -1;
 
+    spin_lock(&ramfs_lock);
+
     struct ramfs_node *prev = NULL;
     struct ramfs_node *cur = head->children;
     while (cur) {
         if (cur->inode.name && strcmp(cur->inode.name, name) == 0) {
-            if (cur->inode.is_dir) return -1;  /* cannot unlink a directory */
+            if (cur->inode.is_dir) { spin_unlock(&ramfs_lock); return -1; }
             if (prev)
                 prev->next = cur->next;
             else
@@ -188,11 +216,13 @@ static int ramfs_unlink(struct inode *dir, const char *name) {
             if (cur->inode.name) kfree((void *)cur->inode.name);
             if (cur->data) kfree(cur->data);
             kfree(cur);
+            spin_unlock(&ramfs_lock);
             return 0;
         }
         prev = cur;
         cur = cur->next;
     }
+    spin_unlock(&ramfs_lock);
     return -1;  /* not found */
 }
 
@@ -203,23 +233,27 @@ static int ramfs_rmdir(struct inode *dir, const char *name) {
     struct ramfs_node *head = (struct ramfs_node *)dir;
     if (!head || !head->inode.is_dir || !name) return -1;
 
+    spin_lock(&ramfs_lock);
+
     struct ramfs_node *prev = NULL;
     struct ramfs_node *cur = head->children;
     while (cur) {
         if (cur->inode.name && strcmp(cur->inode.name, name) == 0) {
-            if (!cur->inode.is_dir) return -1;  /* not a directory */
-            if (cur->children) return -1;  /* directory not empty */
+            if (!cur->inode.is_dir) { spin_unlock(&ramfs_lock); return -1; }
+            if (cur->children) { spin_unlock(&ramfs_lock); return -1; }
             if (prev)
                 prev->next = cur->next;
             else
                 head->children = cur->next;
             if (cur->inode.name) kfree((void *)cur->inode.name);
             kfree(cur);
+            spin_unlock(&ramfs_lock);
             return 0;
         }
         prev = cur;
         cur = cur->next;
     }
+    spin_unlock(&ramfs_lock);
     return -1;  /* not found */
 }
 

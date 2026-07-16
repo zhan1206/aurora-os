@@ -123,9 +123,16 @@ static struct dentry *dentry_alloc(const char *name, struct dentry *parent) {
     lru_add(d);
     dentry_total++;
 
-    /* Evict old dentries if cache is too large */
+    /* Evict old dentries if cache is too large.
+     *
+     * FIXED (v4.1.4): Use vfs_dentry_evict_locked() instead of
+     * vfs_dentry_evict() to avoid non-reentrant lock deadlock.
+     * dentry_alloc() is called from vfs_lookup() which already holds
+     * vfs_lock.  Calling vfs_dentry_evict() → vfs_lock() again would
+     * deadlock on a non-reentrant spinlock.  (BUG-002 / 2.3)
+     */
     if (dentry_total > MAX_DENTRIES) {
-        vfs_dentry_evict();
+        vfs_dentry_evict_locked();
     }
 
     return d;
@@ -282,17 +289,42 @@ int vfs_mount(const char *path, struct super_block *sb) {
  * Evicts at most 16 dentries per call to avoid long lock hold times.
  * ================================================================ */
 void vfs_dentry_evict(void) {
+    vfs_lock();
+    vfs_dentry_evict_locked();
+    vfs_unlock();
+}
+
+/*
+ * vfs_dentry_evict_locked: Internal eviction without lock acquisition.
+ * Caller must hold vfs_lock.  Used by dentry_alloc() to avoid
+ * non-reentrant lock deadlock when called from vfs_lookup().
+ * (BUG-002 / 2.3)
+ */
+void vfs_dentry_evict_locked(void) {
     int evicted_this_round = 0;
     int max_evict = 16;
-
-    vfs_lock();
 
     struct dentry *d = lru_head.lru_prev;  /* start from tail (oldest) */
     while (d != &lru_head && evicted_this_round < max_evict) {
         struct dentry *prev = d->lru_prev;
 
-        /* Skip root dentry and dentries with active references */
-        if (d == root_dentry || d->refcount > 1) {
+        /*
+         * Skip root dentry, mount dentries, and dentries with active references.
+         * FIXED (v4.1.4): Also evict negative dentries (lookup misses) that have
+         * refcount == 0, even if they don't have active references.  Negative
+         * dentries without any references are stale and should be removed to
+         * prevent memory leaks.  (BUG 4.12)
+         */
+        if (d == root_dentry || (d->flags & DENTRY_FLAG_MOUNT)) {
+            d = prev;
+            continue;
+        }
+        if (d->refcount > 1) {
+            d = prev;
+            continue;
+        }
+        /* Evict negative dentries with refcount == 0 (stale lookup misses) */
+        if (d->refcount == 0 && !(d->flags & DENTRY_FLAG_NEGATIVE)) {
             d = prev;
             continue;
         }
@@ -335,8 +367,6 @@ void vfs_dentry_evict(void) {
 
         d = prev;
     }
-
-    vfs_unlock();
 
     if (evicted_this_round > 0) {
         log_printf(LOG_LEVEL_DEBUG, "VFS: evicted %d dentries (total=%d, evicted=%d)\n",
@@ -446,7 +476,14 @@ struct inode *vfs_lookup(const char *path) {
             /* Decrement parent refcount now that we hold the lock again */
             if (cur->refcount > 0) cur->refcount--;
             if (!child->inode) {
-                /* Negative dentry: component not found */
+                /*
+                 * Negative dentry: component not found.
+                 * FIXED (v4.1.4): Mark as negative so it can be evicted
+                 * by vfs_dentry_evict.  Negative dentries speed up
+                 * repeated lookups of non-existent paths but must be
+                 * evictable to prevent memory leaks.  (BUG 4.12)
+                 */
+                child->flags |= DENTRY_FLAG_NEGATIVE;
                 vfs_unlock();
                 return NULL;
             }

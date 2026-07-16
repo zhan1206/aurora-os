@@ -74,11 +74,13 @@ int vfs_ioctl(struct file *filp, int request, void *arg);
 
 /*
  * vfs_dentry_evict: Evict unreferenced dentries from the cache.
+ * vfs_dentry_evict_locked: Same but caller must hold vfs_lock (BUG-002 fix).
  * Automatically called when the dentry count exceeds MAX_DENTRIES.
  * Evicts LRU dentries (least recently used) first, skipping
  * dentries with active references (refcount > 1).
  */
 void vfs_dentry_evict(void);
+void vfs_dentry_evict_locked(void);
 
 /* Dentry cache statistics */
 void vfs_dentry_stats(int *total, int *evicted);

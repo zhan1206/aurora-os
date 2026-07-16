@@ -40,6 +40,17 @@ push %rdx
 push %rcx
 push %rax
 
+/* 
+ * Push user RIP and RSP for trapframe struct completeness.
+ * FIXED (v4.1.4): The trapframe struct has 15 fields but previously
+ * only 13 registers were pushed.  rip and rsp were never populated,
+ * causing signal delivery to restore garbage addresses.  (BUG-003)
+ * User RIP is already in RCX (pushed above), and user RSP was saved
+ * to %gs:200 at entry.  We push them again as the rip/rsp fields.
+ */
+push %rcx          /* user RIP (redundant with rcx field, needed for signal delivery) */
+push %gs:200       /* user RSP */
+
 /* rdi = pointer to trapframe (current rsp) */
 mov %rsp, %rdi
 /* call C handler which will set return value in the trapframe->rax */
@@ -48,7 +59,11 @@ call syscall_trap
 /* syscall_return_point: fork children return here to go through normal return */
 syscall_return_point:
 
-/* restore registers (pop in reverse) */
+/* restore registers (pop in reverse).
+ * The 2 extra fields (user RSP, user RIP) are on top of stack,
+ * so skip them first, then pop the 13 original registers.
+ * FIXED (v4.1.4): 15-field trapframe now correctly populated (BUG-003). */
+add $16, %rsp    /* skip user RSP and user RIP (extra fields) */
 pop %rax
 pop %rcx
 pop %rdx

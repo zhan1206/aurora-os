@@ -38,6 +38,7 @@ struct ext2_sb_info {
     uint32_t num_groups;                /* total number of block groups */
     struct ext2_group_desc *gd;         /* cached group descriptor table */
     uint32_t gd_blocks;                 /* number of blocks for the GD table */
+    uint32_t gd_start;                  /* FIXED (v4.1.4): starting block of GD table (BUG 4.11) */
 };
 
 /* Inode-private data attached to inode->priv */
@@ -66,6 +67,21 @@ static int write_block(struct block_device *bdev, uint32_t block_size,
     uint32_t sectors_per_block = block_size / bdev->block_size;
     uint64_t sector = (uint64_t)block_num * sectors_per_block;
     return block_dev_write(bdev, buf, sector, sectors_per_block);
+}
+
+/*
+ * FIXED (v4.1.4): Write the group descriptor table block containing a
+ * specific group descriptor back to disk.  Without this, modifications
+ * to bg_free_blocks_count and bg_free_inodes_count are only in memory
+ * and lost on reboot, causing filesystem inconsistency.  (BUG 4.11)
+ */
+static int ext2_write_gd(struct ext2_sb_info *sbi, uint32_t group) {
+    uint32_t gd_offset = group * sizeof(struct ext2_group_desc);
+    uint32_t gd_block = sbi->gd_start + (gd_offset / sbi->block_size);
+    /* Write the entire GD block containing this group descriptor */
+    uint32_t block_offset = (gd_offset / sbi->block_size) * sbi->block_size;
+    uint8_t *gd_data = (uint8_t *)sbi->gd + block_offset;
+    return write_block(sbi->bdev, sbi->block_size, gd_block, gd_data);
 }
 
 /* ================================================================
@@ -191,7 +207,13 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
     /* Direct blocks */
     if (logical_block < EXT2_NDIR_BLOCKS) {
         uint32_t blk = raw->i_block[logical_block];
-        if (blk == 0) return -EIO; /* sparse block not yet allocated */
+        /* FIXED (v4.1.4): Sparse blocks (blk==0) should be zero-filled, not
+         * return -EIO.  This is standard POSIX behaviour: reads from holes
+         * in sparse files return zero-filled buffers.  (BUG 3.12) */
+        if (blk == 0) {
+            memset(buf, 0, block_size);
+            return 0;
+        }
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -199,7 +221,13 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
     logical_block -= EXT2_NDIR_BLOCKS;
     if (logical_block < ptrs_per_block) {
         uint32_t ind_blk = raw->i_block[EXT2_IND_BLOCK];
-        if (ind_blk == 0) return -EIO;
+        /* FIXED (v4.1.4): Zero-fill for sparse blocks through indirect
+         * pointer.  If the indirect block itself doesn't exist, the entire
+         * range is a hole.  (BUG 3.12) */
+        if (ind_blk == 0) {
+            memset(buf, 0, block_size);
+            return 0;
+        }
 
         uint32_t *ind_buf = (uint32_t *)kmalloc(block_size);
         if (!ind_buf) return -ENOMEM;
@@ -212,7 +240,10 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
         uint32_t blk = ind_buf[logical_block];
         kfree(ind_buf);
 
-        if (blk == 0) return -EIO;
+        if (blk == 0) {
+            memset(buf, 0, block_size);
+            return 0;
+        }
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -220,7 +251,12 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
     logical_block -= ptrs_per_block;
     if (logical_block < ptrs_per_block * ptrs_per_block) {
         uint32_t dind_blk = raw->i_block[EXT2_DIND_BLOCK];
-        if (dind_blk == 0) return -EIO;
+        /* FIXED (v4.1.4): Zero-fill for sparse blocks through double
+         * indirect pointer.  (BUG 3.12) */
+        if (dind_blk == 0) {
+            memset(buf, 0, block_size);
+            return 0;
+        }
 
         /* Read the double-indirect block (array of single-indirect pointers) */
         uint32_t *dind_buf = (uint32_t *)kmalloc(block_size);
@@ -238,7 +274,8 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
         uint32_t ind_blk = dind_buf[dind_idx];
         if (ind_blk == 0) {
             kfree(dind_buf);
-            return -EIO;
+            memset(buf, 0, block_size);
+            return 0;
         }
 
         /* Read the single-indirect block */
@@ -259,7 +296,10 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
         uint32_t blk = ind_buf[ind_idx];
         kfree(ind_buf);
 
-        if (blk == 0) return -EIO;
+        if (blk == 0) {
+            memset(buf, 0, block_size);
+            return 0;
+        }
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -367,6 +407,7 @@ static uint32_t ext2_alloc_block(struct ext2_sb_info *sbi) {
                     bitmap[byte_idx] |= (uint8_t)(1u << bit_idx);
                     write_block(sbi->bdev, sbi->block_size, bitmap_block, bitmap);
                     sbi->gd[group].bg_free_blocks_count--;
+                    ext2_write_gd(sbi, group);  /* FIXED (v4.1.4): sync GD to disk (BUG 4.11) */
                     found = group * sbi->blocks_per_group + i + sbi->first_data_block;
                     kfree(bitmap);
                     ext2_alloc_unlock();
@@ -406,6 +447,7 @@ static uint32_t ext2_alloc_inode(struct ext2_sb_info *sbi) {
                     bitmap[byte_idx] |= (uint8_t)(1u << bit_idx);
                     write_block(sbi->bdev, sbi->block_size, bitmap_block, bitmap);
                     sbi->gd[group].bg_free_inodes_count--;
+                    ext2_write_gd(sbi, group);  /* FIXED (v4.1.4): sync GD to disk (BUG 4.11) */
                     kfree(bitmap);
                     ext2_alloc_unlock();
                     return group * sbi->inodes_per_group + i + 1;
@@ -441,6 +483,7 @@ static void ext2_free_block(struct ext2_sb_info *sbi, uint32_t blk) {
     bitmap[byte_idx] &= (uint8_t)~(1u << bit_idx);
     write_block(sbi->bdev, sbi->block_size, bitmap_block, bitmap);
     sbi->gd[group].bg_free_blocks_count++;
+    ext2_write_gd(sbi, group);  /* FIXED (v4.1.4): sync GD to disk (BUG 4.11) */
     kfree(bitmap);
 }
 
@@ -467,6 +510,7 @@ static void ext2_free_inode(struct ext2_sb_info *sbi, uint32_t ino) {
     bitmap[byte_idx] &= (uint8_t)~(1u << bit_idx);
     write_block(sbi->bdev, sbi->block_size, bitmap_block, bitmap);
     sbi->gd[group].bg_free_inodes_count++;
+    ext2_write_gd(sbi, group);  /* FIXED (v4.1.4): sync GD to disk (BUG 4.11) */
     kfree(bitmap);
 }
 
@@ -1130,6 +1174,7 @@ struct super_block *ext2_mount(struct block_device *bdev) {
 
     /* The GD table starts at block 2 (block 0 = boot, block 1 = superblock) */
     uint32_t gd_start = (sbi->block_size == 1024) ? 2 : 1;
+    sbi->gd_start = gd_start;  /* FIXED (v4.1.4): save for later GD sync (BUG 4.11) */
     for (uint32_t i = 0; i < sbi->gd_blocks; i++) {
         if (read_block(bdev, sbi->block_size, gd_start + i,
                        (uint8_t *)sbi->gd + i * sbi->block_size) < 0) {

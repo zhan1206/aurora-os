@@ -828,6 +828,12 @@ static int slab_grow(struct slab_cache *cache) {
     if (pg) {
         pg->flags |= PAGE_FLAG_SLAB;
         pg->slab_cache = cache;
+        /* FIXED (v4.1.4): Track free objects per slab page for
+         * reclaim.  Initially all objects are on the free list.
+         * When slab_free_count reaches 0, the page is fully
+         * allocated.  When it reaches objs_per_page again, the
+         * page can be returned to the buddy allocator.  (BUG 3.2) */
+        pg->slab_free_count = cache->objs_per_page;
     }
 
     return 0;
@@ -910,6 +916,17 @@ slab_pop:
         void *obj = cache->free_list;
         cache->free_list = *(void**)obj;
 
+        /* FIXED (v4.1.4): Decrement the free count for the slab page
+         * this object belongs to.  When all objects are returned to the
+         * free list, the page can be reclaimed.  (BUG 3.2) */
+        {
+            uint64_t pa = (uint64_t)(uintptr_t)obj;
+            struct page *pg = get_page_struct(pa);
+            if (pg && (pg->flags & PAGE_FLAG_SLAB)) {
+                if (pg->slab_free_count > 0) pg->slab_free_count--;
+            }
+        }
+
         /* Zero the entire slab object for security (prevent info leak).
          * Using cache->obj_size instead of the requested size ensures
          * that residual data from previous allocations is cleared even
@@ -958,6 +975,43 @@ void kfree(void *ptr) {
 
         *(void**)ptr = cache->free_list;
         cache->free_list = ptr;
+
+        /*
+         * FIXED (v4.1.4): Track free objects per slab page and reclaim
+         * pages when all objects are free.  Without this, slab pages
+         * are never returned to the buddy allocator, causing unbounded
+         * memory growth.  (BUG 3.2)
+         */
+        pg->slab_free_count++;
+        if (pg->slab_free_count >= cache->objs_per_page) {
+            /* All objects in this page are free — reclaim the page.
+             * Scan the free list and remove all objects belonging to
+             * this page, then free the page back to the buddy allocator. */
+            uint64_t page_start = pg->phys_addr;
+            uint64_t page_end   = page_start + PAGE_SIZE;
+
+            void **prev_ptr = &cache->free_list;
+            void *cur = cache->free_list;
+            while (cur) {
+                uint64_t cur_pa = (uint64_t)(uintptr_t)cur;
+                if (cur_pa >= page_start && cur_pa < page_end) {
+                    /* This object belongs to the reclaimed page — unlink */
+                    *prev_ptr = *(void**)cur;
+                    cur = *prev_ptr;
+                } else {
+                    prev_ptr = (void**)cur;
+                    cur = *(void**)cur;
+                }
+            }
+
+            /* Clear page flags and return to buddy allocator */
+            pg->flags &= ~PAGE_FLAG_SLAB;
+            pg->slab_cache = NULL;
+            pg->slab_free_count = 0;
+            slab_unlock();
+            free_page(ptr);
+            return;
+        }
 
         slab_unlock();
         return;

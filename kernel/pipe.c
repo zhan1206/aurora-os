@@ -11,6 +11,9 @@
  *     (TASK_BLOCKED) and yields. Woken by the other end.
  *   - Close detection: read returns 0 when write end is closed and
  *     buffer is empty (EOF).
+ *   - Multi-reader/multi-writer: blocked tasks are queued in a linked
+ *     list (not a single pointer), so all blocked readers/writers are
+ *     woken when data/space becomes available.  (BUG-009 / 2.6)
  *
  * VFS integration: pipefs is a simple filesystem that creates
  * inode pairs for each pipe. The inode's priv points to the
@@ -48,6 +51,19 @@ static inline void pipe_spin_unlock(volatile uint32_t *lock) {
     asm volatile ("movl $0, %0" : "=m"(*lock) : : "memory");
 }
 
+/*
+ * FIXED (v4.1.4): Blocked-task queue node.
+ * Replaces single blocked_reader/writer pointers with a linked list
+ * so that multiple readers/writers can be blocked simultaneously.
+ * Nodes are allocated on the stack of the blocking function — they
+ * remain valid while the task is blocked (stack is not freed).
+ * (BUG-009 / 2.6)
+ */
+struct pipe_blocked_node {
+    struct task_struct *task;
+    struct pipe_blocked_node *next;
+};
+
 /* Pipe ring buffer */
 struct pipe_ring {
     char     buf[PIPE_BUF_SIZE];
@@ -57,8 +73,8 @@ struct pipe_ring {
     int      read_open;   /* read end still open? */
     int      write_open;  /* write end still open? */
     volatile uint32_t lock;  /* spinlock for SMP safety */
-    struct task_struct *blocked_reader;  /* task blocked on read (wakeup target) */
-    struct task_struct *blocked_writer;  /* task blocked on write (wakeup target) */
+    struct pipe_blocked_node *blocked_readers;  /* linked list of blocked readers */
+    struct pipe_blocked_node *blocked_writers;  /* linked list of blocked writers */
 };
 
 /* ================================================================
@@ -77,6 +93,15 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
     struct pipe_ring *ring = (struct pipe_ring *)filp->inode->priv;
     if (!ring) return -1;
 
+    /*
+     * FIXED (v4.1.4): Stack-allocated node for the blocked-readers list.
+     * Replaces single blocked_reader pointer.  Multiple readers can now
+     * block simultaneously; all are woken when data arrives.  (BUG-009)
+     */
+    struct pipe_blocked_node node;
+    node.task = current;
+    node.next = NULL;
+
     /* Block until data available, write end closed, or signal.
      * Use spinlock for SMP safety: protect ring buffer state checks
      * and modifications from concurrent access by pipe_write/pipe_close. */
@@ -88,16 +113,23 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
             pipe_spin_unlock(&ring->lock);
             return 0;  /* EOF */
         }
-        /* Set blocked_reader BEFORE releasing the lock to avoid a
-         * window where a concurrent write misses the wakeup. */
-        ring->blocked_reader = current;
+        /* Add to blocked readers linked list (head insertion) */
+        node.next = ring->blocked_readers;
+        ring->blocked_readers = &node;
         pipe_spin_unlock(&ring->lock);
 
         if (!current) return -1;
         if (current->sig && current->sig->pending) {
-            /* Clear blocked_reader on early return */
+            /* Remove ourselves from the blocked list on signal */
             pipe_spin_lock(&ring->lock);
-            if (ring->blocked_reader == current) ring->blocked_reader = NULL;
+            struct pipe_blocked_node **prev = &ring->blocked_readers;
+            while (*prev) {
+                if (*prev == &node) {
+                    *prev = node.next;
+                    break;
+                }
+                prev = &(*prev)->next;
+            }
             pipe_spin_unlock(&ring->lock);
             current->t_errno = EINTR; return -1;
         }
@@ -123,10 +155,14 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
     ring->head = (ring->head + toread) % PIPE_BUF_SIZE;
     ring->count -= (uint32_t)toread;
 
-    /* Wake a blocked writer now that we've freed some space */
-    if (ring->blocked_writer && ring->blocked_writer->state == TASK_BLOCKED) {
-        ring->blocked_writer->state = TASK_READY;
-        ring->blocked_writer = NULL;
+    /* Wake ALL blocked writers now that we've freed some space */
+    struct pipe_blocked_node *wn = ring->blocked_writers;
+    ring->blocked_writers = NULL;
+    while (wn) {
+        if (wn->task->state == TASK_BLOCKED) {
+            wn->task->state = TASK_READY;
+        }
+        wn = wn->next;
     }
 
     pipe_spin_unlock(&ring->lock);
@@ -147,6 +183,16 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
     }
     pipe_spin_unlock(&ring->lock);
 
+    /*
+     * FIXED (v4.1.4): Stack-allocated node for the blocked-writers list.
+     * Replaces single blocked_writer pointer.  Multiple writers can now
+     * block simultaneously; all are woken when space becomes available.
+     * (BUG-009 / 2.6)
+     */
+    struct pipe_blocked_node node;
+    node.task = current;
+    node.next = NULL;
+
     size_t total = 0;
     const char *src = (const char *)buf;
 
@@ -159,14 +205,26 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
                 pipe_spin_unlock(&ring->lock);
                 current->t_errno = EPIPE; return -1;
             }
+            /* Add to blocked writers linked list (head insertion) */
+            node.next = ring->blocked_writers;
+            ring->blocked_writers = &node;
             pipe_spin_unlock(&ring->lock);
 
             if (!current) return -1;
-            if (current->sig && current->sig->pending) { current->t_errno = EINTR; return -1; }
-            /* Mark ourselves as blocked writer, then block */
-            pipe_spin_lock(&ring->lock);
-            ring->blocked_writer = current;
-            pipe_spin_unlock(&ring->lock);
+            if (current->sig && current->sig->pending) {
+                /* Remove ourselves from the blocked list on signal */
+                pipe_spin_lock(&ring->lock);
+                struct pipe_blocked_node **prev = &ring->blocked_writers;
+                while (*prev) {
+                    if (*prev == &node) {
+                        *prev = node.next;
+                        break;
+                    }
+                    prev = &(*prev)->next;
+                }
+                pipe_spin_unlock(&ring->lock);
+                current->t_errno = EINTR; return -1;
+            }
             current->state = TASK_BLOCKED;
             schedule();
         }
@@ -189,10 +247,14 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
         ring->tail = (ring->tail + towrite) % PIPE_BUF_SIZE;
         ring->count += (uint32_t)towrite;
 
-        /* Wake a blocked reader now that we've written some data */
-        if (ring->blocked_reader && ring->blocked_reader->state == TASK_BLOCKED) {
-            ring->blocked_reader->state = TASK_READY;
-            ring->blocked_reader = NULL;
+        /* Wake ALL blocked readers now that we've written some data */
+        struct pipe_blocked_node *rn = ring->blocked_readers;
+        ring->blocked_readers = NULL;
+        while (rn) {
+            if (rn->task->state == TASK_BLOCKED) {
+                rn->task->state = TASK_READY;
+            }
+            rn = rn->next;
         }
 
         pipe_spin_unlock(&ring->lock);

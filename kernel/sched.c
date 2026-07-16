@@ -125,8 +125,19 @@ static inline void pid_register(int pid, struct task_struct *t) {
 
 struct task_struct *find_task_by_pid(int pid) {
     if (pid < 0 || pid >= MAX_PID) return NULL;
+    /*
+     * FIXED (v4.1.4): Hold pid_lock while reading pid_table and checking
+     * task state.  Without the lock, the task could be freed between the
+     * pid_table read and the state check (TOCTOU race), leading to UAF.
+     * (BUG 4.3)
+     */
+    spin_lock(&pid_lock);
     struct task_struct *t = pid_table[pid];
-    if (t && t->state != TASK_DEAD && t->state != TASK_ZOMBIE) return t;
+    if (t && t->state != TASK_DEAD && t->state != TASK_ZOMBIE) {
+        spin_unlock(&pid_lock);
+        return t;
+    }
+    spin_unlock(&pid_lock);
     return NULL;
 }
 
@@ -149,6 +160,15 @@ void reparent_children_to_init(struct task_struct *task) {
     if (!task || !task->children) return;
     if (!init_task) return;
 
+    /*
+     * FIXED (v4.1.4): Hold both the task's child_lock and init_task's
+     * child_lock to prevent concurrent modification of the children
+     * linked lists.  Without locks, concurrent exits on SMP can corrupt
+     * the init_task->children list.  (BUG 4.2)
+     */
+    spin_lock((spinlock_t*)&task->child_lock);
+    spin_lock((spinlock_t*)&init_task->child_lock);
+
     struct child_node *node = task->children;
     while (node) {
         if (node->child) {
@@ -160,6 +180,9 @@ void reparent_children_to_init(struct task_struct *task) {
         node = next;
     }
     task->children = NULL;
+
+    spin_unlock((spinlock_t*)&init_task->child_lock);
+    spin_unlock((spinlock_t*)&task->child_lock);
 }
 
 /* ================================================================
@@ -284,67 +307,51 @@ struct task_struct *create_task(void (*fn)(void)) {
     uint8_t *stack_top = (uint8_t *)stack_page + PAGE_SIZE;
     uint64_t *sp = (uint64_t *)stack_top;
 
+    /*
+     * FIXED (v4.1.4): context_switch pushes 7 values (pushfq + 6 callee-saved)
+     * then saves RSP.  On restore, it pops 7 values then rets.  The stack
+     * must have exactly 8 slots (7 pushed + 1 ret addr) below stack_top.
+     * The previous code only pushed fn as the ret addr, causing context_switch
+     * to pop garbage values from beyond the stack.  (BUG-004)
+     */
     if (fn) {
-        /* Normal task: fn is the return address for context_switch's ret */
-        *(--sp) = (uint64_t)fn;
+        /* Normal task: 8 slots (7 context_switch values + ret addr) */
+        uint64_t *frame = sp - 8;
+        frame[0] = (uint64_t)fn;   /* return address (popped by ret) */
+        frame[1] = 0x202;          /* pushfq (IF=1) */
+        frame[2] = 0;              /* rbp */
+        frame[3] = 0;              /* rbx */
+        frame[4] = 0;              /* r12 */
+        frame[5] = 0;              /* r13 */
+        frame[6] = 0;              /* r14 */
+        frame[7] = 0;              /* r15 */
+        sp = frame;
     } else {
         /*
-         * Fork child: The child's kernel stack must look exactly as if
-         * it had just executed the pushes in syscall_entry and was about
-         * to call syscall_trap.  We place a fake return address pointing
-         * to syscall_return_point, then the 13 saved registers, then the
-         * callee-saved regs for context_switch.
+         * Fork child: 23 slots = 8 context_switch + 15 syscall trapframe.
+         * BUG-003 fix added 2 extra fields (user RIP, user RSP) to the
+         * syscall trapframe, expanding it from 13 to 15 slots.
          *
-         * Stack layout (top → bottom):
-         *   [syscall_return_point]   ← ret addr for context_switch
-         *   [callee-saved regs × 6]  ← popped by context_switch
-         *   [saved regs × 13]        ← popped by syscall_return_point
-         *   [swapgs + sysretq]       ← executed after pops
-         *
-         * BUT: context_switch pops 6 callee-saved regs then rets.
-         * After ret, we're at syscall_return_point which pops 13 regs
-         * then does swapgs + sysretq.
-         *
-         * So the stack just needs:
-         *   ret_addr → syscall_return_point
-         *   rbp, rbx, r12-r15 (6 × zero)
-         *
-         * syscall_return_point will pop 13 regs from the stack, but
-         * those values don't exist yet.  Wait — we need to push them too.
-         *
-         * Full layout:
-         *   [syscall_return_point]   ← ret from context_switch
-         *   [rbp=0][rbx=0][r12=0][r13=0][r14=0][r15=0] ← context_switch pops
-         *   [r15=0]...[rax=0] ← 13 regs popped by syscall_return_point
-         *
-         * Total: 1 + 6 + 13 = 20 × 8 = 160 bytes below stack_top
+         * Layout (top → bottom, highest → lowest address):
+         *   [ret_addr]                ← popped by context_switch ret
+         *   [pushfq..r15] × 7        ← popped by context_switch
+         *   [user_rsp, user_rip] × 2 ← skipped by add $16, %rsp
+         *   [rax..r15] × 13          ← popped by syscall_return_point
          */
-        uint64_t *frame_start = sp - 20;
-        /* Fill all 20 slots with 0 (13 regs + 6 callee-saved + ret addr) */
-        for (int i = 0; i < 20; i++) frame_start[i] = 0;
-        /* Set the return address for context_switch */
-        frame_start[19] = (uint64_t)(uintptr_t)&syscall_return_point;
-        /* Set RCX and R11 for sysretq (RCX=user RIP, R11=user RFLAGS).
-         * These are slots 7 (rcx) and 10 (r11) in the 13-reg block.
-         * 13-reg block is at frame_start[0..12], callee-saved at [13..18], ret at [19].
-         * Slot index in 13-reg block (pushed order):
+        uint64_t *frame_start = sp - 23;
+        for (int i = 0; i < 23; i++) frame_start[i] = 0;
+        /* context_switch ret addr → syscall_return_point */
+        frame_start[22] = (uint64_t)(uintptr_t)&syscall_return_point;
+        /* pushfq = 0x202 (IF=1, default RFLAGS) */
+        frame_start[21] = 0x202;
+        /* 6 callee-saved regs at [15..20] — already zeroed */
+        /* 2 extra fields at [13..14] — user RSP, user RIP */
+        frame_start[13] = 0;  /* user RSP (will be set by fork) */
+        frame_start[14] = 0x400000;  /* user RIP = default entry */
+        /* 13 syscall regs at [0..12].
+         * Slot index in push order (r15..rax):
          *   [0]=r15, [1]=r14, [2]=r13, [3]=r12, [4]=r11, [5]=r10,
-         *   [6]=r9, [7]=r8, [8]=rsi, [9]=rdi, [10]=rdx, [11]=rcx, [12]=rax
-         *
-         * For the child, RCX should hold the same user RIP as the parent
-         * (which is the instruction after the fork syscall).
-         * R11 should hold user RFLAGS.
-         * These come from the parent's trapframe, but here we just
-         * need them to be valid so sysretq works.  The actual values
-         * will be set properly when the parent's fork syscall returns.
-         *
-         * For a correct implementation, the child's user RIP/RFLAGS
-         * should be the same as the parent's.  We'll copy them from
-         * the current trapframe in sys_fork.
-         *
-         * For now, set RCX=0x400000 (default user entry) and R11=0x202
-         * as reasonable defaults (will be overwritten in sys_fork).
-         */
+         *   [6]=r9, [7]=r8, [8]=rsi, [9]=rdi, [10]=rdx, [11]=rcx, [12]=rax */
         frame_start[11] = 0x400000;   /* RCX = user RIP */
         frame_start[4]  = 0x202;      /* R11 = user RFLAGS (IF=1) */
 
@@ -577,7 +584,15 @@ void schedule(void) {
     current->cpu_ticks++;
     current->cswitch_count++;
 
+    /*
+     * FIXED (v4.1.4): Save/restore FPU/SSE state across context switch.
+     * Without fxsave64/fxrstor64, floating-point and SSE registers are
+     * not preserved, causing incorrect computation results when tasks
+     * use FPU/SSE instructions.  (BUG 4.7)
+     */
+    asm volatile ("fxsave64 %0" :: "m"(prev->fpu_state) : "memory");
     context_switch(&prev->rsp, current->rsp);
+    asm volatile ("fxrstor64 %0" :: "m"(current->fpu_state) : "memory");
 }
 
 void yield(void) {
@@ -702,6 +717,9 @@ void do_exit_current(int code) {
     /* Close all fds */
     fd_close_all(current);
 
+    /* FIXED (v4.1.4): Free all VMAs on exit (BUG 3.1) */
+    vma_free_all(current);
+
     /* Reparent children to init */
     reparent_children_to_init(current);
 
@@ -799,6 +817,7 @@ int waitpid(int pid, int *status, int options) {
     if (!current) return -1;
 
     for (;;) {
+retry:
         /* FIXED: acquire child_lock to prevent concurrent waitpid races */
         spin_lock((spinlock_t*)&current->child_lock);
 
@@ -870,7 +889,30 @@ int waitpid(int pid, int *status, int options) {
             return 0;
         }
 
+        /*
+         * FIXED (v4.1.4): Set TASK_BLOCKED atomically with the child
+         * scan to prevent a wakeup-loss race.  The lock is re-acquired
+         * to ensure that between scanning children and setting
+         * TASK_BLOCKED, no child can exit without seeing the parent
+         * as blocked.  Without this, the child could exit in the gap
+         * between unlock and TASK_BLOCKED, and the wakeup would be
+         * lost forever.  (BUG 3.3)
+         */
+        spin_lock((spinlock_t*)&current->child_lock);
+        /* Re-check: a child might have become ZOMBIE between unlock and re-lock */
+        {
+            struct child_node *node2 = current->children;
+            while (node2) {
+                struct task_struct *child2 = node2->child;
+                if (child2 && child2->state == TASK_ZOMBIE) {
+                    spin_unlock((spinlock_t*)&current->child_lock);
+                    goto retry;  /* retry the outer loop to collect the zombie */
+                }
+                node2 = node2->next;
+            }
+        }
         current->state = TASK_BLOCKED;
+        spin_unlock((spinlock_t*)&current->child_lock);
         schedule();
 
         /* Resumed: re-scan children (the ZOMBIE should now be there) */

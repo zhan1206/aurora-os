@@ -30,6 +30,32 @@ static const uint32_t chacha20_const[4] = {0x61707865, 0x3320646e, 0x79622d32, 0
 static uint32_t chacha_state[16];
 
 /*
+ * FIXED (v4.1.4): Spinlock for ChaCha20 global state.
+ * On SMP systems, concurrent calls to aslr_randomize_base() from
+ * different CPUs would race on chacha_state, corrupting the PRNG
+ * and making ASLR completely ineffective.  (BUG 3.10)
+ */
+static volatile uint32_t chacha_lock = 0;
+
+static inline void chacha_spin_lock(void) {
+    while (1) {
+        uint32_t old = 0, new = 1;
+        asm volatile (
+            "lock cmpxchgl %2, %1"
+            : "=a"(old), "+m"(chacha_lock)
+            : "r"(new), "0"(old)
+            : "memory"
+        );
+        if (old == 0) break;
+        asm volatile ("pause" ::: "memory");
+    }
+}
+
+static inline void chacha_spin_unlock(void) {
+    asm volatile ("movl $0, %0" : "=m"(chacha_lock) : : "memory");
+}
+
+/*
  * chacha20_quarter_round: Perform the ChaCha20 quarter round operation
  * on four 32-bit words. This is the core diffusion primitive.
  */
@@ -234,8 +260,10 @@ uint64_t aslr_randomize_base(uint64_t base, uint64_t max_shift) {
      * pages == 0 and modulo would #DE. */
     if (pages == 0) return base;
 
+    chacha_spin_lock();
     uint8_t rnd[64];
     chacha20_random(rnd);
+    chacha_spin_unlock();
     uint64_t rand_val = *(uint64_t *)rnd;
 
     uint64_t offset_pages = rand_val % pages;

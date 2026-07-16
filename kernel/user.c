@@ -69,6 +69,27 @@ int create_user_task_from_entry(void (*entry)(void), uint64_t pml4_phys,
     t->cr3 = pml4_phys;
     t->stack_phys  = p1;
     t->stack_phys2 = p2;
+
+    /* FIXED (v4.1.4): Reset signal handlers on exec (BUG 4.5).
+     * POSIX requires caught signals to reset to SIG_DFL on exec. */
+    extern void signal_reset_on_exec(struct task_struct *task);
+    signal_reset_on_exec(t);
+
+    /* FIXED (v4.1.4): Transfer VMAs from the calling task (current) to
+     * the new task.  The VMAs were registered during elf_load_core for
+     * each PT_LOAD segment.  This ensures the page fault handler can
+     * validate lazy allocations.  (BUG 3.1) */
+    extern void vma_free_all(struct task_struct *task);
+    t->vm_areas = current->vm_areas;
+    current->vm_areas = NULL;
+
+    /* Register VMA for the user stack (if we allocated one) */
+    if (p1 && p2 && user_stack == 0) {
+        extern int vma_register(struct task_struct *task, uint64_t start, uint64_t end, uint64_t flags);
+        uint64_t stack_base = USER_STACK_TOP - 2 * 4096;
+        vma_register(t, stack_base, USER_STACK_TOP, VM_READ | VM_WRITE | VM_GROWSDOWN);
+    }
+
     log_printf(LOG_LEVEL_INFO, "Created user task pid=%d entry=%p cr3=%p\n",
                t->pid, entry, (void *)(uintptr_t)pml4_phys);
     return t->pid;

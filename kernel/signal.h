@@ -76,4 +76,10 @@ void signal_child_event(struct task_struct *child, int event);
 /* Allocate a new signal_state (lazy allocation) */
 struct signal_state *signal_alloc(void);
 
+/* FIXED (v4.1.4): Reset caught signals to SIG_DFL on exec (BUG 4.5).
+ * POSIX requires that signals with handlers set to SIG_DFL or SIG_IGN
+ * remain unchanged, but signals with custom handlers are reset to
+ * SIG_DFL.  Also clear pending signals. */
+void signal_reset_on_exec(struct task_struct *task);
+
 #endif /* SIGNAL_H */

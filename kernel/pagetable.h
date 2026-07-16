@@ -108,6 +108,21 @@ int user_page_present(uint64_t vaddr);
 void pf_handler_c(uint64_t error_code);
 
 /*
+ * FIXED (v4.1.4): VMA management for guard page protection.
+ * (BUG 3.1)
+ */
+struct vm_area;
+struct task_struct;
+/* Register a VMA for a task.  Returns 0 on success, -1 on failure. */
+int vma_register(struct task_struct *task, uint64_t start, uint64_t end, uint64_t flags);
+/* Free all VMAs for a task (called on task exit). */
+void vma_free_all(struct task_struct *task);
+/* Deep-copy all VMAs from parent to child (called on fork). */
+int vma_clone(struct task_struct *parent, struct task_struct *child);
+/* Check if an address falls within any registered VMA.  (BUG 4.8) */
+int vma_find(struct task_struct *task, uint64_t addr);
+
+/*
  * exec_elf: Load an ELF executable and create a new process.
  * @path: VFS path to the ELF binary.
  * Returns: new PID on success, negative on error.

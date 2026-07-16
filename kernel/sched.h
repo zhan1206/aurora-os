@@ -16,6 +16,11 @@
  *   - Single-core: no locks needed for scheduler data structures.
  *   - Interrupt safety: schedule() is called from yield() (syscall context)
  *     or check_resched() (IRQ context). No reentrancy issues on single-core.
+ *
+ * FIXED (v4.1.4): Added VMA (Virtual Memory Area) tracking to prevent
+ *   lazy allocation from bypassing guard pages.  The page fault handler
+ *   now checks that the fault address falls within a registered VMA
+ *   before allocating a page.  (BUG 3.1)
  */
 #ifndef SCHED_H
 #define SCHED_H
@@ -58,6 +63,26 @@ struct child_node {
     struct child_node *next;
 };
 
+/*
+ * Virtual Memory Area (VMA) - tracks a contiguous region of virtual
+ * address space with uniform permissions.  Used by the page fault
+ * handler to validate fault addresses before lazy allocation.
+ *
+ * FIXED (v4.1.4): Added to prevent lazy allocation from bypassing
+ * guard pages.  (BUG 3.1)
+ */
+#define VM_READ       0x1
+#define VM_WRITE      0x2
+#define VM_EXEC       0x4
+#define VM_GROWSDOWN  0x100   /* stack-like: grows downward on fault */
+
+struct vm_area {
+    uint64_t vm_start;        /* start address (page-aligned) */
+    uint64_t vm_end;          /* end address (page-aligned, exclusive) */
+    uint64_t vm_flags;        /* VM_* flags */
+    struct vm_area *next;     /* linked list */
+};
+
 /* Task control block */
 struct task_struct {
     /* --- Context --- */
@@ -65,6 +90,7 @@ struct task_struct {
     uint64_t  cr3;             /* physical PML4 base for this task */
     void     *stack_phys;      /* physical base of stack (first page) */
     void     *stack_phys2;     /* second page of stack (for freeing) */
+    void     *current_tf;      /* FIXED (v4.1.4): per-task trapframe ptr (was global, BUG 4.4) */
 
     /* --- Identity --- */
     int       pid;             /* process ID */
@@ -101,6 +127,7 @@ struct task_struct {
     /* --- Memory management --- */
     uint64_t  brk;             /* program break (heap end) for this process */
     uint64_t  mmap_base;       /* next mmap allocation address (ASLR-randomized) */
+    struct vm_area *vm_areas;  /* FIXED (v4.1.4): VMA linked list for guard page support (BUG 3.1) */
 
     /* --- Environment variables --- */
     char      env_keys[16][64];   /* environment variable keys */
@@ -112,6 +139,15 @@ struct task_struct {
 
     /* --- Error handling --- */
     int       t_errno;         /* per-task errno (thread-safe) */
+
+    /* --- FPU/SSE state --- */
+    /*
+     * FIXED (v4.1.4): Per-task FPU/SSE save area for context switch.
+     * FXSAVE64 requires 512 bytes with 16-byte alignment.  Without this,
+     * floating-point/SSE registers are not preserved across context
+     * switches, causing incorrect computation results.  (BUG 4.7)
+     */
+    uint8_t   fpu_state[512] __attribute__((aligned(16)));
 
     /* --- Sleep/wakeup --- */
     uint64_t  sleep_until;     /* absolute tick when this task should wake up (0 = not sleeping) */

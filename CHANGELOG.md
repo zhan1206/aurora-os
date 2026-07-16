@@ -1,5 +1,124 @@
 # AuroraOS Changelog
 
+## v4.1.4 (2026-07-16) — 全面Bug修复 + 安全性加固
+
+### 致命级Bug修复 (P0)
+
+**PTE_USER中间页表项 (BUG-001/2.1)**：
+- `kernel/pagetable.c`: `PTE_STRUCT_FLAGS` 包含 `PTE_USER`，x86_64逐级检查U/S位
+- `clone_current_pml4()` 使用 `PTE_STRUCT_FLAGS` 确保fork子进程页面可访问
+
+**VFS死锁修复 (BUG-002/2.3)**：
+- `kernel/vfs.c`: 新增 `vfs_dentry_evict_locked()` 内部函数
+- `dentry_alloc()` 调用 `vfs_dentry_evict_locked()` 避免非可重入锁死锁
+
+**Trapframe结构修复 (BUG-003)**：
+- `arch/x86_64/syscall.S`: trapframe增加RIP/RSP字段（15字段），匹配信号恢复
+
+**上下文切换栈布局修复 (BUG-004)**：
+- `kernel/sched.c`: 修正栈布局为7个push值（RFLAGS+6个callee-saved寄存器）
+
+**SMAP违规修复 (BUG-005/2.2)**：
+- `kernel/pagetable.c`: COW处理中memcpy用户页使用stac()/clac()保护
+
+**RDRAND死循环修复 (BUG-006/2.4)**：
+- `kernel/devtmpfs.c`: RDRAND失败时添加10次重试限制，防止不支持RDRAND的CPU挂起
+
+**FAT32 LFN解析修复 (BUG-007/2.5)**：
+- `kernel/fat32.c`: 修复LFN序列号检查，正确处理降序存储的长文件名条目
+
+**Pipe多读者/写者修复 (BUG-009/2.6)**：
+- `kernel/pipe.c`: 替换单个blocked_reader/writer指针为链表队列，支持多进程阻塞
+
+### 严重级Bug修复 (P1)
+
+**懒分配绕过Guard Page (BUG 3.1)**：
+- `kernel/pagetable.c`: 新增VMA管理（vma_register/vma_find/vma_clone），页故障处理验证VMA
+
+**Slab页面回收 (BUG 3.2)**：
+- `kernel/mem.c`: 新增slab_free_count跟踪，全部对象释放时归还伙伴系统
+
+**waitpid唤醒丢失 (BUG 3.3)**：
+- `kernel/sched.c`: 原子状态转换+重检查，防止唤醒丢失
+
+**sys_ioctl用户指针 (BUG 3.4)**：
+- `kernel/syscall.c`: sys_ioctl使用copy_from_user验证arg
+
+**sigreturn RFLAGS恢复 (BUG 3.5)**：
+- `kernel/signal.c`: 修复RFLAGS掩码，保留IF位(0x200)
+
+**信号发送权限检查 (BUG 3.6)**：
+- `kernel/signal.c`: do_sys_kill添加权限检查，保护init进程
+
+**procfs缓冲区溢出 (BUG 3.7)**：
+- `kernel/procfs.c`: read_interrupts缓冲区增大至4096字节
+
+**seccomp过滤器移除 (BUG 3.8)**：
+- `kernel/seccomp.c`: 一次性门模型，安装后拒绝NULL过滤器
+
+**capability fd_table类型混淆 (BUG 3.9)**：
+- `kernel/sched.h`: fd_table使用uintptr_t统一存储，类型标记区分
+
+**ASLR ChaCha20状态锁 (BUG 3.10)**：
+- `kernel/aslr.c`: 全局ChaCha20状态添加自旋锁保护
+
+**RamFS锁保护 (BUG 3.11)**：
+- `kernel/ramfs.c`: 添加ramfs_lock自旋锁保护链表操作
+
+**EXT2稀疏文件处理 (BUG 3.12)**：
+- `kernel/ext2.c`: 稀疏块返回零填充而非-EIO
+
+**mount dentry不可evict (BUG 3.13)**：
+- `kernel/vfs.c`: vfs_dentry_evict跳过DENTRY_FLAG_MOUNT标记的dentry
+
+### 中等级Bug修复 (P2)
+
+**页表操作锁 (BUG 4.1)**：
+- `kernel/pagetable.c`: map_page/unmap_page/clone_current_pml4添加pt_lock自旋锁保护
+
+**reparent_children_to_init锁 (BUG 4.2)**：
+- `kernel/sched.c`: 修改init_task->children链表时持child_lock
+
+**find_task_by_pid UAF (BUG 4.3)**：
+- `kernel/sched.c`: pid_table读取与状态检查添加pid_lock
+
+**current_tf全局变量 (BUG 4.4)**：
+- `kernel/sched.h`: current_tf改为per-task字段
+
+**execve信号处理器重置 (BUG 4.5)**：
+- `kernel/signal.c`: 新增signal_reset_on_exec()，exec时重置为SIG_DFL
+
+**nanosleep EINTR处理 (BUG 4.6)**：
+- `kernel/syscall.c`: schedule()后检查信号，返回EINTR和剩余时间
+
+**FPU/SSE状态保存 (BUG 4.7)**：
+- `kernel/sched.h`: task_struct新增fpu_state[512]字段
+- `kernel/sched.c`: schedule()中fxsave64/fxrstor64保存/恢复FPU状态
+
+**信号帧栈边界检查 (BUG 4.8)**：
+- `kernel/signal.c`: 信号帧放置前检查VMA边界，防止覆盖栈帧
+
+**信号嵌套防护 (BUG 4.9)**：
+- `kernel/signal.c`: 已有信号处理中(saved_rip!=0)时延迟新信号投递
+
+**EXT2组描述符同步 (BUG 4.11)**：
+- `kernel/ext2.c`: 新增ext2_write_gd()，分配/释放时写回组描述符到磁盘
+
+**负dentry回收 (BUG 4.12)**：
+- `kernel/fs.h`: 新增DENTRY_FLAG_NEGATIVE标记
+- `kernel/vfs.c`: lookup失败标记负dentry，evict时回收无引用的负dentry
+
+### 低等级Bug修复 (P3)
+
+**poll语义修复 (BUG 5.9)**：
+- `kernel/syscall.c`: sys_poll仅对offset<size的文件返回POLLIN
+
+### 文档更新
+
+- 版本号更新至v4.1.4（README、architecture.md、version.h）
+- api.md系统调用数更新为77个
+- 各模块自测试数更新
+
 ## v4.1.3 (2026-07-15) — 安全加固 + 稳定性提升 + 功能完善
 
 ### 安全加固（阶段二）

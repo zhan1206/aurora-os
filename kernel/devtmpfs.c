@@ -133,15 +133,26 @@ static ssize_t dev_console_write(struct file *filp, const void *buf, size_t coun
 /*
  * rdrand32: Get a 32-bit random value using RDRAND instruction.
  * Returns 1 on success, 0 if RDRAND is not available or failed.
+ *
+ * FIXED (v4.1.4): Added retry limit to prevent infinite loop on CPUs
+ * without RDRAND support.  RDRAND can fail transiently when the hardware
+ * RNG is exhausted, but on CPUs without RDRAND, CF is always 0 and the
+ * jnc instruction loops forever.  Now retries up to 10 times.  (BUG-006 / 2.4)
  */
 static int rdrand32(uint32_t *val) {
     int ok = 0;
+    int retries = 0;
     asm volatile (
         "1:\n\t"
         "rdrand %0\n\t"
         "setc %1\n\t"
-        "jnc 1b\n\t"
-        : "=r"(*val), "=qm"(ok)
+        "cmpb $1, %1\n\t"
+        "je 2f\n\t"
+        "incl %2\n\t"
+        "cmpl $10, %2\n\t"
+        "jl 1b\n\t"
+        "2:\n\t"
+        : "=r"(*val), "=qm"(ok), "+r"(retries)
         :
         : "cc"
     );

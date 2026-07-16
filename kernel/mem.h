@@ -36,6 +36,7 @@ struct page {
     uint32_t flags;           /* PAGE_FLAG_* */
     uint32_t order;           /* allocation order (0..MAX_ORDER) */
     uint32_t ref_count;       /* reference count for COW */
+    uint32_t slab_free_count; /* FIXED (v4.1.4): number of free objects from this slab page (BUG 3.2) */
     uint64_t phys_addr;       /* physical address of this page */
     struct page *buddy;       /* buddy pointer for buddy system */
     struct page *next;        /* free list link */

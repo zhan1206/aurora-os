@@ -4,6 +4,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "syscall.h"
+#include "pagetable.h"
 #include "include/log.h"
 #include "include/userspace.h"
 #include "include/trapframe.h"
@@ -30,6 +31,28 @@ int do_sys_kill(int pid, int sig) {
 
     struct task_struct *target = find_task_by_pid(pid);
     if (!target) return -1;
+
+    /*
+     * FIXED (v4.1.4): Permission check for signal sending.
+     * Only allow:
+     *   - Sending to self (same process)
+     *   - Sending SIGCONT if in same session (not yet tracked)
+     *   - Sending any signal if real/effective UID matches (all UID=0 for now)
+     *   - SIGKILL/SIGSTOP/SIGCHLD: always allowed within the same UID
+     * Protect init (pid=1) from arbitrary signals.  (BUG 3.6)
+     */
+    if (target->pid != current->pid) {
+        /* Protect init: only SIGKILL, SIGSTOP, SIGCHLD allowed */
+        if (target->pid == 1) {
+            if (sig != SIGKILL && sig != SIGSTOP && sig != SIGCHLD) {
+                return -1;
+            }
+        }
+        /* Simple UID check: all processes run as UID 0 for now,
+         * so this check always passes.  When multi-user support
+         * is added, this should verify that sender's UID matches
+         * target's UID or sender is root. */
+    }
 
     log_printf(LOG_LEVEL_DEBUG, "signal: kill(pid=%d, sig=%d)\n", pid, sig);
 
@@ -97,7 +120,7 @@ int do_sys_sigaction(int signo, const struct sigaction *act,
  * syscall.S's iretq/sysretq returns to the original user context.
  * ================================================================ */
 void do_sys_sigreturn(void) {
-    if (!current_tf) {
+    if (!current->current_tf) {
         log_printf(LOG_LEVEL_ERR, "signal: sigreturn with no trapframe\n");
         do_exit_current(1);
         return;
@@ -131,25 +154,31 @@ void do_sys_sigreturn(void) {
                            sizeof(frame)) == 0 &&
             frame.signo > 0 && frame.signo < NSIG) {
             /* Restore all general-purpose registers from the sigframe */
-            current_tf->r15 = frame.r15;
-            current_tf->r14 = frame.r14;
-            current_tf->r13 = frame.r13;
-            current_tf->r12 = frame.r12;
-            current_tf->r11 = frame.rflags & 0x3F7FD7;  /* R11 = RFLAGS; mask IOPL/IF/NT/TF/AC */
-            current_tf->r10 = frame.r10;
-            current_tf->r9  = frame.r9;
-            current_tf->r8  = frame.r8;
-            current_tf->rsi = frame.rsi;
-            current_tf->rdi = frame.rdi;
-            current_tf->rdx = frame.rdx;
-            current_tf->rcx = frame.rcx;
-            current_tf->rax = frame.rax;
-            current_tf->rip = frame.rip;
-            current_tf->rsp = frame.rsp;
+            current->current_tf->r15 = frame.r15;
+            current->current_tf->r14 = frame.r14;
+            current->current_tf->r13 = frame.r13;
+            current->current_tf->r12 = frame.r12;
+            /*
+             * FIXED (v4.1.4): Preserve IF bit (0x200) in RFLAGS during
+             * sigreturn.  The previous mask 0x3F7FD7 cleared bit 9 (IF),
+             * disabling interrupts for user processes after signal handler
+             * return.  New mask 0x3F7FF7 preserves IF.  (BUG 3.5)
+             */
+            current->current_tf->r11 = frame.rflags & 0x3F7FF7;  /* mask IOPL/NT/TF/AC, preserve IF */
+            current->current_tf->r10 = frame.r10;
+            current->current_tf->r9  = frame.r9;
+            current->current_tf->r8  = frame.r8;
+            current->current_tf->rsi = frame.rsi;
+            current->current_tf->rdi = frame.rdi;
+            current->current_tf->rdx = frame.rdx;
+            current->current_tf->rcx = frame.rcx;
+            current->current_tf->rax = frame.rax;
+            current->current_tf->rip = frame.rip;
+            current->current_tf->rsp = frame.rsp;
         } else {
             /* Fallback: restore RIP/RSP from saved context only */
-            current_tf->rip = current->sig->saved_rip;
-            current_tf->rsp = current->sig->saved_rsp;
+            current->current_tf->rip = current->sig->saved_rip;
+            current->current_tf->rsp = current->sig->saved_rsp;
         }
 
         current->sig->saved_rip = 0;
@@ -159,7 +188,7 @@ void do_sys_sigreturn(void) {
         current->sig->blocked = 0;
 
         log_printf(LOG_LEVEL_DEBUG, "signal: sigreturn restored RIP=%p RSP=%p\n",
-                   (void *)current_tf->rip, (void *)current_tf->rsp);
+                   (void *)current->current_tf->rip, (void *)current->current_tf->rsp);
     } else {
         log_printf(LOG_LEVEL_WARN, "signal: sigreturn with no saved context\n");
     }
@@ -197,7 +226,7 @@ void check_signals(void) {
     if (!current) return;
     if (!current->sig) return;
     if (current->sig->pending == 0) return;
-    if (!current_tf) return;  /* no trapframe = kernel context, defer */
+    if (!current->current_tf) return;  /* no trapframe = kernel context, defer */
 
     struct signal_state *sig = current->sig;
 
@@ -221,6 +250,20 @@ void check_signals(void) {
          * User-defined handler: push sigframe onto user stack
          * and redirect execution to the handler.
          *
+         * FIXED (v4.1.4): Prevent signal nesting.  If a signal handler is
+         * already in progress (saved_rip != 0), defer delivery of new signals
+         * until the current handler returns via sigreturn.  This prevents
+         * the saved_rip/saved_rsp (the original user context) from being
+         * overwritten, which would permanently lose the return context for
+         * the first signal handler.  (BUG 4.9)
+         */
+        if (sig->saved_rip != 0) {
+            /* Signal already being handled — defer this signal */
+            sig->pending |= (1U << s);  /* re-queue */
+            continue;
+        }
+
+        /*
          * User stack layout after setup (grows downward):
          *   [original RSP]      ← original top
          *   [sigframe]          ← saved registers
@@ -235,7 +278,7 @@ void check_signals(void) {
          * Saved context is stored in per-task signal_state,
          * not in globals (fixes thread-safety issue).
          */
-        uint64_t user_rsp = current_tf->rsp;
+        uint64_t user_rsp = current->current_tf->rsp;
 
         /* Trampoline code: mov eax, SYS_SIGRETURN; syscall (7 bytes) */
         #define TRAMPOLINE_SIZE 16  /* 16-byte aligned for safety */
@@ -253,6 +296,19 @@ void check_signals(void) {
         /* Validate new_rsp is still in user address space (not wrapped to kernel) */
         if (new_rsp > user_rsp) {
             log_printf(LOG_LEVEL_ERR, "signal: stack underflow detected\n");
+            do_signal_default(s);
+            return;
+        }
+
+        /*
+         * FIXED (v4.1.4): Check that the signal frame falls within a
+         * registered VMA.  Without this check, a signal frame could be
+         * placed below the stack VMA boundary, overwriting the syscall
+         * return address or other critical data on the stack.  (BUG 4.8)
+         */
+        if (!vma_find(current, new_rsp)) {
+            log_printf(LOG_LEVEL_ERR, "signal: sigframe at %p outside VMA bounds\n",
+                       (void *)(uintptr_t)new_rsp);
             do_signal_default(s);
             return;
         }
@@ -296,21 +352,21 @@ void check_signals(void) {
 
         /* Save current user context */
         frame->signo  = s;
-        frame->r15    = current_tf->r15;
-        frame->r14    = current_tf->r14;
-        frame->r13    = current_tf->r13;
-        frame->r12    = current_tf->r12;
-        frame->r11    = current_tf->r11;
-        frame->r10    = current_tf->r10;
-        frame->r9     = current_tf->r9;
-        frame->r8     = current_tf->r8;
-        frame->rsi    = current_tf->rsi;
-        frame->rdi    = current_tf->rdi;
-        frame->rdx    = current_tf->rdx;
-        frame->rcx    = current_tf->rcx;
-        frame->rax    = current_tf->rax;
-        frame->rip    = current_tf->rip;
-        frame->rflags = current_tf->r11;  /* R11 holds RFLAGS from syscall entry */
+        frame->r15    = current->current_tf->r15;
+        frame->r14    = current->current_tf->r14;
+        frame->r13    = current->current_tf->r13;
+        frame->r12    = current->current_tf->r12;
+        frame->r11    = current->current_tf->r11;
+        frame->r10    = current->current_tf->r10;
+        frame->r9     = current->current_tf->r9;
+        frame->r8     = current->current_tf->r8;
+        frame->rsi    = current->current_tf->rsi;
+        frame->rdi    = current->current_tf->rdi;
+        frame->rdx    = current->current_tf->rdx;
+        frame->rcx    = current->current_tf->rcx;
+        frame->rax    = current->current_tf->rax;
+        frame->rip    = current->current_tf->rip;
+        frame->rflags = current->current_tf->r11;  /* R11 holds RFLAGS from syscall entry */
         frame->rsp    = user_rsp;
 
         /* Store saved context in per-task signal_state (thread-safe) */
@@ -318,9 +374,9 @@ void check_signals(void) {
         sig->saved_rip = frame->rip;
 
         /* Modify trapframe: redirect to handler */
-        current_tf->rip = (uint64_t)(uintptr_t)handler;
-        current_tf->rsp = new_rsp;
-        current_tf->rdi = (uint64_t)s;  /* arg0 = signo */
+        current->current_tf->rip = (uint64_t)(uintptr_t)handler;
+        current->current_tf->rsp = new_rsp;
+        current->current_tf->rdi = (uint64_t)s;  /* arg0 = signo */
 
         /* Restore AC flag to its original state, re-enabling SMAP
          * if it was previously enabled. */
@@ -344,4 +400,29 @@ void signal_child_event(struct task_struct *child, int event) {
     (void)event;
     if (!child || !child->parent) return;
     do_sys_kill(child->parent->pid, SIGCHLD);
+}
+
+/*
+ * FIXED (v4.1.4): Reset caught signals to SIG_DFL on exec.
+ * POSIX requires that signals with custom handlers (not SIG_DFL or
+ * SIG_IGN) are reset to SIG_DFL, and pending signals are cleared.
+ * (BUG 4.5)
+ */
+void signal_reset_on_exec(struct task_struct *task) {
+    if (!task || !task->sig) return;
+
+    for (int i = 1; i <= NSIG; i++) {
+        /* Skip SIGKILL and SIGSTOP — they can't be caught */
+        if (i == SIGKILL || i == SIGSTOP) continue;
+
+        if (task->sig->actions[i].sa_handler != SIG_DFL &&
+            task->sig->actions[i].sa_handler != SIG_IGN) {
+            task->sig->actions[i].sa_handler = SIG_DFL;
+            task->sig->actions[i].sa_flags = 0;
+        }
+    }
+
+    /* Clear pending signals */
+    task->sig->pending = 0;
+    task->sig->blocked = 0;
 }

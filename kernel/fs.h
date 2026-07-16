@@ -55,7 +55,8 @@ struct dentry {
 };
 
 /* Dentry flags */
-#define DENTRY_FLAG_MOUNT 0x01  /* dentry is a mount point; inode is sb->root */
+#define DENTRY_FLAG_MOUNT    0x01  /* dentry is a mount point; inode is sb->root */
+#define DENTRY_FLAG_NEGATIVE 0x02  /* FIXED (v4.1.4): negative dentry (lookup miss) (BUG 4.12) */
 
 /* File open flags */
 #define O_RDONLY  0
