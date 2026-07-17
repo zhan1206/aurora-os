@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
 
 ## 1. 概述
 
@@ -97,7 +97,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 | 主初始化 | `main.c` | 内核启动流程，各子系统初始化 |
 | 日志 | `log.c` | 分级日志输出（DEBUG/INFO/WARN/ERR） |
 | 断言 | `include/assert.h` | 运行时断言宏 |
-| 自检 | `selftest.c` | 内核自检框架（13 项） |
+| 自检 | `selftest.c` | 内核自检框架（26 组测试） |
 
 ### 3.2 内存管理
 
@@ -191,9 +191,9 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 |------|------|------|
 | 能力系统 | `capability.c` | 基于能力的访问控制 |
 | 栈保护 | `stack_protect.c` | 栈金丝雀保护（`-fstack-protector-strong`） |
-| ASLR | `aslr.c` | 地址空间布局随机化（xorshift64 PRNG，栈/mmap 随机化） |
+| ASLR | `aslr.c` | 地址空间布局随机化（ChaCha20 CSPRNG，栈/mmap 随机化） |
 | Seccomp | `seccomp.c` | 系统调用访问控制（256 位位图过滤器） |
-| SMAP/SMEP | `pagetable.c` | 内核访问保护（CR4 位 20/21），已启用，STAC/CLAC 已覆盖全部用户内存访问路径 |
+| SMAP/SMEP | `pagetable.c` | 内核访问保护（CR4 位 20/21），[Planned] STAC/CLAC 框架已就绪于 `userspace.h`，CR4 启用代码待实现 |
 | 模块签名 | `module_sign.c` | 内核模块完整性验证演示（占位实现，XOR 哈希 + 硬编码密钥，尚未启用） |
 
 ### 3.11 ELF 加载
@@ -322,16 +322,17 @@ ASLR 随机化:
 - ref_count 跟踪共享计数，为 0 时释放物理页
 
 ### 7.2 内核抢占
-- 当前采用协作式调度（yield）
-- PIT 定时器中断触发调度检查
+- 当前采用抢占式调度（VRFair，CFS/EEVDF 启发）
+- PIT 定时器中断触发 `schedule_tick()` 递减时间片
+- 时间片耗尽时设置 `need_resched` 标志，在安全点（iretq/syscall 返回）切换
+- 支持 `preempt_disable()`/`preempt_enable()` 嵌套保护临界区
 - SMP 支持工作窃取（work stealing）负载均衡
-- 未来可扩展为抢占式
 
 ### 7.3 安全架构
 - 用户/内核地址空间隔离（高半核）
 - 页表保护：用户模式不可访问内核页
 - NX 位防止用户态代码执行
-- ASLR 地址空间布局随机化（栈/mmap 随机化，xorshift64 PRNG）
+- ASLR 地址空间布局随机化（栈/mmap 随机化，ChaCha20 CSPRNG，多源熵：TSC+RDRAND）
 - 栈金丝雀保护（`-fstack-protector-strong`，随机 canary 值）
 - Seccomp 系统调用过滤（256 位位图，拒绝返回 -EPERM）
 - 能力系统提供细粒度访问控制
@@ -392,12 +393,12 @@ ASLR 随机化:
 | 文件系统 | VFS + RamFS + EXT2 | VFS + procfs + pipefs + devtmpfs + squashfs | CoolPotOS 文件系统类型更丰富 |
 | 终端 | VGA + 帧缓冲 | flanterm 终端渲染 | 不同终端实现方案 |
 | 容器化 | Dockerfile | Dockerfile | 均支持可复现构建 |
-| 70+ POSIX syscall | 是 (75+) | 是 | AuroraOS v4.0 已达到 75+ 系统调用 |
+| 70+ POSIX syscall | 是 (77 个) | 是 | AuroraOS v4.0 已达到 77 个系统调用 |
 | 多平台引导 | BIOS + UEFI | UEFI (Limine) | 启动方式不同 |
 
 ## 9. 未来规划
 
-> **v4.0.0 里程碑 (2026-07-11)**: 主要功能已实现。PIE 支持、DHCP/DNS/HTTP 客户端、FAT32 LFN + squashfs、红黑树调度器、抢占式调度、NVMe 驱动、TCP 拥塞控制 + IPv6、用户态 ELF、75+ POSIX 系统调用、DRM/KMS 框架、模块独立编译、26 组自测试、冒烟测试、回归测试框架已集成。多架构代码已准备但未集成到构建系统。
+> **v4.0.0 里程碑 (2026-07-11)**: 主要功能已实现。PIE 支持、DHCP/DNS/HTTP 客户端、FAT32 LFN + squashfs、红黑树调度器、抢占式调度、NVMe 驱动、TCP 拥塞控制 + IPv6、用户态 ELF、77 个 POSIX 系统调用、DRM/KMS 框架、模块独立编译、26 组自测试、冒烟测试、回归测试框架已集成。多架构代码已准备但未集成到构建系统。
 
 ### v4.0.0 里程碑 — 已集成功能
 - ✅ **PIE 支持**: 6 种重定位类型（R_X86_64_RELATIVE/GLOB_DAT/JUMP_SLOT/64/PC32/IRELATIVE），ASLR 随机基址，argv/envp 传递
@@ -412,7 +413,7 @@ ASLR 随机化:
 - ✅ **TCP 拥塞控制**: TCP Reno（慢启动/拥塞避免/快速重传/快速恢复），RTT 估算，窗口缩放
 - ✅ **IPv6**: 链路本地地址（EUI-64），NDP 邻居发现，ICMPv6 Echo
 - ✅ **用户态 ELF**: auxv 向量，用户栈设置，16 字节对齐
-- ✅ **POSIX 系统调用**: 75+ 系统调用（新增 30 个），SYS_MAX_NUM=384
+- ✅ **POSIX 系统调用**: 77 个系统调用，SYS_MAX_NUM=384
 - ✅ **DRM/KMS**: 帧缓冲管理，8×16 字体，双缓冲 flip，GOP 集成
 - ✅ **模块独立编译**: .km 格式，版本检查，依赖检查，Makefile 模板
 - ✅ **自测试**: 26 组测试（14→26），冒烟测试，回归测试框架（5 套件）

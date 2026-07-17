@@ -1,5 +1,46 @@
 # AuroraOS Changelog
 
+## v4.1.5 (2026-07-18) — 关键Bug修复 + 文档一致性修正
+
+### 致命级Bug修复 (P0)
+
+**clone_current_pml4 失败返回内核CR3 (BUG 5.1)**：
+- `kernel/pagetable.c`: `clone_current_pml4()` 在 `alloc_page()` 失败时原返回 `kernel_cr3`，导致 fork 子进程共享内核页表，修改用户页面会破坏父进程映射。修复为返回 0，调用者检查 0 值并处理错误。
+- `kernel/syscall.c`: `sys_fork()` 更新检查条件从 `child_cr3 == get_kernel_cr3()` 改为 `!child_cr3`
+- `kernel/selftest.c`: 自测试更新检查条件从 `child_cr3 == cr3` 改为 `!child_cr3`
+
+**COW 页故障竞态条件 (BUG 5.2)**：
+- `kernel/pagetable.c`: 两个 CPU 同时处理同一页面的 COW 故障时，都会递减 `ref_count` 并释放旧页面，导致双释放（double-free）和页表损坏。修复为使用 `__sync_bool_compare_and_swap` 原子替换 PTE，仅 CAS 获胜者释放旧页面，失败者释放未使用的新页面。
+- 单引用路径也使用 CAS 设置 RW 位，防止与并发克隆竞态。
+
+### 严重级Bug修复 (P1)
+
+**SMP 调度器死锁 (BUG 5.3)**：
+- `kernel/sched.c`: 三处 `cli; hlt` 替换为 `sti; hlt`。原代码在 SMP 系统上禁用中断后挂起 CPU，导致 IPI 和定时器中断无法唤醒该 CPU，造成永久挂起。修复后中断保持开启，IPI 和定时器中断可唤醒挂起的 CPU。
+
+**sys_getrandom 使用非安全 LCG (BUG 5.4)**：
+- `kernel/syscall.c`: `sys_getrandom()` 原使用硬编码种子的简单 LCG（`seed * 6364136223846793005ULL + 1`），替换为内核 ChaCha20 CSPRNG（`chacha20_random_bytes()`），提供密码学安全的随机字节。
+- `kernel/aslr.c`: 新增 `chacha20_random_bytes()` 公开函数，线程安全（内部自旋锁保护全局 ChaCha20 状态）。
+- `kernel/aslr.h`: 新增 `chacha20_random_bytes()` 和 `aslr_prng_name()` 声明，修正过时的 xorshift64 注释。
+
+### 中等级Bug修复 (P2)
+
+**启动日志过时 (BUG 5.5)**：
+- `kernel/main.c`: 启动日志硬编码 `"ASLR initialized (xorshift64 PRNG)"` 替换为动态调用 `aslr_prng_name()`，始终反映实际使用的 PRNG 算法。
+
+**mem.c spinlock_t 重复定义注释 (BUG 5.6)**：
+- `kernel/mem.c`: 添加注释说明 `spinlock_t` 有意在 `mem.c` 中重复定义而非引用 `smp.h`，以避免循环依赖（`smp.h`→`sched.h`→`mem.h`）。标注需与 `smp.h:131-161` 保持同步。
+
+### 文档修正
+
+- `docs/architecture.md`: 修正 SMAP/SMEP 状态从"已启用"改为 `[Planned]`，STAC/CLAC 框架已就绪于 `userspace.h`，CR4 启用代码待实现
+- `docs/architecture.md`: 修正 ASLR PRNG 描述从 xorshift64 改为 ChaCha20 CSPRNG（多源熵：TSC+RDRAND）
+- `docs/architecture.md`: 修正调度器描述从"协作式调度（yield）"改为"抢占式调度（VRFair，CFS/EEVDF 启发）"，补充 `schedule_tick()` 和 `preempt_disable/enable` 说明
+- `docs/architecture.md`: 修正系统调用数量从 75+ 改为 77 个
+- `docs/architecture.md`: 修正自测试数量从 13 项改为 26 组测试
+
+---
+
 ## v4.1.4 (2026-07-16) — 全面Bug修复 + 安全性加固
 
 ### 致命级Bug修复 (P0)

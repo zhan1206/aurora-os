@@ -600,7 +600,7 @@ long sys_fork(void) {
     if (!current) { current->t_errno = ESRCH; return -1; }
 
     uint64_t child_cr3 = clone_current_pml4();
-    if (child_cr3 == get_kernel_cr3()) { current->t_errno = ENOMEM; return -1; }
+    if (!child_cr3) { current->t_errno = ENOMEM; return -1; }
 
     /* Create child task that starts from the fork return point */
     struct task_struct *child = create_task(NULL);
@@ -1947,22 +1947,22 @@ static long sys_sched_yield(void) {
 }
 
 /* ================================================================
- * SYS_GETRANDOM — Get random bytes (simplified)
+ * SYS_GETRANDOM — Get random bytes (CSPRNG via ChaCha20)
  * ================================================================ */
 static long sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
     if (!buf || buflen == 0) { current->t_errno = EINVAL; return -1; }
     if (!user_addr_range_ok(buf, buflen)) { current->t_errno = EFAULT; return -1; }
-
-    /* Simplified: use a simple LCG for pseudo-random bytes */
-    static uint64_t seed = 0x12345678;
     (void)flags;
 
+    /* Use the kernel's ChaCha20 CSPRNG (shared with ASLR).
+     * This provides cryptographically secure random bytes
+     * with multi-source entropy (TSC + RDRAND). */
     uint8_t *kbuf = (uint8_t *)kmalloc(buflen);
     if (!kbuf) { current->t_errno = ENOMEM; return -1; }
 
-    for (size_t i = 0; i < buflen; i++) {
-        seed = seed * 6364136223846793005ULL + 1;
-        kbuf[i] = (uint8_t)(seed >> 32);
+    if (chacha20_random_bytes(kbuf, buflen) != 0) {
+        kfree(kbuf);
+        current->t_errno = EIO; return -1;
     }
 
     if (copy_to_user(buf, kbuf, buflen) != 0) {

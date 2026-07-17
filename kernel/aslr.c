@@ -287,3 +287,52 @@ uint64_t aslr_randomize_mmap(void) {
  * randomize the mmap base for each library independently, using the
  * same ChaCha20 CSPRNG, to mitigate return-to-libc and similar attacks.
  */
+
+/* ================================================================
+ * Public CSPRNG API — for use by other kernel subsystems
+ * ================================================================ */
+
+/*
+ * chacha20_random_bytes: Fill @len bytes at @out with cryptographically
+ * secure random bytes from the ChaCha20 CSPRNG.
+ *
+ * Thread-safe: the internal chacha_lock spinlock protects the global
+ * ChaCha20 state from concurrent access on SMP systems.
+ *
+ * Returns 0 on success, -1 if @out is NULL or @len is 0.
+ */
+int chacha20_random_bytes(uint8_t *out, size_t len) {
+    if (!out || len == 0) return -1;
+
+    chacha_spin_lock();
+
+    /*
+     * Use chacha20_encrypt with a zero-filled buffer as input.
+     * XOR with zero produces the raw keystream, which is the
+     * cryptographically secure random output.
+     */
+    /*
+     * We need a temporary buffer for the "plaintext" (all zeros).
+     * Process in 64-byte chunks to stay within stack limits.
+     */
+    uint8_t zero[64];
+    for (size_t i = 0; i < 64; i++) zero[i] = 0;
+
+    while (len > 0) {
+        size_t chunk = (len < 64) ? len : 64;
+        chacha20_encrypt(out, zero, chunk);
+        out += chunk;
+        len -= chunk;
+    }
+
+    chacha_spin_unlock();
+    return 0;
+}
+
+/*
+ * aslr_prng_name: Return a human-readable string identifying the
+ * PRNG algorithm.
+ */
+const char *aslr_prng_name(void) {
+    return "ChaCha20 CSPRNG";
+}

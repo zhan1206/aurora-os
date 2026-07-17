@@ -484,7 +484,14 @@ uint64_t clone_current_pml4(void) {
         log_printf(LOG_LEVEL_WARN, "pagetable: clone_current_pml4: alloc_page failed\n");
         spin_unlock(&pt_lock);
         irq_restore(irq_flags);
-        return kernel_cr3;
+        /*
+         * FIXED (v4.1.5): Return 0 on failure, not kernel_cr3.
+         * Previously, returning kernel_cr3 would cause the child process
+         * to share the kernel's page table.  Any modification to user
+         * pages by the child would corrupt the parent's mappings.
+         * Callers must check for 0 return and handle the error.  (BUG 5.1)
+         */
+        return 0;
     }
 
     uint64_t current_cr3 = read_cr3();
@@ -907,11 +914,20 @@ void pf_handler_c(uint64_t error_code) {
         uint32_t ref = page_ref_get(phys_page);
 
         if (ref <= 1) {
-            /* Only one reference — just make it writable */
-            pt[pt_idx] |= PTE_RW;
-            invlpg(cr2);
-            log_printf(LOG_LEVEL_DEBUG, "COW: single-ref page at %p, made writable\n",
-                       (void *)cr2);
+            /*
+             * Only one reference — just make it writable.
+             * FIXED (v4.1.5): Use CAS to atomically set the RW bit.
+             * Without CAS, two CPUs could both see ref<=1 and both try
+             * to make the page writable, racing with a third CPU that
+             * is cloning the page table.  (BUG 5.2)
+             */
+            uint64_t new_pte = pte | PTE_RW;
+            if (__sync_bool_compare_and_swap(&pt[pt_idx], pte, new_pte)) {
+                invlpg(cr2);
+                log_printf(LOG_LEVEL_DEBUG, "COW: single-ref page at %p, made writable\n",
+                           (void *)cr2);
+            }
+            /* If CAS failed, another CPU already handled it — just return */
             return;
         }
 
@@ -939,29 +955,36 @@ void pf_handler_c(uint64_t error_code) {
         memcpy(new_page, (void *)(uintptr_t)(cr2 & ~0xFFFULL), PAGE_SIZE);
         clac();
 
-        /* Decrement old page ref_count and free if no longer referenced */
+        /*
+         * FIXED (v4.1.5): Use atomic CAS to replace the PTE, preventing
+         * a race condition where two CPUs handling COW on the same page
+         * simultaneously would both decrement ref_count and free the old
+         * page.  Only the CPU that wins the CAS updates the PTE and frees
+         * the old page; the loser frees its unused new page.  (BUG 5.2)
+         */
         {
-            struct page *pg = page_of_phys(phys_page);
-            if (pg) {
-                uint32_t new_ref = __sync_sub_and_fetch(&pg->ref_count, 1);
-                if (new_ref == 0) {
-                    free_page((void *)(uintptr_t)phys_page);
+            uint64_t new_flags = (pte & (PTE_USER | PTE_NX)) | PTE_PRESENT | PTE_RW;
+            uint64_t new_pte = ((uint64_t)(uintptr_t)new_page & PTE_ADDR_MASK) | new_flags;
+
+            if (__sync_bool_compare_and_swap(&pt[pt_idx], pte, new_pte)) {
+                /* We won the CAS — decrement old ref_count and free if zero */
+                struct page *pg = page_of_phys(phys_page);
+                if (pg) {
+                    uint32_t new_ref = __sync_sub_and_fetch(&pg->ref_count, 1);
+                    if (new_ref == 0) {
+                        free_page((void *)(uintptr_t)phys_page);
+                    }
                 }
+                invlpg(cr2);
+                perf_inc(PERF_COW_COUNT);
+                log_printf(LOG_LEVEL_DEBUG, "COW: resolved at %p, new phys=%p\n",
+                           (void *)cr2, new_page);
+            } else {
+                /* Another CPU already resolved this COW fault.
+                 * Free our unused page and return. */
+                free_page(new_page);
             }
         }
-
-        /* Update PTE: new physical page, RW, preserve USER/NX */
-        uint64_t new_flags = (pte & (PTE_USER | PTE_NX)) | PTE_PRESENT | PTE_RW;
-        pt[pt_idx] = ((uint64_t)(uintptr_t)new_page & PTE_ADDR_MASK) | new_flags;
-
-        /* New page ref_count = 1 (implicit in alloc_page) */
-        invlpg(cr2);
-
-        /* Performance counter: COW page fault */
-        perf_inc(PERF_COW_COUNT);
-
-        log_printf(LOG_LEVEL_DEBUG, "COW: resolved at %p, new phys=%p\n",
-                   (void *)cr2, new_page);
         return;
     }
 

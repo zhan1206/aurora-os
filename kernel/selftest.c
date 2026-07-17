@@ -158,7 +158,7 @@ static void test_pagetable(void) {
 
     /* COW clone test */
     uint64_t child_cr3 = clone_current_pml4();
-    if (child_cr3 == cr3)
+    if (!child_cr3)
         log_printf(LOG_LEVEL_INFO, "  [SKIP] COW clone (allocation failed)\n");
     else {
         TEST_PASS("clone_current_pml4 (COW deep copy)");

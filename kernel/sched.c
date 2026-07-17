@@ -447,10 +447,12 @@ void schedule(void) {
     if (rq->head == NULL) {
         spin_unlock(&rq->lock);
         irq_restore(irq_flags);
-        /* No tasks in this CPU's run queue — halt or try to steal */
+        /* No tasks in this CPU's run queue — enable interrupts and halt.
+         * sti; hlt (not cli; hlt) ensures IPIs and timer interrupts can
+         * wake this CPU when new tasks are added to its queue. */
         log_printf(LOG_LEVEL_ERR, "schedule: CPU %d has no tasks, halting\n", cpu_id);
         for (;;) {
-            asm volatile ("cli; hlt");
+            asm volatile ("sti; hlt");
             if (rq->count > 0) break;
         }
         /* New tasks arrived, re-enter schedule */
@@ -495,7 +497,7 @@ void schedule(void) {
             irq_restore(irq_flags);
             log_printf(LOG_LEVEL_ERR, "schedule: CPU %d no runnable tasks, halting\n", cpu_id);
             for (;;) {
-                asm volatile ("cli; hlt");
+                asm volatile ("sti; hlt");
                 if (rq->count > 0) break;
             }
             schedule();
@@ -763,7 +765,7 @@ void do_exit_current(int code) {
         irq_restore(exit_irq_flags);
         log_printf(LOG_LEVEL_INFO, "do_exit_current: last task exiting, halting\n");
         for (;;) {
-            asm volatile ("cli; hlt");
+            asm volatile ("sti; hlt");
             if (rq->count > 0) break;
         }
         /* New tasks arrived, schedule them */

@@ -4,8 +4,10 @@
  * Provides randomized base addresses for mmap, stack, and other
  * user-space memory regions to mitigate memory corruption exploits.
  *
- * Randomization uses a simple xorshift64 PRNG seeded at boot time
- * via RDTSC or PIT tick counter.
+ * Randomization uses a ChaCha20-based CSPRNG seeded at boot time
+ * from multiple entropy sources (TSC + RDRAND if available).
+ * The PRNG is also exposed via chacha20_random_bytes() for use
+ * by other kernel subsystems (e.g., sys_getrandom).
  */
 #ifndef ASLR_H
 #define ASLR_H
@@ -56,5 +58,20 @@ uint64_t aslr_randomize_stack(void);
  * Returns a page-aligned address within the mmap region.
  */
 uint64_t aslr_randomize_mmap(void);
+
+/*
+ * chacha20_random_bytes: Fill @len bytes at @out with cryptographically
+ * secure random data from the ChaCha20 CSPRNG.  Thread-safe (internal
+ * spinlock protects the global PRNG state).
+ *
+ * Returns 0 on success, -1 on error (invalid parameters).
+ */
+int chacha20_random_bytes(uint8_t *out, size_t len);
+
+/*
+ * aslr_prng_name: Return a human-readable string identifying the
+ * PRNG algorithm in use (e.g., "ChaCha20 CSPRNG").
+ */
+const char *aslr_prng_name(void);
 
 #endif /* ASLR_H */

@@ -101,6 +101,13 @@ struct mb2_mmap_entry {
  * kmalloc/kfree would deadlock if it interrupts code already holding
  * the buddy or slab lock.  The saved interrupt flag is restored on
  * unlock, so nested interrupt-disable regions are preserved.
+ *
+ * NOTE: spinlock_t, spin_lock, and spin_unlock are intentionally
+ * duplicated here rather than included from smp.h.  mem.c is a
+ * low-level memory allocator that must not depend on smp.h (which
+ * pulls in sched.h -> mem.h, creating a circular header dependency).
+ * The definitions are kept identical to smp.h:131-161 to ensure
+ * ABI compatibility.  Any change to one must be mirrored in the other.
  * ================================================================ */
 typedef struct spinlock {
     volatile uint32_t locked;

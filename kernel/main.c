@@ -238,7 +238,14 @@ void kernel_main(uint32_t magic, void *mb_info) {
     BOOT_STEP();
 
     aslr_init();
-    console_status_ok("ASLR initialized (xorshift64 PRNG)");
+    console_write_ansi(BOOT_OK_FG);
+    console_write(STATUS_OK_STR);
+    console_write_ansi(SGR_RESET);
+    console_putc(' ');
+    console_write("ASLR initialized (");
+    console_write(aslr_prng_name());
+    console_write(")");
+    console_putc('\n');
     BOOT_STEP();
 
     page_table_init();
