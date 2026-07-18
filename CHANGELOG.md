@@ -1,5 +1,34 @@
 # AuroraOS Changelog
 
+## v4.1.7 (2026-07-18) — 日志格式化增强 + 内核自检修复
+
+### 日志系统修复 (3项)
+
+**log_vprintf 格式化增强 (BUG N1/N2/N3)**：
+- `kernel/log.c`: `log_vprintf()` 全面增强，支持 `%0Nx` 零填充十六进制（如 `%04x`、`%02x`、`%08x`）和 `%zu` 类型修饰符（size_t）。
+- 新增加宽度解析器（`width`）、零填充标志（`zero_pad`）和长度修饰符（`%z`、`%l`、`%ll`）处理。
+- 修复前，文件系统魔数（`0x%04x`）、MAC 地址（`%02x:%02x:...`）和 `sizeof()` 返回值（`%zu`）在日志中显示为字面量字符串，完全不可读。
+- 影响文件：`fsck.c`、`nvme.c`、`devtmpfs.c`、`squashfs.c`、`fat32.c`、`vfs.c`、`elfloader.c`、`module.c`、`net.c`
+
+### 内核自检修复
+
+**get_kernel_cr3 返回 0 (BUG N9)**：
+- `kernel/pagetable.c`: `page_table_init()` 改为直接通过内联汇编 `mov %%cr3, %0` 读取 CR3 到 `kernel_cr3`，避免通过 `read_cr3()` 函数间接调用时编译器优化可能导致的存储消除问题。
+- `kernel/pagetable.c`: `read_cr3()` 改为 `static inline`，确保函数始终内联，消除外部链接潜在问题。
+- `kernel/pagetable.h`: 移除 `read_cr3()` 公开声明（该函数仅在 `pagetable.c` 内部使用），避免与 `static` 定义冲突。
+
+### 网络栈修复
+
+**DHCP 双重 DISCOVER 发送 (BUG N5)**：
+- `kernel/net/dhcp.c`: 从 `dhcp_init()` 中移除自动 `dhcp_run()` 调用。`dhcp_init()` 现在仅初始化 DHCP 客户端状态，由调用方 `net_init()` 显式调用 `dhcp_run()` 启动 DHCP 状态机。
+- 修复前，`dhcp_init()` 内部和 `net_init()` 各调用一次 `dhcp_run()`，导致每次启动发送两条重复的 DHCP DISCOVER 报文。
+
+### 版本管理
+
+- `kernel/include/version.h`: 版本号更新至 v4.1.7 (AURORAOS_PATCH=7)
+
+---
+
 ## v4.1.6 (2026-07-18) — 编译/链接错误全面修复 + 运行时安全加固
 
 ### 致命级Bug修复 (P0)

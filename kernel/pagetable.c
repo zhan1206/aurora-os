@@ -68,7 +68,7 @@ static spinlock_t pt_lock = {0};
  * CR3 / TLB
  * ================================================================ */
 
-inline uint64_t read_cr3(void) {
+static inline uint64_t read_cr3(void) {
     uint64_t v;
     asm volatile ("mov %%cr3, %0" : "=r"(v));
     return v;
@@ -82,8 +82,15 @@ static inline void invlpg(uint64_t vaddr) {
  * Init
  * ================================================================ */
 
+/*
+ * FIXED (v4.1.7): Read CR3 directly into kernel_cr3 via inline assembly
+ * instead of calling read_cr3().  This avoids potential compiler
+ * optimization issues where the store to kernel_cr3 might be elided
+ * if the compiler does not properly inline read_cr3().
+ * (BUG N9: get_kernel_cr3 returned 0)
+ */
 void page_table_init(void) {
-    kernel_cr3 = read_cr3();
+    asm volatile ("mov %%cr3, %0" : "=r"(kernel_cr3));
     log_printf(LOG_LEVEL_INFO, "pagetable: kernel page tables initialized\n");
 
     uint32_t efer_lo, efer_hi;

@@ -35,18 +35,23 @@ static int      dhcp_initialized = 0;
 /* ================================================================
  * dhcp_init
  * ================================================================ */
+/*
+ * FIXED (v4.1.7): Removed auto-run of dhcp_run() from dhcp_init().
+ * Previously, dhcp_init() would call dhcp_run() internally if any
+ * network interface was available, AND net_init() would also call
+ * dhcp_run() explicitly.  This caused duplicate DHCP DISCOVER
+ * packets to be sent on every boot.  (BUG N5)
+ *
+ * dhcp_init() now only initializes the DHCP client state.
+ * The caller (net_init()) is responsible for calling dhcp_run()
+ * to start the DHCP state machine.
+ */
 int dhcp_init(void) {
     dhcp_xid = 0x12345678;
     memset(dhcp_offered_ip, 0, 4);
     memset(dhcp_server_ip, 0, 4);
     dhcp_initialized = 1;
     log_printf(LOG_LEVEL_INFO, "dhcp: client initialized\n");
-
-    /* Auto-run DHCP if there is a network interface available */
-    if (net_get_interface_count() > 0) {
-        dhcp_run();
-    }
-
     return 0;
 }
 

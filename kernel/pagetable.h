@@ -63,7 +63,6 @@ uint64_t *phys_to_virt(uint64_t pa);
 
 void page_table_init(void);
 uint64_t get_kernel_cr3(void);
-uint64_t read_cr3(void);
 
 /*
  * clone_current_pml4: COW-aware deep clone of user-space page tables.

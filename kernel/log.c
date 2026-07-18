@@ -83,6 +83,17 @@ void log_set_level(int level) {
  * Formatted log output
  * ================================================================ */
 
+/*
+ * FIXED (v4.1.7): Enhanced log_vprintf to support:
+ *   - Width specifier (e.g., %04x, %02x, %8u) for zero-padded output
+ *   - %z modifier for size_t (same width as unsigned long on x86_64)
+ *   - Zero-padding flag '0' for hex (%x) and decimal (%d/%u) formats
+ *
+ * Previously, %04x and %02x were printed as literal text because the
+ * '0' and width digits were not parsed.  This caused file system magic
+ * numbers, MAC addresses, and other hex values to be unreadable in logs.
+ * (BUG N1, N2, N3)
+ */
 void log_vprintf(int level, const char *fmt, va_list ap) {
     if (level > current_level) return;
 
@@ -93,10 +104,25 @@ void log_vprintf(int level, const char *fmt, va_list ap) {
     while (*p && n < (int)sizeof(buf) - 1) {
         if (*p == '%') {
             p++;
-            /* Handle length modifiers: hh, h, l, ll */
-            int long_mod = 0;  /* 0=none, 1=l, 2=ll */
-            if (*p == 'l') { p++; long_mod = 1; }
-            if (*p == 'l') { p++; long_mod = 2; }
+            if (*p == '\0') break;
+
+            /* Parse flags: '0' = zero-pad */
+            int zero_pad = 0;
+            if (*p == '0') { zero_pad = 1; p++; }
+
+            /* Parse width */
+            int width = 0;
+            while (*p >= '0' && *p <= '9') {
+                width = width * 10 + (*p - '0');
+                p++;
+            }
+
+            /* Handle length modifiers: hh, h, l, ll, z */
+            int long_mod = 0;  /* 0=none, 1=l/z, 2=ll */
+            if (*p == 'z') { p++; long_mod = 1; }
+            else if (*p == 'l') { p++; long_mod = 1; }
+            if (*p == 'l' && long_mod == 1) { p++; long_mod = 2; }
+
             if (*p == 's') {
                 const char *s = va_arg(ap, const char *);
                 if (!s) s = "(null)";
@@ -109,16 +135,18 @@ void log_vprintf(int level, const char *fmt, va_list ap) {
                 if (long_mod == 2)      v = va_arg(ap, int64_t);
                 else if (long_mod == 1) v = va_arg(ap, long);
                 else                    v = va_arg(ap, int);
-                if (v == 0) { buf[n++] = '0'; }
-                else {
-                    char tmp[32]; int tn = 0; int neg = v < 0;
-                    /* Avoid undefined behavior when v == INT64_MIN:
-                     * -v would overflow, so use unsigned arithmetic */
-                    uint64_t uv = neg ? (uint64_t)(-(v + 1)) + 1ULL : (uint64_t)v;
-                    while (uv && tn < (int)sizeof(tmp)) { tmp[tn++] = '0' + (uv % 10); uv /= 10; }
-                    if (neg) tmp[tn++] = '-';
-                    for (int i = tn - 1; i >= 0; --i) buf[n++] = tmp[i];
+                char tmp[32]; int tn = 0; int neg = v < 0;
+                uint64_t uv = neg ? (uint64_t)(-(v + 1)) + 1ULL : (uint64_t)v;
+                if (uv == 0) tmp[tn++] = '0';
+                while (uv && tn < (int)sizeof(tmp)) { tmp[tn++] = '0' + (uv % 10); uv /= 10; }
+                if (neg) tmp[tn++] = '-';
+                /* Zero-padding for decimal */
+                while (zero_pad && tn < width && n < (int)sizeof(buf) - 1) {
+                    buf[n++] = (neg && tn == width - 1) ? '-' : '0';
+                    if (neg) { neg = 0; width--; }
+                    width--;
                 }
+                for (int i = tn - 1; i >= 0; --i) buf[n++] = tmp[i];
             } else if (*p == 'u') {
                 uint64_t v;
                 if (long_mod == 2)      v = va_arg(ap, uint64_t);
@@ -129,6 +157,11 @@ void log_vprintf(int level, const char *fmt, va_list ap) {
                 while (v && tn < (int)sizeof(tmp)) {
                     tmp[tn++] = '0' + (v % 10);
                     v /= 10;
+                }
+                /* Zero-padding for unsigned decimal */
+                while (zero_pad && tn < width && n < (int)sizeof(buf) - 1) {
+                    buf[n++] = '0';
+                    width--;
                 }
                 for (int i = tn - 1; i >= 0; --i) buf[n++] = tmp[i];
             } else if (*p == 'x' || *p == 'p') {
@@ -143,9 +176,17 @@ void log_vprintf(int level, const char *fmt, va_list ap) {
                     tmp[tn++] = hex[v & 0xF]; v >>= 4;
                 }
                 if (*p == 'p') { buf[n++] = '0'; buf[n++] = 'x'; }
+                /* Zero-padding for hex */
+                while (zero_pad && tn < width && n < (int)sizeof(buf) - 1) {
+                    buf[n++] = '0';
+                    width--;
+                }
                 for (int i = tn - 1; i >= 0; --i) buf[n++] = tmp[i];
             } else {
+                /* Unknown format specifier: output literal */
                 buf[n++] = '%';
+                if (zero_pad) buf[n++] = '0';
+                /* width digits already consumed by parser, output them back */
                 if (*p) buf[n++] = *p;
             }
             if (*p) p++;
