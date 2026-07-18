@@ -13,6 +13,7 @@
 #define ASLR_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* ================================================================
  * ASLR constants

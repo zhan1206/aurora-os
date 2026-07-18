@@ -63,6 +63,22 @@ static inline struct cpu_data *this_cpu(void) {
     return ptr;
 }
 
+/*
+ * current_cpu_id: Return the logical CPU ID of the current processor.
+ * Returns 0 (BSP) before SMP initialization is complete.
+ *
+ * FIXED (v4.1.6): Moved from sched.c static inline to smp.h so it is
+ * visible to all kernel files.  Previously pit_handler.c had an
+ * implicit declaration warning.  (BUG 6.5)
+ */
+static inline int current_cpu_id(void) {
+    /* Before SMP init, GS base is 0 (set by syscall_init).
+     * Reading %%gs:0 would dereference address 0, potentially
+     * causing a page fault. Return 0 (BSP) until SMP is ready. */
+    if (!smp_sched_ready) return 0;
+    return this_cpu()->cpu_id;
+}
+
 /* ================================================================
  * SMP API
  * ================================================================ */
@@ -128,9 +144,12 @@ void smp_tlb_shootdown(uint64_t vaddr);
  *   [ ] New syscall numbers appended to end of enum (never reused)
  * ================================================================ */
 
+#ifndef SPINLOCK_T_DEFINED
+#define SPINLOCK_T_DEFINED
 typedef struct spinlock {
     volatile uint32_t locked;
 } spinlock_t;
+#endif /* SPINLOCK_T_DEFINED */
 
 /* Initialize a spinlock */
 static inline void spin_init(spinlock_t *lock) {

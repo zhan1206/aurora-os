@@ -20,6 +20,10 @@
 #include "include/string.h"
 #include "mem.h"
 
+/* Forward declarations for file_ops tables (referenced before definition) */
+static struct file_ops fat32_file_ops;
+static struct file_ops fat32_dir_ops;
+
 /* ================================================================
  * Block device helpers
  * ================================================================ */

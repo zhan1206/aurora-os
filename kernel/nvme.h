@@ -8,10 +8,10 @@
 #define NVME_H
 
 #include <stdint.h>
+#include "block_dev.h"
 
 /* Forward declarations for types used in this header */
 struct pci_device;
-struct block_device;
 
 /* ================================================================
  * NVMe PCI Class Code

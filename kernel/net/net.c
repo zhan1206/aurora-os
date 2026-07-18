@@ -19,6 +19,16 @@ static inline uint16_t ntohs(uint16_t n) {
     return ((n & 0xFF) << 8) | ((n & 0xFF00) >> 8);
 }
 
+/* Forward declarations for protocol handlers */
+static void icmp_handle_packet(struct net_device *netdev,
+                               const uint8_t src_ip[4],
+                               const uint8_t *data, int len);
+static void udp_handle_packet(const uint8_t src_ip[4],
+                              const uint8_t *data, int len);
+static void tcp_handle_packet(const uint8_t src_ip[4],
+                              const uint8_t dst_ip[4],
+                              const uint8_t *data, int len);
+
 static inline uint16_t htons(uint16_t n) {
     return ntohs(n);
 }

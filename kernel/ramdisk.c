@@ -87,7 +87,13 @@ int ramdisk_init(uint64_t size_mb) {
 
     priv->data = ramdisk_buffer;
     priv->size = size;
-    memset(priv->data, 0, (size_t)size);
+    /*
+     * FIXED (v4.1.6): Commented out memset — BSS is already zero-initialized
+     * by the kernel loader.  The 1 MiB memset on the static ramdisk_buffer
+     * could trigger a page fault if the BSS section extends beyond the
+     * identity-mapped region.  (BUG 6.3)
+     */
+    /* memset(priv->data, 0, (size_t)size); */
 
     /* Store in globals for the read/write callbacks */
     g_ramdisk_priv = priv;

@@ -98,21 +98,43 @@ void page_table_init(void) {
 
     /*
      * Enable SMEP (Supervisor Mode Execution Prevention) and SMAP
-     * (Supervisor Mode Access Prevention) via CR4 bits.
+     * (Supervisor Mode Access Prevention) via CR4 bits, only if the
+     * CPU supports them (detected via CPUID).
      *
      * SMEP (CR4 bit 20): Prevents kernel from executing code in
      *   user-accessible pages. Mitigates ret2usr attacks.
      * SMAP (CR4 bit 21): Prevents kernel from accessing user-accessible
      *   data pages. Can be temporarily disabled via STAC/CLAC.
      *
+     * QEMU default does NOT support SMEP/SMAP. CPUID.7.0 is used to
+     * check for SMEP (EBX bit 7) and SMAP (EBX bit 20).
+     *
      * CoolPotOS-inspired security hardening.
      */
     uint64_t cr4;
     asm volatile ("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1ULL << 20);  /* CR4.SMEP */
-    cr4 |= (1ULL << 21);  /* CR4.SMAP */
+
+    /* Check CPUID.7.0 for SMEP and SMAP support */
+    uint32_t eax, ebx, ecx, edx;
+    eax = 7; ebx = ecx = edx = 0;
+    asm volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "0"(eax), "2"(ecx) : "memory");
+
+    if (ebx & (1U << 7)) {
+        cr4 |= (1ULL << 20);  /* CR4.SMEP */
+        log_printf(LOG_LEVEL_INFO, "pagetable: SMEP enabled\n");
+    } else {
+        log_printf(LOG_LEVEL_WARN, "pagetable: SMEP not supported by CPU, skipping\n");
+    }
+
+    if (ebx & (1U << 20)) {
+        cr4 |= (1ULL << 21);  /* CR4.SMAP */
+        log_printf(LOG_LEVEL_INFO, "pagetable: SMAP enabled\n");
+    } else {
+        log_printf(LOG_LEVEL_WARN, "pagetable: SMAP not supported by CPU, skipping\n");
+    }
+
     asm volatile ("mov %0, %%cr4" :: "r"(cr4) : "memory");
-    log_printf(LOG_LEVEL_INFO, "pagetable: SMEP+SMAP enabled (CR4=0x%llx)\n", cr4);
+    log_printf(LOG_LEVEL_INFO, "pagetable: SMEP+SMAP configured (CR4=0x%llx)\n", cr4);
 }
 
 uint64_t get_kernel_cr3(void) {

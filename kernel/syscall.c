@@ -792,6 +792,11 @@ static long sys_socket(int domain, int type, int protocol) {
     return sock;
 }
 
+/* Helper: ntohs for syscall use */
+static inline uint16_t sys_ntohs(uint16_t n) {
+    return ((n & 0xFF) << 8) | ((n & 0xFF00) >> 8);
+}
+
 /* ================================================================
  * SYS_BIND — Bind a socket to an address
  * ================================================================ */
@@ -816,15 +821,10 @@ static long sys_bind(int sockfd, const struct sockaddr_in *addr,
 
     /* Check if it's a TCP socket (has a valid fd from tcp_socket_create) */
     if (fd_val != 0x1 && fd_val != 0) {
-        int tcp_sock = tcp_bind(sockfd, ntohs(sa.sin_port));
+        int tcp_sock = tcp_bind(sockfd, sys_ntohs(sa.sin_port));
         if (tcp_sock < 0) { current->t_errno = EADDRINUSE; return -1; }
     }
     return 0;
-}
-
-/* Helper: ntohs for syscall use */
-static inline uint16_t sys_ntohs(uint16_t n) {
-    return ((n & 0xFF) << 8) | ((n & 0xFF00) >> 8);
 }
 
 /* ================================================================

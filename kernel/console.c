@@ -312,10 +312,9 @@ static void update_hw_cursor(void) {
  * concurrent access on multi-CPU systems. Without this lock,
  * simultaneous console output from multiple cores can cause
  * screen corruption.
+ *
+ * NOTE: spinlock_t is defined in sched.h (included via smp.h).
  * ================================================================ */
-typedef struct {
-    volatile uint32_t locked;
-} spinlock_t;
 
 static spinlock_t console_out_lock = {0};
 
@@ -543,6 +542,30 @@ void console_write(const char *s) {
 }
 
 /* ================================================================
+ * console_write_itoa: Write an integer to the console as decimal.
+ * Used by shell for outputting numeric values.
+ * ================================================================ */
+void console_write_itoa(int value) {
+    if (value == 0) {
+        console_putc('0');
+        return;
+    }
+    if (value < 0) {
+        console_putc('-');
+        value = -value;
+    }
+    char buf[12];
+    int i = 0;
+    while (value > 0) {
+        buf[i++] = '0' + (value % 10);
+        value /= 10;
+    }
+    while (i > 0) {
+        console_putc(buf[--i]);
+    }
+}
+
+/* ================================================================
  * ANSI escape sequence parser
  *
  * Supported sequences:
@@ -678,6 +701,10 @@ void console_write_ansi(const char *s) {
 /* ================================================================
  * Init
  * ================================================================ */
+
+/* Input buffer lock (declared before console_init which uses it) */
+static spinlock_t inbuf_lock;     /* protects inbuf from SMP concurrent access */
+
 void console_init(void) {
     uint16_t fill = (uint16_t)' ' | ((uint16_t)0x07 << 8);
     for (int i = 0; i < ROWS * COLS; ++i) VGA_BUF[i] = fill;
@@ -713,7 +740,6 @@ static int  inbuf_cursor = 0;   /* cursor position within line (0..inbuf_len) */
 static int  line_ready   = 0;
 static int  saved_line_len = 0;  /* saved length when line becomes ready */
 static int  insert_mode  = 1;   /* 1 = insert, 0 = overwrite */
-static spinlock_t inbuf_lock;     /* protects inbuf from SMP concurrent access */
 
 /* Escape sequence state machine */
 #define ESC_STATE_NORMAL   0

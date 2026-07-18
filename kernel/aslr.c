@@ -180,14 +180,15 @@ void aslr_init(void) {
 
     /* Try RDRAND for additional entropy (may not be available) */
     uint64_t rdrand_val = 0;
-    int rdrand_ok = 0;
+    uint8_t rdrand_ok_byte = 0;
     asm volatile (
         "rdrand %0\n\t"
         "setc %1"
-        : "=r"(rdrand_val), "=r"(rdrand_ok)
+        : "=r"(rdrand_val), "=qm"(rdrand_ok_byte)
         :
         : "cc"
     );
+    int rdrand_ok = rdrand_ok_byte;
 
     /*
      * Derive a 256-bit key from entropy sources:

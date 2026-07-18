@@ -1,5 +1,81 @@
 # AuroraOS Changelog
 
+## v4.1.6 (2026-07-18) — 编译/链接错误全面修复 + 运行时安全加固
+
+### 致命级Bug修复 (P0)
+
+**ramfs_create 命名冲突 (BUG 6.4)**：
+- `kernel/ramfs.c`: 内部静态函数 `ramfs_create()` 与 `fs.h` 声明的外部 `ramfs_create(void)` 产生类型冲突，导致编译失败。修复为将内部函数重命名为 `ramfs_create_file()`，消除命名冲突。
+
+**sys_ntohs 未声明引用 (BUG 6.6)**：
+- `kernel/syscall.c`: `sys_bind()` 中直接调用 `ntohs()`（来自 `net/net.c` 的 `static inline`），链接时不可见。修复为统一使用 `sys_ntohs()` 本地包装函数，并将其定义前移至首次使用之前，消除重复定义。
+
+### 严重级Bug修复 (P1)
+
+**current_cpu_id 多文件可见性 (BUG 6.5)**：
+- `kernel/smp.h`: 将 `current_cpu_id()` 从 `sched.c` 的 `static inline` 提升为 `smp.h` 的公开 `static inline`，使用 `this_cpu()->cpu_id` 正确解引用 GS 段指针（原代码误将指针低32位当作 cpu_id 整数值读取）。
+- `kernel/sched.c`: 移除原 `static inline` 定义，添加注释说明迁移原因。
+- `kernel/pit_handler.c`: 消除 `implicit declaration of function 'current_cpu_id'` 警告。
+
+### 编译错误修复 (18项)
+
+**缺失头文件**：
+- `kernel/log.c`: 添加 `#include <stdint.h>` 解决类型未定义错误
+- `kernel/include/net.h`: 添加 `#include <stddef.h>` 提供 `size_t` 定义
+- `kernel/mem.c`: 添加 `#include "pagetable.h"` 提供 `KERNEL_PHYS_MAX` 宏定义
+
+**类型与前向声明**：
+- `kernel/ramfs.c`: 移除 `static` 与外部声明冲突；`inode->data` 改为 `inode->priv`；添加 `ramfs_file_ops`/`ramfs_dir_ops` 前向声明
+- `kernel/nvme.h`: 添加 `#include "block_dev.h"` 提供 `struct block_device` 完整定义
+- `kernel/sysfs.c`: 添加 `sysfs_file_ops`/`sysfs_dir_ops` 前向声明
+- `kernel/net/net.c`: 添加 `icmp_handle_packet` 前向声明
+- `kernel/fat32.c`: 添加 `fat32_file_ops`/`fat32_dir_ops` 前向声明
+- `kernel/pipe.c`: 添加 `pipe_read_ops`/`pipe_write_ops` 前向声明
+
+**调度器类型修复**：
+- `kernel/sched.h`: `current_tf` 从 `void *` 改为 `struct trapframe *` 并包含 `trapframe.h`；`run_queue.lock` 从 `int` 改为 `spinlock_t`；`spinlock_t` 定义用 `SPINLOCK_T_DEFINED` 宏保护避免循环依赖
+- `kernel/sched.c`: 添加 `#include "syscall.h"`；`per_cpu_rq[i].lock` 使用 `spin_init()` 初始化
+
+**x86_64 汇编兼容性**：
+- `kernel/mem.c`: `pushfl`/`popfl`（32位）改为 `pushfq`/`popfq`（64位）；`buddy_lock/unlock` 宏中 `flags` 变量提升至函数作用域避免与 `return` 冲突
+- `kernel/devtmpfs.c`: RDRAND `setc` 输出操作数从 `"=r"`(32位) 改为 `uint8_t` + `"=qm"` 约束，消除 x86_64 操作数大小不匹配
+- `kernel/aslr.c`: 同上，`rdrand_ok` 使用 `uint8_t` + `"=qm"` 约束
+
+**其他**：
+- `kernel/signal.h`: 添加 `#define SIGSTOP 19`
+- `kernel/selftest.c`: 添加 `#define PIE_DEFAULT_BASE 0x555555554000ULL`
+- `kernel/console.c`: 移除本地 `spinlock_t` 重定义，改为包含 `smp.h` 使用统一定义
+- `Makefile`: 汇编源文件搜索从 `arch/*.S` 改为 `arch/x86_64/*.S`，避免误包含 LoongArch 等架构文件
+
+### 链接错误修复 (4项)
+
+- `kernel/embedded_files.c`: 提供 `embed_init()` 实现（加载嵌入式 ELF 文件到 ramfs）
+- `kernel/net/net.c`: 实现 `static inline uint16_t ntohs(uint16_t n)` 字节序转换
+- `kernel/smp.h`: 实现 `static inline int current_cpu_id(void)` 通过 `this_cpu()->cpu_id` 返回当前 CPU ID
+- `kernel/console.c` / `kernel/console.h`: 实现 `console_write_itoa(int value)` 整数转字符串输出
+
+### 运行时崩溃修复 (3项)
+
+**ASLR ChaCha20 栈溢出 (BUG 6.1)**：
+- `kernel/aslr.c`: `chacha20_random_bytes()` 改为每次处理 64 字节块，防止向 64 字节栈缓冲区写入超出数据
+
+**SMEP/SMAP 无条件启用 (BUG 6.2)**：
+- `kernel/pagetable.c`: `page_table_init()` 通过 CPUID.7.0 检查 SMEP (EBX bit 7) 和 SMAP (EBX bit 20) 支持后再设置 CR4 位，避免在 QEMU 等不支持的环境下触发 #GP 异常
+
+**Ramdisk memset 页异常 (BUG 6.3)**：
+- `kernel/ramdisk.c`: 注释 `memset(priv->data, 0, size)` — BSS 段已由内核加载器零初始化，1 MiB memset 可能触发超出恒等映射区域的页异常
+
+### 架构级修复
+
+**mem.c 循环依赖 (BUG 6.7)**：
+- `kernel/mem.c`: 移除 `#include "smp.h"`（导致 `mem.c → smp.h → sched.h → mem.h` 循环），改为本地定义 `spinlock_t` 及锁函数，添加注释保持与 `smp.h` 同步
+
+### 文档/版本
+
+- `kernel/include/version.h`: 版本号更新至 v4.1.6 (AURORAOS_PATCH=6)
+
+---
+
 ## v4.1.5 (2026-07-18) — 关键Bug修复 + 文档一致性修正
 
 ### 致命级Bug修复 (P0)

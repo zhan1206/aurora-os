@@ -42,6 +42,11 @@
     panic("selftest failed: %s\n", msg); \
 } while (0)
 
+/* Default PIE (Position-Independent Executable) base address for x86_64 */
+#ifndef PIE_DEFAULT_BASE
+#define PIE_DEFAULT_BASE  0x555555554000ULL
+#endif
+
 /* ================================================================
  * Test 1: Buddy allocator
  * ================================================================ */

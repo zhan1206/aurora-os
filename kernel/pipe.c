@@ -29,6 +29,10 @@
 #include <string.h>
 #include <stdint.h>
 
+/* Forward declarations for file_ops tables (referenced before definition) */
+static struct file_ops pipe_read_ops;
+static struct file_ops pipe_write_ops;
+
 #define PIPE_BUF_SIZE 4096
 
 /* Simple spinlock for pipe SMP safety */

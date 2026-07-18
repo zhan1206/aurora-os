@@ -140,23 +140,23 @@ static ssize_t dev_console_write(struct file *filp, const void *buf, size_t coun
  * jnc instruction loops forever.  Now retries up to 10 times.  (BUG-006 / 2.4)
  */
 static int rdrand32(uint32_t *val) {
-    int ok = 0;
+    uint8_t ok_byte = 0;
     int retries = 0;
     asm volatile (
         "1:\n\t"
         "rdrand %0\n\t"
         "setc %1\n\t"
-        "cmpb $1, %1\n\t"
-        "je 2f\n\t"
+        "testb %1, %1\n\t"
+        "jnz 2f\n\t"
         "incl %2\n\t"
         "cmpl $10, %2\n\t"
         "jl 1b\n\t"
         "2:\n\t"
-        : "=r"(*val), "=qm"(ok), "+r"(retries)
+        : "=r"(*val), "=qm"(ok_byte), "+r"(retries)
         :
         : "cc"
     );
-    return ok;
+    return ok_byte;
 }
 
 /*

@@ -29,8 +29,18 @@
 #include <stddef.h>
 #include "types.h"
 #include "rbtree.h"
+#include "include/trapframe.h"
 
 #define MAX_FDS 16
+
+/* Spinlock type definition (with macro guard to avoid circular dependency
+ * with smp.h which also defines spinlock_t). */
+#ifndef SPINLOCK_T_DEFINED
+#define SPINLOCK_T_DEFINED
+typedef struct spinlock {
+    volatile uint32_t locked;
+} spinlock_t;
+#endif /* SPINLOCK_T_DEFINED */
 
 /* CFS/EEVDF-inspired scheduling constants */
 #define BASE_SLICE 10  /* base time slice in ticks */
@@ -90,7 +100,8 @@ struct task_struct {
     uint64_t  cr3;             /* physical PML4 base for this task */
     void     *stack_phys;      /* physical base of stack (first page) */
     void     *stack_phys2;     /* second page of stack (for freeing) */
-    void     *current_tf;      /* FIXED (v4.1.4): per-task trapframe ptr (was global, BUG 4.4) */
+    struct trapframe *current_tf; /* FIXED (v4.1.4): per-task trapframe ptr (was global, BUG 4.4)
+                                   * FIXED (v4.1.6): changed from void* to proper type (BUG 6.2) */
 
     /* --- Identity --- */
     int       pid;             /* process ID */
@@ -182,7 +193,7 @@ struct run_queue {
     struct task_struct *head;  /* circular linked list of ready tasks */
     struct rb_root ready_tree; /* red-black tree for O(log n) vruntime-ordered scheduling */
     int count;                 /* number of tasks in queue */
-    int lock;                  /* simple spin flag (protected by interrupt disable) */
+    spinlock_t lock;           /* FIXED (v4.1.6): proper spinlock_t instead of int */
 };
 
 /* ============ Scheduler API ============ */

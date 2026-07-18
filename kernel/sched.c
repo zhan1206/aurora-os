@@ -16,6 +16,7 @@
 #include "mem.h"
 #include "pagetable.h"
 #include "perf.h"
+#include "syscall.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -46,17 +47,12 @@ uint64_t min_vruntime = 0;
 /* smp_init() sets this to 1 after GS is configured for the BSP */
 int smp_sched_ready = 0;
 
-/* Current CPU ID helper (0 = BSP, increments for each AP) */
-static inline int current_cpu_id(void) {
-    /* Before SMP init, GS base is 0 (set by syscall_init).
-     * Reading %%gs:0 would dereference address 0, potentially
-     * causing a page fault. Return 0 (BSP) until SMP is ready. */
-    if (!smp_sched_ready) return 0;
-    int cpu_id = 0;
-    asm volatile ("mov %%gs:0, %0" : "=r"(cpu_id));
-    if (cpu_id < 0 || cpu_id >= MAX_CPUS) cpu_id = 0;
-    return cpu_id;
-}
+/*
+ * FIXED (v4.1.6): current_cpu_id() moved to smp.h as a static inline
+ * that uses this_cpu()->cpu_id.  The previous version in sched.c read
+ * an int from GS:0, which was incorrect (GS:0 stores a pointer to
+ * struct cpu_data, not a raw cpu_id int).  (BUG 6.5)
+ */
 
 /* ================================================================
  * PID bitmap allocator — O(1) lookup, O(1) alloc
@@ -205,7 +201,7 @@ void scheduler_init(void) {
     for (int i = 0; i < MAX_CPUS; i++) {
         per_cpu_rq[i].head = NULL;
         per_cpu_rq[i].count = 0;
-        per_cpu_rq[i].lock = 0;
+        spin_init(&per_cpu_rq[i].lock);  /* FIXED (v4.1.6): use spin_init for spinlock_t */
         rb_init(&per_cpu_rq[i].ready_tree);
     }
 

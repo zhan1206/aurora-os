@@ -88,4 +88,7 @@ void console_redirect_begin(void);
 void console_redirect_end(char *buf, size_t bufsize, size_t *out_len);
 int  console_redirect_active(void);
 
+/* Integer to string output */
+void console_write_itoa(int value);
+
 #endif

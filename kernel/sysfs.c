@@ -17,6 +17,10 @@
 #include "mem.h"
 #include <string.h>
 
+/* Forward declarations for file_ops tables (referenced before definition) */
+static struct file_ops sysfs_file_ops;
+static struct file_ops sysfs_dir_ops;
+
 /* ================================================================
  * sysfs entry types
  * ================================================================ */

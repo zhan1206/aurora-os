@@ -24,6 +24,10 @@ static struct ramfs_node *ramfs_root = NULL;
 /* Protect all ramfs linked list operations (SMP safety) */
 static spinlock_t ramfs_lock = {0};
 
+/* Forward declarations for file_ops tables (referenced before definition) */
+static struct file_ops ramfs_file_ops;
+static struct file_ops ramfs_dir_ops;
+
 /* ================================================================
  * File operations
  * ================================================================ */
@@ -71,11 +75,15 @@ static int ramfs_lookup(struct inode *dir, struct dentry *dentry) {
 }
 
 /*
- * ramfs_create: Create a new file in a ramfs directory.
+ * ramfs_create_file: Create a new file in a ramfs directory.
  * Called when O_CREAT is specified and the file does not exist.
  * Returns 0 on success, -1 on failure.
+ *
+ * FIXED (v4.1.6): Renamed from ramfs_create to ramfs_create_file
+ * to avoid conflict with the external ramfs_create(void) declared
+ * in fs.h (BUG 6.4).
  */
-static int ramfs_create(struct inode *dir, const char *name, int flags) {
+static int ramfs_create_file(struct inode *dir, const char *name, int flags) {
     (void)flags;
     struct ramfs_node *head = (struct ramfs_node *)dir;
     if (!head || !head->inode.is_dir || !name) return -1;
@@ -101,7 +109,7 @@ static int ramfs_create(struct inode *dir, const char *name, int flags) {
     strcpy((char *)n->inode.name, name);
 
     n->inode.size   = 0;
-    n->inode.data   = NULL;
+    n->data         = NULL;
     n->inode.ops    = &ramfs_file_ops;
     n->inode.is_dir = 0;
     n->inode.priv   = NULL;
@@ -181,7 +189,7 @@ static int ramfs_mkdir(struct inode *dir, const char *name) {
     strcpy((char *)n->inode.name, name);
 
     n->inode.size   = 0;
-    n->inode.data   = NULL;
+    n->data         = NULL;
     n->inode.ops    = &ramfs_dir_ops;
     n->inode.is_dir = 1;
     n->inode.priv   = NULL;
@@ -271,7 +279,7 @@ static struct file_ops ramfs_dir_ops = {
     .write  = NULL,
     .close  = ramfs_close,
     .lookup = ramfs_lookup,
-    .create = ramfs_create,
+    .create = ramfs_create_file,
     .mkdir  = ramfs_mkdir,
     .unlink = ramfs_unlink,
     .rmdir  = ramfs_rmdir,

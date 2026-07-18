@@ -5,6 +5,7 @@
 #define NET_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* ================================================================
  * Ethernet
