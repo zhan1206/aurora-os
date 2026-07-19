@@ -43,6 +43,17 @@ static uint64_t elf_resolve_va(uint64_t pml4_phys, uint64_t va) {
     idx = (va >> 21) & 0x1FF;
     if (!(pd[idx] & PTE_PRESENT)) return 0;
 
+    /*
+     * FIXED (v4.1.9): Handle 2MB huge pages in elf_resolve_va.
+     * When the PDE has PS=1, the physical address is directly in the
+     * PDE with a 2MB-aligned base, and the offset within the 2MB region
+     * is (va & 0x1FFFFF).  (H-28: elfloader huge page handling)
+     */
+    if (pd[idx] & PTE_PS) {
+        /* 2MB huge page: PDE contains the physical address */
+        return (pd[idx] & PTE_ADDR_MASK) | (va & 0x1FFFFFULL);
+    }
+
     uint64_t *pt = phys_to_virt(pd[idx] & PTE_ADDR_MASK);
     idx = (va >> 12) & 0x1FF;
     if (!(pt[idx] & PTE_PRESENT)) return 0;
@@ -706,7 +717,47 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
         if (phdrs[i].p_flags & PF_W) flags |= PTE_RW;
         if (!(phdrs[i].p_flags & 1)) flags |= PTE_NX; /* PF_X=0 → set NX */
 
-        for (uint64_t p = 0; p < pages; ++p) {
+        /*
+         * FIXED (v4.1.9): Use 2MB huge pages for large, aligned segments.
+         * When a LOAD segment is 2MB-aligned and large enough, map it
+         * with PDE PS=1 (2MB pages) instead of 512 × 4KB pages.  This
+         * reduces TLB pressure and saves page table memory.
+         * Fall back to 4KB pages if contiguous 2MB allocation fails.
+         * (H-28: elfloader huge page handling)
+         */
+        #define HUGE_PAGE_2MB    0x200000ULL
+        #define HUGE_PAGE_ORDER  9  /* 2^9 = 512 pages = 2MB */
+
+        for (uint64_t p = 0; p < pages; ) {
+            uint64_t va = page_base + p * 4096;
+            uint64_t remaining_pages = pages - p;
+
+            /*
+             * Try 2MB huge page if:
+             *   - At least 512 pages (2MB) remaining
+             *   - Virtual address is 2MB-aligned
+             *   - No page_offset (segment starts at page boundary)
+             */
+            if (remaining_pages >= 512 &&
+                (va & (HUGE_PAGE_2MB - 1)) == 0 &&
+                page_offset == 0) {
+
+                void *huge_phys = alloc_pages(HUGE_PAGE_ORDER);
+                if (huge_phys) {
+                    memset(huge_phys, 0, HUGE_PAGE_2MB);
+                    if (map_huge_page_2mb(new_pml4, va,
+                                          (uint64_t)(uintptr_t)huge_phys,
+                                          flags) == 0) {
+                        p += 512;
+                        continue;
+                    }
+                    /* Mapping failed: free and fall through to 4KB */
+                    free_pages(huge_phys, HUGE_PAGE_ORDER);
+                }
+                /* Contiguous allocation failed: fall through to 4KB */
+            }
+
+            /* 4KB page fallback */
             void *phys = alloc_page();
             if (!phys) {
                 kfree(phdrs); vfs_close(f);
@@ -715,7 +766,6 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
                 return NULL;
             }
             memset(phys, 0, 4096);
-            uint64_t va = page_base + p * 4096;
             if (map_page(new_pml4, va, (uint64_t)(uintptr_t)phys, flags) != 0) {
                 kfree(phdrs); vfs_close(f);
                 free_page(phys);
@@ -723,6 +773,7 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
                 log_printf(LOG_LEVEL_ERR, "elf_load: map_page failed\n");
                 return NULL;
             }
+            ++p;
         }
 
         /* now read file contents into the mapped physical pages */
@@ -747,11 +798,26 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
             uint64_t *pd = phys_to_virt(pd_phys);
             uint64_t pd_idx = (page_vbase >> 21) & 0x1FF;
             if (!(pd[pd_idx] & PTE_PRESENT)) break;
-            uint64_t pt_phys = pd[pd_idx] & PTE_ADDR_MASK;
-            uint64_t *pt = phys_to_virt(pt_phys);
-            uint64_t pt_idx = (page_vbase >> 12) & 0x1FF;
-            if (!(pt[pt_idx] & PTE_PRESENT)) break;
-            uint64_t phys_page = pt[pt_idx] & PTE_ADDR_MASK;
+
+            uint64_t phys_page;
+            /*
+             * FIXED (v4.1.9): Handle 2MB huge pages in file read.
+             * When the PDE has PS=1, the physical address is directly
+             * in the PDE, and the offset within the 2MB region is
+             * (page_vbase & 0x1FFFFF).  (H-28: elfloader huge page)
+             */
+            if (pd[pd_idx] & PTE_PS) {
+                /* 2MB huge page: PDE contains the physical address */
+                phys_page = (pd[pd_idx] & PTE_ADDR_MASK) +
+                            (page_vbase & 0x1FFFFFULL);
+            } else {
+                /* 4KB page: walk to PT */
+                uint64_t pt_phys = pd[pd_idx] & PTE_ADDR_MASK;
+                uint64_t *pt = phys_to_virt(pt_phys);
+                uint64_t pt_idx = (page_vbase >> 12) & 0x1FF;
+                if (!(pt[pt_idx] & PTE_PRESENT)) break;
+                phys_page = pt[pt_idx] & PTE_ADDR_MASK;
+            }
 
             void *dst = (void*)(uintptr_t)(phys_page + page_inner);
             f->offset = file_offset + read_off;

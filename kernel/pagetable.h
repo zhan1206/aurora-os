@@ -76,6 +76,19 @@ uint64_t clone_kernel_pml4(void);
 /* Map a single page. Intermediate tables are always kernel-only. */
 int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags);
 
+/*
+ * FIXED (v4.1.9): Map a 2MB huge page.  Uses a PDE with PS=1 to map
+ * a 2MB-aligned region as a single huge page, reducing TLB pressure
+ * and page table memory usage.  (H-28: elfloader huge page handling)
+ *
+ * @pml4_phys:  physical address of PML4 table
+ * @vaddr:      2MB-aligned virtual address
+ * @paddr:      2MB-aligned physical address
+ * @flags:      PTE flags (USER, RW, NX, etc.)
+ * Returns:     0 on success, -1 on failure
+ */
+int map_huge_page_2mb(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags);
+
 /* Convenience: map a user-accessible page. */
 int map_user_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags);
 

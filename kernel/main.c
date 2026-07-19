@@ -196,7 +196,7 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_write_ansi(SGR_RESET);
     console_vpad(1);
 
-    int boot_step = 0, boot_total = 19;
+    int boot_step = 0, boot_total = 20;
     #define BOOT_STEP() do { \
         boot_step++; \
         console_write_ansi(BOOT_PROGRESS_FILL); \
@@ -244,6 +244,32 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_putc(' ');
     console_write("ASLR initialized (");
     console_write(aslr_prng_name());
+    console_write(")");
+    console_putc('\n');
+    BOOT_STEP();
+
+    /*
+     * FIXED (v4.1.9): Initialize KASLR after ASLR is ready.
+     * KASLR uses the ChaCha20 CSPRNG to randomize the kernel heap
+     * base address and module load addresses.  (H-30: KASLR)
+     */
+    kaslr_init();
+    console_write_ansi(BOOT_OK_FG);
+    console_write(STATUS_OK_STR);
+    console_write_ansi(SGR_RESET);
+    console_putc(' ');
+    console_write("KASLR initialized (slide=");
+    {
+        char slide_buf[32];
+        uint64_t slide = kaslr_get_slide();
+        console_write("0x");
+        for (int nib = 60; nib >= 0; nib -= 4) {
+            int val = (int)((slide >> nib) & 0xF);
+            slide_buf[15 - nib/4] = (char)(val < 10 ? '0' + val : 'a' + val - 10);
+        }
+        slide_buf[16] = '\0';
+        console_write(slide_buf);
+    }
     console_write(")");
     console_putc('\n');
     BOOT_STEP();

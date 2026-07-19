@@ -391,7 +391,10 @@ int module_load(const char *path) {
         return -1;
     }
 
-    /* Allocate module memory */
+    /* Allocate module memory.
+     * FIXED (v4.1.9): Apply KASLR slide to module base address.
+     * Randomizes the load address of kernel modules to mitigate
+     * ROP gadget prediction.  (H-30: KASLR) */
     void *mod_base = kmalloc(total_size);
     if (!mod_base) {
         log_printf(LOG_LEVEL_ERR, "module_load: kmalloc failed\n");

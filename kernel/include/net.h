@@ -247,6 +247,7 @@ struct net_if {
 #define DHCP_OPT_ROUTER       3
 #define DHCP_OPT_DNS          6
 #define DHCP_OPT_REQ_IP       50
+#define DHCP_OPT_LEASE_TIME   51  /* FIXED (v4.1.9): DHCP lease time option */
 #define DHCP_OPT_MSG_TYPE     53
 #define DHCP_OPT_SERVER_ID    54
 #define DHCP_OPT_END          255
@@ -359,6 +360,7 @@ void tcp_cong_on_timeout(int sock);
 /* DHCP */
 int dhcp_init(void);
 int dhcp_run(void);
+void dhcp_poll(void);  /* FIXED (v4.1.9): Periodic lease renewal check */
 
 /* DNS */
 int  dns_query(const char *hostname, uint8_t ip_out[4]);

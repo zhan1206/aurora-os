@@ -1546,4 +1546,11 @@ void net_poll(void) {
         }
     }
     spin_unlock(&tcp_lock);
+
+    /*
+     * FIXED (v4.1.9): Periodic DHCP lease renewal check.
+     * Called from net_poll() to automatically renew the DHCP lease
+     * before it expires.  (H-25: DHCP lease 24h no renewal)
+     */
+    dhcp_poll();
 }

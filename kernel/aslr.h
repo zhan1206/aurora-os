@@ -8,6 +8,9 @@
  * from multiple entropy sources (TSC + RDRAND if available).
  * The PRNG is also exposed via chacha20_random_bytes() for use
  * by other kernel subsystems (e.g., sys_getrandom).
+ *
+ * FIXED (v4.1.9): Added KASLR (Kernel ASLR) support for randomizing
+ * kernel heap base and module load addresses.  (H-30: KASLR)
  */
 #ifndef ASLR_H
 #define ASLR_H
@@ -29,6 +32,18 @@
 #define ASLR_MAX_SHIFT    0x40000000ULL
 
 /* ================================================================
+ * KASLR constants
+ * ================================================================ */
+
+/*
+ * KASLR slide granularity: 2MB (matching x86_64 huge page size).
+ * The kernel slide offset is a random multiple of 2MB within the
+ * range [0, KASLR_MAX_SLIDE].
+ */
+#define KASLR_SLIDE_GRANULARITY  0x200000ULL   /* 2MB */
+#define KASLR_MAX_SLIDE          0x40000000ULL  /* 1GB */
+
+/* ================================================================
  * API
  * ================================================================ */
 
@@ -37,6 +52,29 @@
  * Must be called early in boot, after memory init.
  */
 void aslr_init(void);
+
+/*
+ * kaslr_init: Initialize Kernel ASLR.
+ * Generates a random kernel slide offset and applies it to kernel
+ * data structures.  Must be called after aslr_init() and memory init.
+ *
+ * FIXED (v4.1.9): Kernel Address Space Layout Randomization.
+ * Randomizes the kernel heap base and module load addresses to
+ * mitigate kernel heap spray and ROP attacks.  (H-30)
+ */
+void kaslr_init(void);
+
+/*
+ * kaslr_get_slide: Return the current kernel slide offset.
+ * Returns 0 if KASLR is not initialized.
+ */
+uint64_t kaslr_get_slide(void);
+
+/*
+ * kaslr_apply_slide: Apply the kernel slide to a base address.
+ * Returns base + slide if KASLR is active, base otherwise.
+ */
+uint64_t kaslr_apply_slide(uint64_t base);
 
 /*
  * aslr_randomize_base: Add a random offset to a base address.

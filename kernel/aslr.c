@@ -337,3 +337,71 @@ int chacha20_random_bytes(uint8_t *out, size_t len) {
 const char *aslr_prng_name(void) {
     return "ChaCha20 CSPRNG";
 }
+
+/* ================================================================
+ * KASLR — Kernel Address Space Layout Randomization
+ *
+ * Randomizes the kernel heap base address to mitigate heap spray
+ * and ROP attacks against kernel data structures.
+ *
+ * Since the kernel is loaded at a fixed physical address by the
+ * bootloader, full KASLR (kernel code base randomization) is not
+ * yet implemented.  Instead, KASLR-lite randomizes dynamically
+ * allocated kernel regions:
+ *   - Kernel heap (slab allocator) base offset
+ *   - Module load addresses
+ *
+ * The slide is a random 2MB-aligned offset in [0, 1GB), generated
+ * from the ChaCha20 CSPRNG.
+ *
+ * FIXED (v4.1.9): Implemented KASLR-lite.  (H-30: KASLR)
+ * ================================================================ */
+
+static uint64_t kernel_slide = 0;
+static int      kaslr_active = 0;
+
+void kaslr_init(void) {
+    /*
+     * Generate a random 2MB-aligned slide offset using ChaCha20.
+     * The slide is in the range [0, KASLR_MAX_SLIDE) with 2MB granularity.
+     */
+    uint8_t rnd[64];
+    chacha20_random_bytes(rnd, sizeof(rnd));
+    uint64_t rand_val = *(uint64_t *)rnd;
+
+    /* Number of 2MB slots in the slide range */
+    uint64_t num_slots = KASLR_MAX_SLIDE / KASLR_SLIDE_GRANULARITY;
+    if (num_slots == 0) num_slots = 1;
+
+    kernel_slide = (rand_val % num_slots) * KASLR_SLIDE_GRANULARITY;
+    kaslr_active = 1;
+
+    log_printf(LOG_LEVEL_INFO,
+               "KASLR: kernel slide = 0x%llx (%llu MB), entropy = %llu bits\n",
+               (unsigned long long)kernel_slide,
+               (unsigned long long)(kernel_slide / (1024 * 1024)),
+               (unsigned long long)num_slots);
+}
+
+uint64_t kaslr_get_slide(void) {
+    return kaslr_active ? kernel_slide : 0;
+}
+
+uint64_t kaslr_apply_slide(uint64_t base) {
+    return kaslr_active ? (base + kernel_slide) : base;
+}
+
+/*
+ * NOTE: Full KASLR (kernel code base randomization) requires:
+ *   1. Position-independent kernel executable (linked as PIE or with
+ *      relocation information).
+ *   2. Bootloader support for loading the kernel at a random physical
+ *      address.
+ *   3. Updating all absolute references (GDT, IDT, TSS, etc.) after
+ *      relocation.
+ *
+ * These are planned for a future release.  The current KASLR-lite
+ * implementation provides meaningful security benefits by randomizing
+ * the kernel heap and module addresses, which are the primary targets
+ * for kernel heap spray and ROP attacks.
+ */

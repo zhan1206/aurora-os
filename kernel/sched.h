@@ -157,8 +157,14 @@ struct task_struct {
      * FXSAVE64 requires 512 bytes with 16-byte alignment.  Without this,
      * floating-point/SSE registers are not preserved across context
      * switches, causing incorrect computation results.  (BUG 4.7)
+     *
+     * FIXED (v4.1.9): Added fpu_used flag for lazy FPU saving.
+     * FPU state is only saved when the task has actually used FPU/SSE
+     * instructions.  This avoids the expensive FXSAVE/FXRSTOR on every
+     * context switch.  (H-32: FPU state save)
      */
     uint8_t   fpu_state[512] __attribute__((aligned(16)));
+    int       fpu_used;        /* 1 if task has used FPU/SSE instructions */
 
     /* --- Sleep/wakeup --- */
     uint64_t  sleep_until;     /* absolute tick when this task should wake up (0 = not sleeping) */

@@ -1,5 +1,114 @@
 # AuroraOS Changelog
 
+## v4.1.9 (2026-07-19) — 生产化路线图 Phase 1-3 收尾
+
+### 概述
+
+v4.1.9 完成了生产化路线图 Phase 1-3 中所有剩余修复项，包括：
+- **Phase 1**: DHCP 租约自动续期机制
+- **Phase 2**: elfloader 2MB 大页支持 + seccomp BPF 参数级验证 + FPU 惰性保存
+- **Phase 3**: KASLR 内核地址空间随机化（KASLR-lite）
+
+共修改 **16 个文件**，新增 **+960 行**，删除 **-64 行**。
+
+---
+
+### 一、Phase 1 网络栈收尾 (1项)
+
+**H-25 DHCP 租约自动续期**：
+- `kernel/net/dhcp.c`: 实现完整的 DHCP 租约续期机制（RFC 2131 §4.4.5）。
+  - 在 DHCP ACK 处理中提取租约时间（Option 51），默认 86400 秒（24 小时）。
+  - 在 T1（租约 50%）时自动发送 DHCP REQUEST 单播续期请求。
+  - 续期失败时回退到完整 DHCP DISCOVER 流程。
+  - 通过 `dhcp_poll()` 集成到 `net_poll()` 主循环中，每秒检查一次。
+- `kernel/net/net.c`: `net_poll()` 中添加 `dhcp_poll()` 周期性调用。
+- `kernel/include/net.h`: 添加 `DHCP_OPT_LEASE_TIME` 定义和 `dhcp_poll()` 声明。
+
+---
+
+### 二、Phase 2 内核稳定性收尾 (3项)
+
+**H-28 elfloader 2MB 大页支持**：
+- `kernel/pagetable.h`: 添加 `map_huge_page_2mb()` 函数声明，支持 PDE PS=1 的 2MB 大页映射。
+- `kernel/pagetable.c`: 实现 `map_huge_page_2mb()` 函数。
+  - 遍历 PML4→PDPT→PD，在 PDE 设置 PS=1 位。
+  - 自动处理已有 4KB 页表被替换的情况（释放旧 PT）。
+  - 刷新全部 512 个 4KB TLB 条目确保一致性。
+- `kernel/elfloader.c`: LOAD 段映射优先使用 2MB 大页。
+  - 当段 2MB 对齐且剩余 ≥ 512 页时，使用 `alloc_pages(9)` 分配 2MB 连续物理内存。
+  - 连续分配失败时自动回退到 4KB 页。
+  - 修复 `elf_resolve_va()` 和文件读取代码以正确处理 PS=1 的 PDE。
+  - 减少大程序加载时的 TLB 压力和页表内存占用。
+
+**H-29 seccomp BPF 参数级验证**：
+- `kernel/seccomp.h`: 完整重新设计，新增内容：
+  - Classic BPF 指令集定义（BPF_LD/LDX/ST/STX/ALU/JMP/RET/MISC）。
+  - `struct sock_filter` BPF 指令结构体。
+  - `struct seccomp_data` 数据结构（syscall 号 + 架构 + 6 个参数）。
+  - `SECCOMP_MAX_BPF_LEN`（4096）保护 BPF 程序长度。
+  - `seccomp_run_bpf()` 声明。
+- `kernel/seccomp.c`: 实现完整 BPF 解释器。
+  - 支持 32 位 A/X 寄存器、BPF_ABS/BPF_IND 数据加载。
+  - 支持全部 ALU 操作（ADD/SUB/MUL/DIV/OR/AND/LSH/RSH/NEG/MOD/XOR）。
+  - 支持全部条件跳转（JEQ/JGT/JGE/JSET，含 K 和 X 操作数）。
+  - 支持 BPF_MISC（TAX/TXA）寄存器传输。
+  - 未知指令默认拒绝（安全优先）。
+  - `seccomp_check()` 增加参数 `uint64_t args[6]`，实现两阶段检查：
+    1. Bitmap 快速路径（syscall 号过滤）
+    2. BPF 程序执行（参数级验证）
+  - `seccomp_set_filter()` 增加 BPF 程序长度验证。
+- `kernel/syscall.c`: 更新 `seccomp_check()` 调用，传入 6 个 syscall 参数。
+
+**H-32 FPU 惰性保存优化**：
+- `kernel/sched.h`: `task_struct` 增加 `fpu_used` 标志位。
+- `kernel/sched.c`: `schedule()` 中实现惰性 FPU 保存。
+  - 仅当 `prev->fpu_used` 为真时执行 `fxsave64`。
+  - 仅当 `current->fpu_used` 为真时执行 `fxrstor64`。
+  - 避免非 FPU 任务的昂贵 FXSAVE/FXRSTOR 操作（每次 ~100+ 周期）。
+  - 保存后重置 `fpu_used` 标志。
+
+---
+
+### 三、Phase 3 安全加固收尾 (1项)
+
+**H-30 KASLR 内核地址空间随机化**：
+- `kernel/aslr.h`: 添加 KASLR 常量定义和 API 声明。
+  - `KASLR_SLIDE_GRANULARITY`（2MB）和 `KASLR_MAX_SLIDE`（1GB）。
+  - `kaslr_init()` / `kaslr_get_slide()` / `kaslr_apply_slide()` 声明。
+- `kernel/aslr.c`: 实现 KASLR-lite。
+  - 使用 ChaCha20 CSPRNG 生成 2MB 对齐的随机 slide 偏移（0-1GB 范围）。
+  - 提供 `kaslr_get_slide()` 和 `kaslr_apply_slide()` 接口。
+  - 当前阶段随机化内核堆基址和模块加载地址。
+  - 完整 KASLR（内核代码基址随机化）需要 PIE 内核，计划在后续版本实现。
+- `kernel/main.c`: 启动序列中集成 `kaslr_init()`，显示 slide 偏移值。
+  - 启动步骤总数从 19 增加到 20。
+- `kernel/module.c`: 模块加载注释标记 KASLR 集成点。
+
+---
+
+### 四、文件变更统计
+
+| 文件 | 变更 |
+|------|------|
+| `kernel/pagetable.h` | +13 行（map_huge_page_2mb 声明） |
+| `kernel/pagetable.c` | +94 行（map_huge_page_2mb 实现） |
+| `kernel/elfloader.c` | +69 行（2MB 大页 + elf_resolve_va 修复） |
+| `kernel/seccomp.h` | +169/-? 行（BPF 指令集 + seccomp_data） |
+| `kernel/seccomp.c` | +345/-? 行（BPF 解释器 + 参数验证） |
+| `kernel/syscall.c` | +13/-? 行（seccomp_check 参数传递） |
+| `kernel/aslr.h` | +38 行（KASLR 声明） |
+| `kernel/aslr.c` | +70 行（KASLR 实现） |
+| `kernel/main.c` | +28 行（kaslr_init 集成） |
+| `kernel/module.c` | +5 行（KASLR 注释） |
+| `kernel/sched.h` | +6 行（fpu_used 标志） |
+| `kernel/sched.c` | +14 行（惰性 FPU 保存） |
+| `kernel/net/dhcp.c` | +147 行（租约续期） |
+| `kernel/net/net.c` | +7 行（dhcp_poll 集成） |
+| `kernel/include/net.h` | +2 行（DHCP 选项 + 声明） |
+| `kernel/include/version.h` | 版本号 4.1.8 → 4.1.9 |
+
+---
+
 ## v4.1.8 (2026-07-19) — 第五轮深度审计修复 (109项Bug)
 
 ### 一、前轮遗留Bug修复 (4项)

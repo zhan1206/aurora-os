@@ -32,6 +32,19 @@ static uint8_t  dhcp_offered_ip[4];
 static uint8_t  dhcp_server_ip[4];
 static int      dhcp_initialized = 0;
 
+/*
+ * FIXED (v4.1.9): DHCP lease renewal support.
+ * Tracks lease expiry time and automatically renews before expiry.
+ * Without renewal, the IP becomes invalid after the lease period
+ * (typically 24 hours).  (H-25: DHCP lease 24h no renewal)
+ */
+static uint64_t dhcp_lease_expiry = 0;   /* TSC-based expiry timestamp */
+static uint32_t dhcp_lease_seconds = 0;  /* lease duration in seconds */
+static int      dhcp_configured = 0;      /* 1 when DHCP ACK received */
+
+/* Estimated TSC ticks per second (calibrated at boot) */
+#define DHCP_TSC_PER_SEC_ESTIMATE  1000000000ULL  /* ~1 GHz TSC */
+
 /* ================================================================
  * dhcp_init
  * ================================================================ */
@@ -340,6 +353,39 @@ static int dhcp_handle_ack(void) {
             memcpy(iface->dns_server, dns, 4);
         }
 
+        /*
+         * FIXED (v4.1.9): Extract lease time from DHCP ACK (option 51).
+         * The lease time determines when the IP address expires and
+         * needs renewal.  Default to 86400 seconds (24 hours) if not
+         * specified.  (H-25: DHCP lease 24h no renewal)
+         */
+        {
+            uint8_t lease_buf[4];
+            if (dhcp_find_option(buf, len, DHCP_OPT_LEASE_TIME,
+                                  lease_buf, 4) == 4) {
+                dhcp_lease_seconds = ((uint32_t)lease_buf[0] << 24) |
+                                     ((uint32_t)lease_buf[1] << 16) |
+                                     ((uint32_t)lease_buf[2] << 8)  |
+                                     (uint32_t)lease_buf[3];
+            } else {
+                dhcp_lease_seconds = 86400;  /* Default: 24 hours */
+            }
+
+            /* Set expiry: current TSC + lease time in TSC ticks.
+             * Renew at 50% of lease time (T1) per RFC 2131. */
+            uint32_t tsc_low, tsc_high;
+            asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
+            uint64_t tsc_now = ((uint64_t)tsc_high << 32) | tsc_low;
+            uint64_t renew_ticks = (uint64_t)dhcp_lease_seconds *
+                                   DHCP_TSC_PER_SEC_ESTIMATE / 2;
+            dhcp_lease_expiry = tsc_now + renew_ticks;
+            dhcp_configured = 1;
+
+            log_printf(LOG_LEVEL_INFO,
+                       "dhcp: lease %u seconds, renew in %u seconds\n",
+                       dhcp_lease_seconds, dhcp_lease_seconds / 2);
+        }
+
         log_printf(LOG_LEVEL_INFO,
                    "dhcp: ACK received, ip=%d.%d.%d.%d "
                    "mask=%d.%d.%d.%d gw=%d.%d.%d.%d dns=%d.%d.%d.%d\n",
@@ -379,4 +425,105 @@ int dhcp_run(void) {
 
     log_printf(LOG_LEVEL_INFO, "dhcp: configuration complete\n");
     return 0;
+}
+
+/* ================================================================
+ * dhcp_renew - Renew DHCP lease (RFC 2131 §4.4.5)
+ *
+ * Sends a DHCP REQUEST directly to the server (unicast) to renew
+ * the existing lease.  This is called at T1 (50% of lease time)
+ * per RFC 2131.  If renewal fails, falls back to full DHCP DISCOVER
+ * at T2 (87.5% of lease time).
+ *
+ * FIXED (v4.1.9): Implemented DHCP lease renewal.  (H-25)
+ * ================================================================ */
+static int dhcp_renew(void) {
+    struct net_if *iface = net_get_interface(0);
+    if (!iface || !dhcp_configured) return -1;
+
+    log_printf(LOG_LEVEL_INFO, "dhcp: renewing lease...\n");
+
+    /* Send REQUEST directly to server (unicast renewal) */
+    int pkt_len = (int)sizeof(struct dhcp_hdr) + 128;
+    uint8_t *pkt = (uint8_t *)kmalloc((size_t)pkt_len);
+    if (!pkt) return -1;
+
+    memset(pkt, 0, (size_t)pkt_len);
+
+    struct dhcp_hdr *dhcp = (struct dhcp_hdr *)pkt;
+    dhcp->op = 1;
+    dhcp->htype = 1;
+    dhcp->hlen = 6;
+    dhcp->hops = 0;
+    dhcp->xid = htonl(dhcp_xid);
+    dhcp->secs = 0;
+    dhcp->flags = 0;  /* Unicast */
+    memcpy(dhcp->chaddr, iface->mac, 6);
+    memcpy(dhcp->ciaddr, iface->ip, 4);  /* Fill in current IP */
+    dhcp->magic = htonl(DHCP_MAGIC_COOKIE);
+
+    uint8_t *opt = pkt + sizeof(struct dhcp_hdr);
+    int opt_len = 0;
+
+    uint8_t msg_type = DHCP_REQUEST;
+    opt_len += dhcp_build_option(opt + opt_len, DHCP_OPT_MSG_TYPE,
+                                  1, &msg_type);
+
+    /* Option 50: Requested IP Address */
+    opt_len += dhcp_build_option(opt + opt_len, DHCP_OPT_REQ_IP,
+                                  4, iface->ip);
+
+    /* Option 54: DHCP Server Identifier */
+    opt_len += dhcp_build_option(opt + opt_len, DHCP_OPT_SERVER_ID,
+                                  4, dhcp_server_ip);
+
+    opt[opt_len++] = DHCP_OPT_END;
+
+    /* Send unicast REQUEST to DHCP server */
+    int ret = udp_send(DHCP_CLIENT_PORT, dhcp_server_ip, DHCP_SERVER_PORT,
+                       pkt, (uint16_t)(sizeof(struct dhcp_hdr) + opt_len));
+    kfree(pkt);
+
+    if (ret < 0) {
+        log_printf(LOG_LEVEL_ERR, "dhcp: failed to send RENEW REQUEST\n");
+        return -1;
+    }
+
+    /* Wait for ACK */
+    if (dhcp_handle_ack() < 0) {
+        log_printf(LOG_LEVEL_ERR, "dhcp: lease renewal failed, "
+                   "will attempt full DHCP on next poll\n");
+        dhcp_configured = 0;
+        return -1;
+    }
+
+    log_printf(LOG_LEVEL_INFO, "dhcp: lease renewed successfully\n");
+    return 0;
+}
+
+/* ================================================================
+ * dhcp_poll - Periodic DHCP maintenance
+ *
+ * Called from the main polling loop to check if the lease needs
+ * renewal.  Should be called approximately once per second.
+ *
+ * FIXED (v4.1.9): Added periodic lease renewal check.  (H-25)
+ * ================================================================ */
+void dhcp_poll(void) {
+    if (!dhcp_configured || dhcp_lease_expiry == 0) return;
+
+    uint32_t tsc_low, tsc_high;
+    asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
+    uint64_t tsc_now = ((uint64_t)tsc_high << 32) | tsc_low;
+
+    if (tsc_now >= dhcp_lease_expiry) {
+        log_printf(LOG_LEVEL_INFO, "dhcp: lease renewal time reached\n");
+        if (dhcp_renew() < 0) {
+            /* Renewal failed, disable renewal tracking.
+             * The next dhcp_poll() call will attempt a full DHCP
+             * cycle if dhcp_configured is still 0. */
+            dhcp_lease_expiry = 0;
+            dhcp_configured = 0;
+        }
+    }
 }

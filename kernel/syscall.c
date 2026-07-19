@@ -1991,10 +1991,15 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
     /* Performance counter: count syscalls */
     perf_inc(PERF_SYSCALL_COUNT);
 
-    /* Seccomp filter check: deny if blocked by task's filter */
-    if (seccomp_check(current, num) != 0) {
-        current->t_errno = EPERM;
-        return -1;
+    /* Seccomp filter check: deny if blocked by task's filter.
+     * FIXED (v4.1.9): Pass syscall arguments for BPF-level validation.
+     * (H-29: seccomp BPF argument verification) */
+    {
+        uint64_t args[6] = { a1, a2, a3, a4, a5, a6 };
+        if (seccomp_check(current, num, args) != 0) {
+            current->t_errno = EPERM;
+            return -1;
+        }
     }
 
     long ret = -1;

@@ -587,10 +587,20 @@ void schedule(void) {
      * Without fxsave64/fxrstor64, floating-point and SSE registers are
      * not preserved, causing incorrect computation results when tasks
      * use FPU/SSE instructions.  (BUG 4.7)
+     *
+     * FIXED (v4.1.9): Lazy FPU saving.  Only save FPU state if the
+     * previous task actually used FPU/SSE.  This avoids the expensive
+     * FXSAVE/FXRSTOR on every context switch for tasks that don't use
+     * floating-point operations.  (H-32: FPU state save optimization)
      */
-    asm volatile ("fxsave64 %0" :: "m"(prev->fpu_state) : "memory");
+    if (prev->fpu_used) {
+        asm volatile ("fxsave64 %0" :: "m"(prev->fpu_state) : "memory");
+        prev->fpu_used = 0;  /* Reset after saving */
+    }
     context_switch(&prev->rsp, current->rsp);
-    asm volatile ("fxrstor64 %0" :: "m"(current->fpu_state) : "memory");
+    if (current->fpu_used) {
+        asm volatile ("fxrstor64 %0" :: "m"(current->fpu_state) : "memory");
+    }
 }
 
 void yield(void) {

@@ -447,6 +447,100 @@ int map_range(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t size,
 }
 
 /*
+ * FIXED (v4.1.9): map_huge_page_2mb - Map a 2MB huge page.
+ *
+ * Maps a 2MB-aligned virtual address range to a 2MB-aligned physical
+ * address using a PDE with PS=1 (Page Size extension).  This avoids
+ * allocating a 4KB page table (PT) and reduces TLB pressure by using
+ * a single TLB entry for the entire 2MB region.
+ *
+ * The caller must ensure that @vaddr and @paddr are 2MB-aligned.
+ * If the PDE already has a 4KB page table, it is freed and the PDE
+ * is replaced with the huge page entry.
+ *
+ * Used by elfloader for loading large LOAD segments.  (H-28)
+ */
+int map_huge_page_2mb(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+	uint64_t irq_flags = irq_save();
+	spin_lock(&pt_lock);
+
+	uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
+	uint64_t pdpt_idx = (vaddr >> 30) & 0x1FF;
+	uint64_t pd_idx   = (vaddr >> 21) & 0x1FF;
+
+	/* Intermediate table entries must carry PTE_USER for user mappings */
+	uint64_t struct_flags = PTE_STRUCT_FLAGS;
+	if (flags & PTE_USER) struct_flags |= PTE_USER;
+
+	/* Walk/create PML4 → PDPT → PD */
+	uint64_t *pml4 = phys_to_virt(pml4_phys);
+	uint64_t entry = pml4[pml4_idx];
+	uint64_t pdpt_phys;
+
+	if (!(entry & PTE_PRESENT)) {
+		pdpt_phys = alloc_table_page();
+		if (!pdpt_phys) goto fail;
+		pml4[pml4_idx] = pdpt_phys | struct_flags;
+	} else {
+		pdpt_phys = entry & PTE_ADDR_MASK;
+	}
+
+	uint64_t *pdpt = phys_to_virt(pdpt_phys);
+	entry = pdpt[pdpt_idx];
+	uint64_t pd_phys;
+
+	if (!(entry & PTE_PRESENT)) {
+		pd_phys = alloc_table_page();
+		if (!pd_phys) goto fail;
+		pdpt[pdpt_idx] = pd_phys | struct_flags;
+	} else {
+		pd_phys = entry & PTE_ADDR_MASK;
+	}
+
+	uint64_t *pd = phys_to_virt(pd_phys);
+
+	/*
+	 * If the PDE already has a 4KB page table, free it before
+	 * replacing with the huge page entry.  This can happen if
+	 * a 4KB mapping was previously created in this 2MB range,
+	 * e.g., by the stack setup code.
+	 */
+	entry = pd[pd_idx];
+	if (entry & PTE_PRESENT) {
+		if (entry & PTE_PS) {
+			/* Already a 2MB huge page — overwrite */
+		} else {
+			/* 4KB page table: free it */
+			uint64_t old_pt_phys = entry & PTE_ADDR_MASK;
+			free_page((void *)(uintptr_t)old_pt_phys);
+		}
+	}
+
+	/*
+	 * Set the PDE as a 2MB huge page:
+	 *   Bits 51:21 = physical address of the 2MB region (2MB-aligned)
+	 *   Bit 7 (PS) = 1 to indicate 2MB page
+	 *   Other flags = as specified by caller
+	 */
+	pd[pd_idx] = (paddr & PTE_ADDR_MASK) | (flags & 0xFFF) | PTE_PRESENT | PTE_PS;
+	if (flags & PTE_NX) pd[pd_idx] |= PTE_NX;
+
+	/* Flush the entire 2MB TLB range */
+	for (int i = 0; i < 512; i++) {
+		invlpg(vaddr + (uint64_t)i * 4096);
+	}
+
+	spin_unlock(&pt_lock);
+	irq_restore(irq_flags);
+	return 0;
+
+fail:
+	spin_unlock(&pt_lock);
+	irq_restore(irq_flags);
+	return -1;
+}
+
+/*
  * unmap_page: Remove a single page mapping without freeing the physical page.
  * Walks the 4-level page table and clears the PTE. Does NOT free intermediate
  * tables (PDPT/PD/PT) — those are cleaned up by free_pagetable().
