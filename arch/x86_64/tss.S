@@ -31,8 +31,13 @@
     .global tss
     .type tss, @object
 tss:
-    .skip 104                /* TSS body, zero-initialized */
-    .quad 0                  /* IOPB: no I/O permission bitmap */
+    /*
+     * FIXED (v4.1.8): TSS body is exactly 104 bytes.  The IOPB offset
+     * field at byte 0x66 is already zeroed by .skip, which means "no
+     * IOPB bitmap".  The extra .quad 0 was outside the TSS and wasted
+     * 8 bytes.  (L-1: TSS .quad 0超出104字节)
+     */
+    .skip 104                /* TSS body, zero-initialized (IOPB offset=0) */
 tss_end:
 
     .section .bss
@@ -86,10 +91,11 @@ tss_init:
     mov %rax, tss + 0x34
 
     /* Load TSS via LTR instruction.
-     * TSS selector must be in GDT. Our GDT has 5 entries:
+     * TSS selector must be in GDT. Our GDT has 6 entries:
      *   0: null, 1: kernel code, 2: kernel data,
      *   3: user code, 4: user data, 5: TSS
-     * TSS selector = 5 * 8 = 0x28 */
+     * TSS selector = 5 * 8 = 0x28
+     * FIXED (v4.1.8): Comment said 5 entries, actual is 6. (L-2) */
     mov $0x28, %ax
     ltr %ax
 

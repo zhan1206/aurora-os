@@ -107,7 +107,9 @@ static int itoa_int(int val, char *buf, int bufsz) {
 int atoi(const char *s) {
     int v = 0, sign = 1;
     while (*s == ' ') s++;
+    /* FIXED (v4.1.8): Handle '+' sign (M-5) */
     if (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') { s++; }
     while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
     return v * sign;
 }
@@ -170,6 +172,60 @@ int printf(const char *fmt, ...) {
     buf[n] = '\0';
     __builtin_va_end(ap);
     if (n > 0) write(1, buf, (unsigned long)n);
+    return n;
+}
+
+/*
+ * FIXED (v4.1.8): Added snprintf with explicit buffer size parameter.
+ * sprintf remains for backward compatibility but is limited to 500 chars.
+ * (M-2: sprintf no buffer size parameter)
+ */
+int snprintf(char *buf, size_t size, const char *fmt, ...) {
+    if (!buf || size == 0) return 0;
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    int n = 0;
+    const char *p = fmt;
+    size_t limit = size - 1;  /* reserve 1 byte for null terminator */
+    while (*p && n < (int)limit) {
+        if (*p == '%') {
+            p++;
+            if (*p == 's') {
+                const char *s = __builtin_va_arg(ap, const char*);
+                if (!s) s = "(null)";
+                while (*s && n < (int)limit) buf[n++] = *s++;
+            } else if (*p == 'd' || *p == 'i') {
+                int v = __builtin_va_arg(ap, int);
+                char tmp[16];
+                int tn = itoa_int(v, tmp, 16);
+                for (int i = 0; i < tn && n < (int)limit; i++) buf[n++] = tmp[i];
+            } else if (*p == 'u') {
+                unsigned int v = __builtin_va_arg(ap, unsigned int);
+                char tmp[16]; int tn = 0;
+                if (v == 0) tmp[tn++] = '0';
+                while (v > 0 && tn < 15) { tmp[tn++] = '0' + (v % 10); v /= 10; }
+                for (int i = tn-1; i >= 0 && n < (int)limit; i--) buf[n++] = tmp[i];
+            } else if (*p == 'c') {
+                if (n < (int)limit) buf[n++] = (char)__builtin_va_arg(ap, int);
+            } else if (*p == 'x') {
+                unsigned int v = __builtin_va_arg(ap, unsigned int);
+                char tmp[16]; int tn = 0;
+                if (v == 0) tmp[tn++] = '0';
+                while (v > 0 && tn < 15) { int nib = v & 0xF; tmp[tn++] = nib < 10 ? '0'+nib : 'a'+nib-10; v >>= 4; }
+                if (n < (int)limit) buf[n++] = '0';
+                if (n < (int)limit) buf[n++] = 'x';
+                for (int i = tn-1; i >= 0 && n < (int)limit; i--) buf[n++] = tmp[i];
+            } else {
+                if (n < (int)limit) buf[n++] = '%';
+                if (*p && n < (int)limit) buf[n++] = *p;
+            }
+            if (*p) p++;
+        } else {
+            buf[n++] = *p++;
+        }
+    }
+    buf[n] = '\0';
+    __builtin_va_end(ap);
     return n;
 }
 

@@ -679,19 +679,38 @@ static int ext2_dir_lookup(struct inode *dir, struct dentry *dentry) {
                 return -ENOENT;
             }
 
+            /*
+             * FIXED (v4.1.8): Validate rec_len BEFORE accessing de->inode
+             * or de->name_len. If rec_len is 0, the directory entry is
+             * corrupted and accessing other fields may read garbage.
+             * (C-4: rec_len=0 still accesses de->inode)
+             */
             struct ext2_dir_entry *de = (struct ext2_dir_entry *)(block_buf + block_offset);
-            if (de->inode == 0 && de->rec_len == 0) {
-                /* End of directory */
+            if (de->rec_len == 0) {
+                /* rec_len=0: corrupted entry, treat as end of directory */
                 kfree(block_buf);
                 return -ENOENT;
             }
-            if (de->rec_len == 0) {
-                kfree(block_buf);
-                return -ENOENT;
+            if (de->inode == 0) {
+                /* Skip deleted/unused entries */
+                off += de->rec_len;
+                block_offset += de->rec_len;
+                continue;
             }
 
             if (de->name_len == lookup_len &&
                 strncmp(de->name, lookup_name, lookup_len) == 0) {
+                /*
+                 * FIXED (v4.1.8): Validate inode number before use.
+                 * Inode 0 is reserved (means "no inode"), and inode
+                 * numbers must be <= sbi->sb_raw->s_inodes_count.
+                 * (M-13: invalid inode number not validated)
+                 */
+                if (de->inode == 0 || de->inode > sbi->sb_raw->s_inodes_count) {
+                    kfree(block_buf);
+                    return -ENOENT;
+                }
+
                 /* Found the entry — create an inode for it */
                 struct ext2_inode_info *child_info = (struct ext2_inode_info *)
                     kmalloc(sizeof(*child_info));
@@ -868,18 +887,24 @@ ssize_t ext2_readdir(struct inode *dir, void *buf, size_t bufsize,
                 return (ssize_t)total;
             }
 
+            /*
+             * FIXED (v4.1.8): Validate rec_len BEFORE accessing de->inode
+             * or de->name_len. Same fix as ext2_lookup().
+             * (C-4: rec_len=0 still accesses de->inode)
+             */
             struct ext2_dir_entry *de = (struct ext2_dir_entry *)(block_buf + block_offset);
 
-            if (de->inode == 0 && de->rec_len == 0) {
-                /* End of directory */
+            if (de->rec_len == 0) {
+                /* rec_len=0: corrupted entry, end of directory */
                 kfree(block_buf);
                 *offset = (off_t)pos;
                 return (ssize_t)total;
             }
-            if (de->rec_len == 0) {
-                kfree(block_buf);
-                *offset = (off_t)pos;
-                return (ssize_t)total;
+            if (de->inode == 0) {
+                /* Skip deleted/unused entries */
+                pos += de->rec_len;
+                block_offset += de->rec_len;
+                continue;
             }
 
             uint16_t entry_size = rec_len_for_name(de->name_len);

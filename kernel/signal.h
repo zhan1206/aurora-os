@@ -13,8 +13,19 @@ struct task_struct;
 /* Signal numbers */
 #define SIGHUP    1
 #define SIGINT    2
-#define SIGSEGV   11
+#define SIGQUIT   3
+#define SIGILL    4
+#define SIGTRAP   5
+#define SIGABRT   6
+#define SIGBUS    7
+#define SIGFPE    8
 #define SIGKILL   9
+/* FIXED (v4.1.8): Added SIGUSR1 and SIGUSR2 (L-28) */
+#define SIGUSR1   10
+#define SIGSEGV   11
+#define SIGUSR2   12
+#define SIGPIPE   13
+#define SIGALRM   14
 #define SIGTERM   15
 #define SIGCHLD   17
 #define SIGSTOP   19

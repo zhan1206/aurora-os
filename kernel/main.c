@@ -338,8 +338,18 @@ void kernel_main(uint32_t magic, void *mb_info) {
         if (fat32_bdev) {
             struct super_block *fat32_sb = fat32_mount(fat32_bdev);
             if (fat32_sb) {
-                vfs_mount("/fat32", fat32_sb);
-                console_status_ok("FAT32 filesystem mounted at /fat32");
+                /*
+                 * FIXED (v4.1.8): Check vfs_mount() return value.
+                 * If mount fails, free the superblock to prevent
+                 * memory leak. (C-6: mount error path memory leak)
+                 */
+                if (vfs_mount("/fat32", fat32_sb) < 0) {
+                    log_printf(LOG_LEVEL_WARN, "FAT32 mount at /fat32 failed\n");
+                    kfree(fat32_sb);
+                    console_status_ok("FAT32 mount failed");
+                } else {
+                    console_status_ok("FAT32 filesystem mounted at /fat32");
+                }
             } else {
                 console_status_ok("FAT32 mount skipped (not a FAT32 image)");
             }

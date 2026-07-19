@@ -415,7 +415,21 @@ static int virtio_net_send(struct net_device *netdev, const void *data,
         asm volatile ("pause" ::: "memory");
     }
 
-    kfree(pkt_buf);
+    /*
+     * FIXED (v4.1.8): Only free pkt_buf when the device has completed
+     * the descriptor. On timeout, the device may still hold a reference
+     * to the buffer via the VirtIO descriptor. Freeing it prematurely
+     * would cause a use-after-free if the device later DMA's to it.
+     * Instead, we leak the buffer on timeout and log a warning.
+     * (C-2: timeout kfree while device still holds descriptor)
+     */
+    if (result == 0) {
+        kfree(pkt_buf);
+    } else {
+        /* Timeout: buffer is still held by device, cannot free safely.
+         * This is a permanent leak of one packet buffer per timeout. */
+        log_printf(LOG_LEVEL_WARN, "virtio_net: tx timeout, buffer leaked (%d bytes)\n", len);
+    }
     return result;
 }
 
@@ -510,10 +524,33 @@ static int virtio_net_probe_device(struct pci_device *pci) {
 
     /* Setup network device */
     {
-        const char *name = "eth0";
-        size_t len = strlen(name);
-        if (len < sizeof(dev->netdev.name) - 1) {
-            memcpy(dev->netdev.name, name, len + 1);
+        /*
+         * FIXED (v4.1.8): Use a counter to generate unique interface
+         * names (eth0, eth1, ...).  Previously hardcoded "eth0" for
+         * all devices, causing name collisions.  (L-15)
+         */
+        static int eth_counter = 0;
+        char name[16];
+        /* Simple name generation without snprintf dependency */
+        name[0] = 'e'; name[1] = 't'; name[2] = 'h';
+        int n = eth_counter++;
+        int pos = 3;
+        if (n == 0) {
+            name[pos++] = '0';
+        } else {
+            char tmp[8];
+            int tpos = 0;
+            while (n > 0 && tpos < 7) {
+                tmp[tpos++] = (char)('0' + (n % 10));
+                n /= 10;
+            }
+            while (tpos > 0) name[pos++] = tmp[--tpos];
+        }
+        name[pos] = '\0';
+        if ((size_t)pos < sizeof(dev->netdev.name)) {
+            memcpy(dev->netdev.name, name, (size_t)pos + 1);
+        } else {
+            memcpy(dev->netdev.name, "eth0", 5);
         }
     }
     dev->netdev.send  = virtio_net_send;

@@ -424,6 +424,13 @@ void ipv6_handle_packet(struct net_device *netdev,
 
     const struct ipv6_hdr *ip6 = (const struct ipv6_hdr *)data;
 
+    /*
+     * FIXED (v4.1.8): Validate IPv6 version field (must be 6).
+     * Without this check, non-IPv6 packets could be processed
+     * as IPv6, leading to incorrect behavior.  (L-16)
+     */
+    if ((ip6->version_traffic_flow[0] & 0xF0) != 0x60) return;
+
     uint16_t payload_len = ntohs(ip6->payload_len);
     int hdr_len = (int)sizeof(struct ipv6_hdr);
 

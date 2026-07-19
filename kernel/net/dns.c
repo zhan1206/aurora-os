@@ -20,6 +20,9 @@ static inline uint16_t htons(uint16_t n) {
 /* DNS server address */
 static uint8_t dns_server_ip[4] = { 8, 8, 8, 8 };  /* Default: Google DNS */
 
+/* Ephemeral source port for DNS queries (non-zero!) */
+#define DNS_SRC_PORT  53530
+
 /* DNS cache */
 #define DNS_CACHE_SIZE 16
 struct dns_cache_entry {
@@ -29,6 +32,7 @@ struct dns_cache_entry {
 };
 
 static struct dns_cache_entry dns_cache[DNS_CACHE_SIZE];
+static uint16_t dns_query_id = 0;  /* FIXED (v4.1.8): randomized DNS query ID */
 
 /* Simple hash function for hostname */
 static uint32_t dns_hash(const char *hostname) {
@@ -101,7 +105,18 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
 
     /* DNS header */
     struct dns_header *hdr = (struct dns_header *)pkt;
-    hdr->id = htons(0x0001);
+    /*
+     * FIXED (v4.1.8): Use randomized query ID instead of fixed 0x0001.
+     * Randomize on first use with TSC. (L-13: DNS query ID fixed)
+     */
+    if (dns_query_id == 0) {
+        uint32_t tsc_low, tsc_high;
+        asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
+        dns_query_id = (uint16_t)(tsc_low & 0xFFFF);
+        if (dns_query_id == 0) dns_query_id = 1;
+    }
+    hdr->id = htons(dns_query_id++);
+    if (dns_query_id == 0) dns_query_id = 1;
     hdr->flags = htons(DNS_QRY_STANDARD);
     hdr->qdcount = htons(1);
     hdr->ancount = 0;
@@ -122,7 +137,12 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
     int ret;
 
     /* Send DNS query via UDP */
-    ret = udp_send(0, dns_server_ip, DNS_PORT, pkt, (uint16_t)total_len);
+    /* FIXED (v4.1.8): Use DNS_SRC_PORT instead of 0 as source port.
+     * Port 0 is invalid; the UDP layer would reject it or cause
+     * the DNS server to not respond.  (BUG C-8) */
+    ret = udp_send(DNS_SRC_PORT, dns_server_ip, DNS_PORT, pkt, (uint16_t)total_len);
+    /* Save the query ID for matching the response (before kfree) */
+    uint16_t sent_id = ntohs(hdr->id);
     kfree(pkt);
 
     if (ret < 0) {
@@ -140,12 +160,16 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
     for (retry = 0; retry < 30; retry++) {
         net_poll();
 
-        int rx_len = udp_recvfrom(0, rx_buf, (int)sizeof(rx_buf),
+        int rx_len = udp_recvfrom(DNS_SRC_PORT, rx_buf, (int)sizeof(rx_buf),
                                    src_ip, &src_port);
         if (rx_len < (int)sizeof(struct dns_header)) continue;
 
         struct dns_header *rx_hdr = (struct dns_header *)rx_buf;
-        if (ntohs(rx_hdr->id) != 0x0001) continue;
+        /*
+         * FIXED (v4.1.8): Match against the sent query ID, not
+         * a fixed value. (L-13)
+         */
+        if (ntohs(rx_hdr->id) != sent_id) continue;
         if (ntohs(rx_hdr->qdcount) != 1) continue;
 
         uint16_t ancount = ntohs(rx_hdr->ancount);
@@ -157,9 +181,20 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
 
         /* Skip question section */
         int pos = (int)sizeof(struct dns_header);
-        /* Skip name (might be compressed) */
-        while (pos < rx_len && rx_buf[pos] != 0) {
+        /*
+         * FIXED (v4.1.8): Add compression pointer loop counter and
+         * offset validation.  Malicious DNS responses can use self-
+         * referencing compression pointers to cause infinite loops.
+         * (M-19: DNS compression pointer infinite loop, M-20: bounds)
+         */
+        int compress_steps = 0;
+        while (pos < rx_len && rx_buf[pos] != 0 && compress_steps < 128) {
             if ((rx_buf[pos] & 0xC0) == 0xC0) {
+                /* Validate compression pointer offset */
+                if (pos + 1 >= rx_len) break;
+                uint16_t ptr_offset = (uint16_t)(((rx_buf[pos] & 0x3F) << 8) | rx_buf[pos + 1]);
+                if (ptr_offset >= (uint16_t)rx_len) break;
+                compress_steps++;
                 pos += 2;  /* Compressed name pointer */
                 break;
             }

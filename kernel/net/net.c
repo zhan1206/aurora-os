@@ -24,6 +24,7 @@ static void icmp_handle_packet(struct net_device *netdev,
                                const uint8_t src_ip[4],
                                const uint8_t *data, int len);
 static void udp_handle_packet(const uint8_t src_ip[4],
+                              const uint8_t dst_ip[4],
                               const uint8_t *data, int len);
 static void tcp_handle_packet(const uint8_t src_ip[4],
                               const uint8_t dst_ip[4],
@@ -222,6 +223,23 @@ static struct arp_entry *arp_cache_add(const uint8_t ip[4],
     return &arp_cache[target];
 }
 
+/*
+ * FIXED (v4.1.8): Age out ARP cache entries that haven't been refreshed.
+ * Entries older than ARP_CACHE_AGE_THRESHOLD are invalidated.
+ * (H-20: ARP cache no aging, stale MACs persist forever)
+ */
+#define ARP_CACHE_AGE_THRESHOLD 300  /* ~5 minutes at 1 poll/sec */
+
+static void arp_cache_age(void) {
+    int i;
+    for (i = 0; i < ARP_CACHE_SIZE; i++) {
+        if (arp_cache[i].valid &&
+            (arp_age_counter - arp_cache[i].age) > ARP_CACHE_AGE_THRESHOLD) {
+            arp_cache[i].valid = 0;
+        }
+    }
+}
+
 static void arp_send_request(struct net_if *iface, const uint8_t target_ip[4]) {
     uint8_t packet[sizeof(struct eth_hdr) + sizeof(struct arp_hdr)];
     uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -308,7 +326,16 @@ static void arp_handle_packet(const uint8_t *data, int len) {
 /* ================================================================
  * IPv4 Layer
  * ================================================================ */
+/*
+ * FIXED (v4.1.8): Use atomic increment for IP ID to prevent
+ * duplicate IDs in SMP environments.  (L-12: IP ID非原子递增)
+ */
 static uint16_t ip_id_counter = 0;
+
+static inline uint16_t ip_id_atomic_inc(void) {
+    /* Atomic fetch-and-increment for SMP safety.  (L-12) */
+    return (uint16_t)__atomic_fetch_add(&ip_id_counter, 1, __ATOMIC_RELAXED);
+}
 
 int ip_send(const uint8_t dst_ip[4], uint8_t protocol,
             const void *data, uint16_t len) {
@@ -327,8 +354,15 @@ int ip_send(const uint8_t dst_ip[4], uint8_t protocol,
     /* Resolve destination MAC via ARP */
     uint8_t dst_mac[6];
     if (arp_lookup(dst_ip, dst_mac) != 0) {
-        /* ARP not resolved yet, try broadcast */
-        memset(dst_mac, 0xFF, 6);
+        /*
+         * FIXED (v4.1.8): Do NOT send to broadcast MAC when ARP
+         * resolution fails. Broadcast leaks the packet to all hosts
+         * on the local network segment, which is a security risk.
+         * ARP request was already sent by arp_lookup(); the caller
+         * should retry after the ARP reply arrives.
+         * (C-9: arp_lookup failure sends broadcast MAC)
+         */
+        return -1;
     }
 
     int total = (int)(sizeof(struct ipv4_hdr) + len);
@@ -340,7 +374,7 @@ int ip_send(const uint8_t dst_ip[4], uint8_t protocol,
     ip->version_ihl = 0x45; /* Version 4, IHL = 5 (20 bytes) */
     ip->dscp_ecn = 0;
     ip->total_len = htons((uint16_t)total);
-    ip->id = htons(ip_id_counter++);
+    ip->id = htons(ip_id_atomic_inc());
     ip->flags_frag = 0;
     ip->ttl = 64;
     ip->protocol = protocol;
@@ -391,7 +425,7 @@ static void ip_handle_packet(struct net_device *netdev,
         icmp_handle_packet(netdev, ip->src_ip, payload, payload_len);
         break;
     case IP_PROTO_UDP:
-        udp_handle_packet(ip->src_ip, payload, payload_len);
+        udp_handle_packet(ip->src_ip, ip->dst_ip, payload, payload_len);
         break;
     case IP_PROTO_TCP:
         tcp_handle_packet(ip->src_ip, ip->dst_ip, payload, payload_len);
@@ -477,10 +511,24 @@ int udp_send(uint16_t src_port, const uint8_t dst_ip[4],
 }
 
 static void udp_handle_packet(const uint8_t src_ip[4],
+                               const uint8_t dst_ip[4],
                                const uint8_t *data, int len) {
     if (len < (int)sizeof(struct udp_hdr)) return;
 
     const struct udp_hdr *udp = (const struct udp_hdr *)data;
+
+    /*
+     * FIXED (v4.1.8): Validate UDP checksum before accepting the packet.
+     * A zero checksum means no checksum was computed (allowed in IPv4).
+     * (H-19: UDP checksum not validated)
+     */
+    if (udp->checksum != 0) {
+        uint16_t csum = tcp_udp_checksum(src_ip, dst_ip, IP_PROTO_UDP, data, len);
+        if (csum != 0 && csum != 0xFFFF) {
+            return;  /* Checksum mismatch, drop silently */
+        }
+    }
+
     uint16_t dst_port = ntohs(udp->dst_port);
     uint16_t src_port = ntohs(udp->src_port);
     int data_len = len - (int)sizeof(struct udp_hdr);
@@ -559,6 +607,8 @@ struct tcp_socket {
     int      backlog;
     int      pending_count;
     int      pending_ids[TCP_BACKLOG_MAX];  /* IDs of pending connections */
+    int      time_wait_count; /* FIXED (v4.1.8): TIME_WAIT cleanup counter */
+    int      syn_recv_count;  /* FIXED (v4.1.8): SYN_RECV timeout counter */
 };
 
 static struct tcp_socket tcp_sockets[MAX_TCP_SOCKETS];
@@ -566,8 +616,16 @@ static spinlock_t tcp_lock;
 static int tcp_next_id = 1;
 static uint32_t tcp_iss = 0; /* initial send sequence counter */
 
+/*
+ * FIXED (v4.1.8): Use TSC + large increment for better ISN randomness.
+ * Previously used fixed increment 0x10000, making sequence numbers
+ * completely predictable.  (H-17: TCP ISN predictable)
+ */
 static uint32_t tcp_get_iss(void) {
-    tcp_iss += 0x10000;
+    uint32_t tsc_low, tsc_high;
+    asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
+    /* Mix TSC into the ISN for unpredictability */
+    tcp_iss += 0x10000 + (tsc_low & 0xFFFF);
     if (tcp_iss == 0) tcp_iss = 0x10000;
     return tcp_iss;
 }
@@ -615,7 +673,7 @@ static int tcp_send_packet(struct tcp_socket *sock, uint8_t flags,
     tcp->seq_num = htonl(sock->seq_num);
     tcp->ack_num = htonl(sock->ack_num);
     tcp->data_offset_flags = htons((uint16_t)((5 << 12) | flags));
-    tcp->window = htons(8192);
+    tcp->window = htons(TCP_RX_BUF_SIZE);  /* FIXED (v4.1.8): window = actual buffer size (H-22) */
     tcp->checksum = 0;
     tcp->urgent_ptr = 0;
 
@@ -1048,6 +1106,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
             sock->ack_num = seq + 1;
             sock->rcv_nxt = seq + 1;
             sock->state = TCP_ESTABLISHED;
+            /* FIXED (v4.1.8): Initialize congestion control for the new connection.
+             * (BUG C-7) */
+            tcp_cong_on_ack(sock->id, sock->ack_num, 0);
             spin_unlock(&tcp_lock);
 
             /* Send ACK */
@@ -1065,6 +1126,7 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
     case TCP_SYN_RECEIVED:
         if (flags & TCP_RST) {
             sock->state = TCP_CLOSED;
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
             break;
         }
@@ -1076,6 +1138,12 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
             log_printf(LOG_LEVEL_DEBUG,
                        "tcp: server connection established sock=%d\n", sock->id);
         } else {
+            /*
+             * FIXED (v4.1.8): Increment SYN_RECV timeout counter.
+             * When the counter exceeds the threshold, the socket is
+             * closed to prevent SYN flood DoS.  (BUG C-11)
+             */
+            sock->syn_recv_count++;
             spin_unlock(&tcp_lock);
         }
         break;
@@ -1098,6 +1166,19 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
         }
 
         if (payload_len > 0) {
+            /*
+             * FIXED (v4.1.8): Validate TCP sequence number before
+             * accepting data.  Previously, data was blindly appended
+             * without checking seq against rcv_nxt, allowing duplicate
+             * or out-of-order segments to corrupt the receive buffer.
+             * (BUG C-12)
+             */
+            if (seq != sock->rcv_nxt) {
+                /* Out-of-order or duplicate: send ACK with current rcv_nxt */
+                spin_unlock(&tcp_lock);
+                tcp_send_packet(sock, TCP_ACK, NULL, 0);
+                break;
+            }
             /* Accept data */
             int copy_len = payload_len;
             if (copy_len > (int)sizeof(sock->rx_buf) - sock->rx_len) {
@@ -1176,8 +1257,24 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
         break;
 
     case TCP_TIME_WAIT:
-        /* Just acknowledge and stay in TIME_WAIT */
-        spin_unlock(&tcp_lock);
+        /*
+         * FIXED (v4.1.8): TIME_WAIT now auto-transitions to CLOSED
+         * after a threshold of poll cycles.  Previously, TIME_WAIT
+         * sockets were never cleaned up, causing the TCP socket table
+         * to fill up after 16 connections.  In a real system this
+         * would use a timer (2*MSL = 60s), but we use a simple counter
+         * as a proxy since we lack a kernel timer infrastructure.
+         * (BUG C-10)
+         */
+        sock->time_wait_count++;
+        if (sock->time_wait_count > 1000) {
+            sock->state = TCP_CLOSED;
+            sock->in_use = 0;
+            spin_unlock(&tcp_lock);
+            log_printf(LOG_LEVEL_DEBUG, "tcp: TIME_WAIT expired sock=%d\n", sock->id);
+        } else {
+            spin_unlock(&tcp_lock);
+        }
         break;
 
     case TCP_CLOSED:
@@ -1310,6 +1407,11 @@ void net_init(void) {
 
     spin_init(&udp_lock);
     spin_init(&tcp_lock);
+
+    /* FIXED (v4.1.8): Initialize TCP congestion control.
+     * Previously, tcp_cong.c was compiled but never called,
+     * making congestion control dead code.  (BUG C-7) */
+    tcp_cong_init();
     spin_init(&loopback_lock);
 
     memset(net_ifs, 0, sizeof(net_ifs));
@@ -1406,4 +1508,42 @@ void net_poll(void) {
             process_eth_frame(net_ifs[i].netdev, buf, len);
         }
     }
+
+    /*
+     * FIXED (v4.1.8): Periodic ARP cache aging.
+     * Invalidate stale entries to prevent using outdated MAC addresses.
+     * (H-20: ARP cache no aging)
+     */
+    arp_cache_age();
+
+    /*
+     * FIXED (v4.1.8): Periodic TCP timeout cleanup.
+     * Clean up expired SYN_RECV and TIME_WAIT sockets to prevent
+     * resource exhaustion.  (BUG C-10, C-11)
+     */
+    spin_lock(&tcp_lock);
+    for (i = 0; i < MAX_TCP_SOCKETS; i++) {
+        if (!tcp_sockets[i].in_use) continue;
+        if (tcp_sockets[i].state == TCP_SYN_RECEIVED) {
+            tcp_sockets[i].syn_recv_count++;
+            if (tcp_sockets[i].syn_recv_count > 500) {
+                log_printf(LOG_LEVEL_DEBUG, "tcp: SYN_RECV timeout sock=%d\n",
+                           tcp_sockets[i].id);
+                tcp_sockets[i].state = TCP_CLOSED;
+                tcp_sockets[i].in_use = 0;
+            }
+        }
+        /*
+         * FIXED (v4.1.8): Also clean up TIME_WAIT sockets.
+         * (C-10: TIME_WAIT never cleaned)
+         */
+        if (tcp_sockets[i].state == TCP_TIME_WAIT) {
+            tcp_sockets[i].time_wait_count++;
+            if (tcp_sockets[i].time_wait_count > 1000) {
+                tcp_sockets[i].state = TCP_CLOSED;
+                tcp_sockets[i].in_use = 0;
+            }
+        }
+    }
+    spin_unlock(&tcp_lock);
 }

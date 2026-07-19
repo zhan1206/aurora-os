@@ -598,6 +598,19 @@ static int squashfs_read_superblock(struct squashfs_sb_info *sbi) {
         return -EINVAL;
     }
 
+    /*
+     * FIXED (v4.1.8): Validate block_size from the superblock to prevent
+     * integer overflow in block count calculations (num_blocks = (file_size +
+     * block_size - 1) / block_size) and to prevent kmalloc with excessively
+     * large or zero block sizes. Squashfs block_size is typically 4KB-1MB,
+     * encoded as log2. (C-5: block size integer overflow)
+     */
+    if (sbi->sblk.block_size == 0 || sbi->sblk.block_size > (1U << 20)) {
+        log_printf(LOG_LEVEL_ERR, "squashfs: invalid block_size %u (max 1MB)\n",
+                   sbi->sblk.block_size);
+        return -EINVAL;
+    }
+
     log_printf(LOG_LEVEL_INFO,
                "squashfs: version %u.%u, %u inodes, block_size=%u, "
                "compression=%u, bytes_used=%llu\n",

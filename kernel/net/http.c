@@ -205,6 +205,16 @@ int http_get(const char *url, char *response_buf, size_t buf_size) {
     tcp_close(sock);
 
     if (total > 0) {
+        /*
+         * FIXED (v4.1.8): Null-terminate the response buffer so the
+         * caller can safely use string operations on it.  Without this,
+         * the caller would read past the valid data.  (L-14)
+         */
+        if (total < buf_size) {
+            response_buf[total] = '\0';
+        } else {
+            response_buf[buf_size - 1] = '\0';
+        }
         log_printf(LOG_LEVEL_DEBUG, "http: received %u bytes\n",
                    (unsigned int)total);
         return (int)total;

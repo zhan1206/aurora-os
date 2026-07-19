@@ -47,11 +47,19 @@ static int      dhcp_initialized = 0;
  * to start the DHCP state machine.
  */
 int dhcp_init(void) {
-    dhcp_xid = 0x12345678;
+    /*
+     * FIXED (v4.1.8): Use TSC-based random XID instead of fixed 0x12345678.
+     * A fixed XID makes DHCP transactions easily forgeable.
+     * (M-23: DHCP XID fixed, easy to forge)
+     */
+    uint32_t tsc_low, tsc_high;
+    asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
+    dhcp_xid = (tsc_low ^ 0x12345678) & 0xFFFFFFFF;
+    if (dhcp_xid == 0) dhcp_xid = 0x12345678;
     memset(dhcp_offered_ip, 0, 4);
     memset(dhcp_server_ip, 0, 4);
     dhcp_initialized = 1;
-    log_printf(LOG_LEVEL_INFO, "dhcp: client initialized\n");
+    log_printf(LOG_LEVEL_INFO, "dhcp: client initialized (xid=0x%08x)\n", dhcp_xid);
     return 0;
 }
 

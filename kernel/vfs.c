@@ -419,7 +419,15 @@ struct inode *vfs_lookup(const char *path) {
     /* Handle root path "/" */
     if (*p == '\0') return cur->inode;
 
-    while (*p) {
+    /*
+     * FIXED (v4.1.8): Path depth counter to prevent stack overflow
+     * from deeply nested or circular paths. (M-11)
+     */
+    int max_depth = 64;
+    int depth = 0;
+
+    while (*p && depth < max_depth) {
+        depth++;
         /* Extract next component name */
         const char *start = p;
         while (*p && *p != '/') p++;
@@ -463,8 +471,9 @@ struct inode *vfs_lookup(const char *path) {
                 dentry_add_child(cur, child);
             }
             /* Increment parent dentry refcount to prevent eviction
-             * while the lock is released for the filesystem callback. */
-            cur->refcount++;
+             * while the lock is released for the filesystem callback.
+             * FIXED (v4.1.8): Prevent overflow of refcount. (L-5) */
+            if (cur->refcount < 0x7FFFFFFF) cur->refcount++;
             vfs_unlock();
 
             /* Ask parent inode to resolve this component (outside lock) */
@@ -536,7 +545,9 @@ struct file *vfs_open(const char *path, int flags) {
      * increment was correct — each open/close pair balances. */
     vfs_lock();
     if (inode->dentry) {
-        inode->dentry->refcount++;
+        /* FIXED (v4.1.8): Prevent overflow of refcount. (L-5) */
+        if (inode->dentry->refcount < 0x7FFFFFFF)
+            inode->dentry->refcount++;
     }
     vfs_unlock();
 

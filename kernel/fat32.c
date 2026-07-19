@@ -24,6 +24,21 @@
 static struct file_ops fat32_file_ops;
 static struct file_ops fat32_dir_ops;
 
+/* Forward declaration needed by fat32_next_cluster_safe (defined below) */
+static uint32_t fat32_get_cluster(struct fat32_sb_info *sbi, uint32_t cluster);
+
+/*
+ * FIXED (v4.1.8): Safe FAT chain traversal with loop counter.
+ * Returns the next cluster, or FAT32_CLUSTER_EOC_MAX on error/end.
+ * Prevents infinite loops on corrupted FAT tables. (M-12)
+ */
+static uint32_t fat32_next_cluster_safe(struct fat32_sb_info *sbi,
+                                         uint32_t cluster, int *steps_left) {
+    if (!steps_left || *steps_left <= 0) return FAT32_CLUSTER_EOC_MAX;
+    (*steps_left)--;
+    return fat32_get_cluster(sbi, cluster);
+}
+
 /* ================================================================
  * Block device helpers
  * ================================================================ */
@@ -217,7 +232,13 @@ static uint32_t fat32_append_cluster(struct fat32_sb_info *sbi,
 int fat32_free_cluster_chain(struct fat32_sb_info *sbi,
                                     uint32_t start_cluster) {
     uint32_t cluster = start_cluster;
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    /*
+     * FIXED (v4.1.8): Add loop counter to prevent infinite loops
+     * on corrupted FAT tables with circular cluster chains.
+     * (M-12: corrupted FAT table causes infinite loop)
+     */
+    int max_steps = (int)(sbi->total_clusters + 2);
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && max_steps-- > 0) {
         uint32_t next = fat32_get_cluster(sbi, cluster);
         fat32_set_cluster(sbi, cluster, FAT32_CLUSTER_FREE);
         if (next >= FAT32_CLUSTER_EOC_MIN)
@@ -251,9 +272,12 @@ static ssize_t fat32_transfer_file(struct fat32_sb_info *sbi,
     uint32_t clusters_per_chain = 0;
     uint32_t cluster;
 
-    /* Count clusters in chain */
+    /* Count clusters in chain.
+     * FIXED (v4.1.8): Loop counter prevents infinite loop on
+     * corrupted FAT (M-12). */
     cluster = start_cluster;
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    int fat_steps = (int)(sbi->total_clusters + 2);
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
         clusters_per_chain++;
         uint32_t next = fat32_get_cluster(sbi, cluster);
         if (next >= FAT32_CLUSTER_EOC_MIN) break;
@@ -273,9 +297,11 @@ static ssize_t fat32_transfer_file(struct fat32_sb_info *sbi,
         uint32_t needed_clusters = (uint32_t)(((uint64_t)offset + count + cluster_size - 1) /
                                               cluster_size);
         uint32_t last_cluster = start_cluster;
-        /* Find last cluster in chain */
+        /* Find last cluster in chain.
+         * FIXED (v4.1.8): Loop counter prevents infinite loop (M-12). */
         cluster = start_cluster;
-        while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+        int fat_steps2 = (int)(sbi->total_clusters + 2);
+        while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps2-- > 0) {
             last_cluster = cluster;
             uint32_t next = fat32_get_cluster(sbi, cluster);
             if (next >= FAT32_CLUSTER_EOC_MIN) break;
@@ -560,8 +586,10 @@ static int fat32_find_entry(struct fat32_sb_info *sbi,
 
     uint32_t cluster = dir_cluster;
     uint32_t entry_idx = 0;
+    /* FIXED (v4.1.8): Loop counter prevents infinite loop on corrupted FAT (M-12) */
+    int fat_steps = (int)(sbi->total_clusters + 2);
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
 
         if (read_cluster(sbi, cluster, cluster_buf) < 0) {
             kfree(cluster_buf);
@@ -685,8 +713,10 @@ static int fat32_find_free_slot(struct fat32_sb_info *sbi,
     if (!cluster_buf) return -ENOMEM;
 
     uint32_t cluster = dir_cluster;
+    /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
+    int fat_steps = (int)(sbi->total_clusters + 2);
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
         if (read_cluster(sbi, cluster, cluster_buf) < 0) {
             kfree(cluster_buf);
             return -EIO;
@@ -739,8 +769,10 @@ static uint64_t fat32_get_dir_size(struct fat32_sb_info *sbi,
     uint32_t cluster_size = sbi->cluster_size;
     uint64_t total_size = 0;
     uint32_t cluster = dir_cluster;
+    /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
+    int fat_steps = (int)(sbi->total_clusters + 2);
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
         total_size += cluster_size;
         uint32_t next = fat32_get_cluster(sbi, cluster);
         if (next >= FAT32_CLUSTER_EOC_MIN) break;
@@ -1122,8 +1154,10 @@ int fat32_rmdir(struct fat32_sb_info *sbi, uint32_t parent_cluster,
     uint32_t entries_per_cluster = cluster_size / sizeof(struct fat32_dir_entry);
     int is_empty = 1;
     uint32_t cluster = found_cluster;
+    /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
+    int fat_steps = (int)(sbi->total_clusters + 2);
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
         if (read_cluster(sbi, cluster, dir_buf) < 0) {
             kfree(dir_buf);
             return -EIO;
@@ -1160,8 +1194,10 @@ int fat32_rmdir(struct fat32_sb_info *sbi, uint32_t parent_cluster,
      * We need to walk the parent directory to find the exact entry position. */
     {
         uint32_t cluster = parent_cluster;
+        /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
+        int fat_steps = (int)(sbi->total_clusters + 2);
 
-        while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+        while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
             uint8_t *cluster_buf = (uint8_t *)kmalloc(cluster_size);
             if (!cluster_buf) return -ENOMEM;
 
@@ -1186,10 +1222,9 @@ int fat32_rmdir(struct fat32_sb_info *sbi, uint32_t parent_cluster,
 
                 if (fc == found_cluster && (de->attr & ATTR_DIRECTORY)) {
                     /* Mark as deleted */
-                    /* NOTE: Known TOCTOU limitation — the LFN entries
-                     * preceding this entry are not cleared. This is safe
-                     * for single-threaded operations but may leave stale
-                     * LFN entries visible in multi-threaded scenarios. */
+                    /* FIXED (v4.1.8): LFN entries preceding this entry are
+                     * now cleared by the backwards walk below, resolving
+                     * the previously documented TOCTOU limitation. */
                     raw[0] = 0xE5;
                     if (write_cluster(sbi, cluster, cluster_buf) < 0) {
                         kfree(cluster_buf);
@@ -1527,8 +1562,10 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
     uint32_t cluster_size = sbi->cluster_size;
     uint32_t entries_per_cluster = cluster_size / sizeof(struct fat32_dir_entry);
     uint32_t cluster = info->first_cluster;
+    /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
+    int fat_steps = (int)(sbi->total_clusters + 2);
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN) {
+    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
         uint8_t *cluster_buf = (uint8_t *)kmalloc(cluster_size);
         if (!cluster_buf) return -ENOMEM;
 

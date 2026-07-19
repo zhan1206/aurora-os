@@ -117,6 +117,15 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
             pipe_spin_unlock(&ring->lock);
             return 0;  /* EOF */
         }
+        /*
+         * FIXED (v4.1.8): Set state to TASK_BLOCKED BEFORE unlocking.
+         * Previously, the state was set AFTER unlock, creating a race:
+         * the writer could wake us (set state=TASK_READY) between our
+         * unlock and state=TASK_BLOCKED, then we overwrite it with
+         * TASK_BLOCKED and call schedule() — permanent hang.
+         * (BUG C-1 / P0-4)
+         */
+        current->state = TASK_BLOCKED;
         /* Add to blocked readers linked list (head insertion) */
         node.next = ring->blocked_readers;
         ring->blocked_readers = &node;
@@ -135,9 +144,9 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
                 prev = &(*prev)->next;
             }
             pipe_spin_unlock(&ring->lock);
+            current->state = TASK_READY;
             current->t_errno = EINTR; return -1;
         }
-        current->state = TASK_BLOCKED;
         schedule();
         /* After wakeup, re-acquire lock and re-check */
     }
@@ -209,6 +218,13 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
                 pipe_spin_unlock(&ring->lock);
                 current->t_errno = EPIPE; return -1;
             }
+            /*
+             * FIXED (v4.1.8): Same race condition as reader side.
+             * Set state to TASK_BLOCKED BEFORE unlocking to prevent
+             * the reader from waking us between unlock and state set.
+             * (BUG C-1 / P0-4)
+             */
+            current->state = TASK_BLOCKED;
             /* Add to blocked writers linked list (head insertion) */
             node.next = ring->blocked_writers;
             ring->blocked_writers = &node;
@@ -227,9 +243,9 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
                     prev = &(*prev)->next;
                 }
                 pipe_spin_unlock(&ring->lock);
+                current->state = TASK_READY;
                 current->t_errno = EINTR; return -1;
             }
-            current->state = TASK_BLOCKED;
             schedule();
         }
 

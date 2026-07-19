@@ -137,6 +137,26 @@ long_mode_start:
     mov %rax, %cr4
     fninit                        /* Initialize x87 FPU */
 
+    /* 
+ * FIXED (v4.1.8): Zero BSS section before calling kernel_main.
+ * Previously, bss_start and bss_end pointed to the same address
+ * (both defined right next to each other in entry.S), so BSS was
+ * never cleared.  This caused uninitialized static variables to
+ * contain garbage values.  (BUG C-17 / H-4)
+ *
+ * Now uses linker-defined __bss_start and __bss_end symbols.
+ */
+    movabs $__bss_start, %rdi
+    movabs $__bss_end, %rcx
+    sub %rdi, %rcx                /* rcx = BSS size in bytes */
+    jz 2f
+    xor %eax, %eax
+    shr $3, %rcx                  /* convert to qwords */
+1:  mov %rax, (%rdi)
+    add $8, %rdi
+    loop 1b
+2:
+
     /* Set up 64-bit stack */
     movabs $stack_top, %rsp
 
@@ -182,6 +202,11 @@ stack_bottom:
 stack_top:
 
 .global bss_start, bss_end
+/* FIXED (v4.1.8): bss_start and bss_end are now defined in linker.ld.
+ * The old assembly-level labels pointed to the same address because
+ * nothing was between them.  BSS is now cleared in long_mode_start
+ * using the linker-defined __bss_start and __bss_end symbols.
+ * (BUG C-17 / H-4) */
 bss_start:
 bss_end:
 

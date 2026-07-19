@@ -50,8 +50,17 @@ void stack_protect_init(void) {
     __stack_chk_guard *= 0xFF51AFD7ED558CCDULL;
     __stack_chk_guard ^= __stack_chk_guard >> 33;
 
+    /*
+     * FIXED (v4.1.8): Set the lowest byte of the canary to 0x00
+     * (terminator canary).  This prevents string operations (strcpy,
+     * sprintf, etc.) from reading past the canary and leaking it.
+     * The canary check uses XOR, so the null byte is still detected
+     * as corruption if the attacker overwrites it.  (L-24)
+     */
+    __stack_chk_guard &= ~0xFFULL;
+
     /* Ensure canary is never zero */
-    if (__stack_chk_guard == 0) __stack_chk_guard = 0xDEADBEEF1BADB002ULL;
+    if (__stack_chk_guard == 0) __stack_chk_guard = 0xDEADBEEF1BADB000ULL;
 
     log_printf(LOG_LEVEL_INFO, "Stack protector initialized\n");
 }
