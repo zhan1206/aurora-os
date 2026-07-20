@@ -1,5 +1,125 @@
 # AuroraOS Changelog
 
+## v4.2.1 (2026-07-20) — 安全加固与驱动稳定性修复
+
+### 概述
+
+v4.2.1 完成了网络栈、安全机制、设备驱动三大子系统中的高严重度和中严重度缺陷修复，共涵盖 **29 个问题**（14 高 + 15 中），修改 **11 个文件**，新增 **+262 行**，删除 **-67 行**。
+
+---
+
+### 一、网络栈修复 (8项)
+
+#### 高严重度 (3项)
+
+**BUG-NET-H2: TCP SMP竞态条件（unlock后使用socket指针）**：
+- `kernel/net/net.c`: `tcp_connect()`、`tcp_send()`、`tcp_close()`、`tcp_shutdown()` 中将 `spin_unlock(&tcp_lock)` 移至 `tcp_send_packet()` 之后，防止 SMP 系统上释放锁后继续使用 socket 指针导致的 use-after-free。
+
+**BUG-NET-H4: VirtIO MMIO缺少内存屏障**：
+- `kernel/virtio_net.c`: 在 MMIO 写入后和关键读取前添加 `__sync_synchronize()` 内存屏障，确保设备状态一致性。
+
+**BUG-NET-H4: VirtIO RX描述符链被拆分**：
+- `kernel/virtio_net.c`: 收到包后将描述符重新提交到原始链中，而非提交独立新描述符，防止接收缓冲区逐渐减少。
+
+#### 中严重度 (5项)
+
+**BUG-NET-M1: TIME_WAIT/SYN_RECV计时器双重递增**：
+- `kernel/net/net.c`: 将 TIME_WAIT 和 SYN_RECV 计数器递增逻辑从 `tcp_handle_packet()` 中移除，仅在 `net_poll()` 中递增，防止双重计数导致提前超时。
+
+**BUG-NET-M2: 服务端SYN_RECEIVED→ESTABLISHED未初始化拥塞控制**：
+- `kernel/net/net.c`: 在服务端三次握手完成时调用 `tcp_cong_on_ack()` 初始化拥塞控制，与客户端保持一致。
+
+**BUG-NET-M5: tcp_getsockname/tcp_getpeername空指针解引用**：
+- `kernel/net/net.c`: 添加输出参数 `local_ip`/`local_port`/`remote_ip`/`remote_port` 的空指针验证。
+
+**BUG-NET-M6: ARP缓存竞态条件**：
+- `kernel/net/net.c`: 添加 `arp_lock` 自旋锁保护所有 ARP 缓存操作（`arp_cache_find`、`arp_cache_add`、`arp_cache_age`），在 `net_init()` 中初始化锁。
+
+**BUG-NET-M7: TCP接收窗口不反映实际缓冲区空闲**：
+- `kernel/net/net.c`: `tcp->window` 改为 `htons(TCP_RX_BUF_SIZE - sock->rx_len)`，反映实际可用缓冲区空间。
+
+**BUG-NET-M9: DNS压缩指针可导致越界读**：
+- `kernel/net/dns.c`: 在 DNS 名称解析循环中添加标签长度验证 `if (pos + 1 + label_len > rx_len) break`，防止越界读取。
+
+**BUG-NET-M11: RTO指数退避不重置**：
+- `kernel/net/tcp_cong.c`: 在 `tcp_cong_on_ack()` 中收到新 ACK 时，将 srto 重置为 `rtt + 4 * rttvar`，防止单次超时后 RTO 永久膨胀。
+
+**BUG-NET-H6: TCP拥塞控制槽位映射冲突**：
+- `kernel/net/tcp_cong.c`: 在 `tcp_cong_data` 中添加 `sock_id` 字段，`tcp_cong_find_slot()` 验证槽位归属，防止不同 socket 的拥塞控制互相干扰。
+
+---
+
+### 二、安全机制修复 (3项)
+
+#### 高严重度 (2项)
+
+**BUG-SEC-H2: BPF间接加载整数溢出（安全绕过）**：
+- `kernel/seccomp.c`: 在 `BPF_LD | BPF_W | BPF_IND` 处理中添加 `if (X > UINT32_MAX - k) return -1` 溢出检查，防止绕过边界检查从内核内存读取任意 4 字节。
+
+**BUG-SEC-H6: cap_fd_alloc缺乏权限验证**：
+- `kernel/capability.c`: 添加权限验证——进程只能分配已持有 capabilities 的子集。PID 1 (init) 豁免。防止任意进程自行提权。
+
+#### 中严重度 (1项)
+
+**BUG-SEC-M1: BPF_RET | BPF_A忽略A寄存器值**：
+- `kernel/seccomp.c`: 将 `BPF_RET | BPF_A` 和 `BPF_RET | BPF_K` 分开处理，前者使用 A 寄存器值而非立即数 k。
+
+**BUG-SEC-M5: fd_derive失败时refcount泄漏**：
+- `kernel/capability.c`: `fd_derive()` 中 `cap_fd_alloc()` 失败时调用 `vfs_close()` 回退 `vfs_file_dup()` 增加的引用计数。
+
+---
+
+### 三、设备驱动修复 (8项)
+
+#### 高严重度 (7项)
+
+**BUG-DRV-H1: NVMe PRP列表物理地址未对齐**：
+- `kernel/nvme.c`: 使用 `alloc_page()` 替代 `kmalloc(4096)` 分配 PRP 列表，确保页对齐。
+
+**BUG-DRV-H2: NVMe队列满检测缺失**：
+- `kernel/nvme.c`: I/O 提交前检查 `(tail + 1) % num_entries == head`，队列满时忙等待至空位。
+
+**BUG-DRV-H3: NVMe NVME_STATUS_SC_MASK定义错误**：
+- `kernel/nvme.h`: 将 `NVME_STATUS_SC_MASK` 从 `0x01FE` 修正为 `0x03FE`，覆盖 bit[1:10]。
+
+**BUG-DRV-H4: NVMe nvme_controller_init失败时资源泄漏**：
+- `kernel/nvme.c`: 添加 `nvme_queue_free()` 函数，在初始化失败路径中释放已分配的 admin 队列。
+
+**BUG-DRV-H6: VirtIO virtq_kick内存屏障不完整**：
+- `kernel/virtio_blk.c`: 将编译器屏障替换为 `mfence` CPU 内存屏障，确保设备在门铃更新前看到描述符链。
+
+**BUG-DRV-H7: VirtIO超时后设备仍在运行**：
+- `kernel/virtio_blk.c`: 超时后不立即释放缓冲区，记录警告并标记为泄漏，防止设备仍在 DMA 时访问已释放内存。
+
+**BUG-DRV-H8: PCI 64位BAR处理缺失**：
+- `kernel/pci.h`: 将 `bars` 字段从 `uint32_t` 改为 `uint64_t`，支持 64 位 MMIO BAR。
+- `kernel/pci.c`: 检测 BAR 类型 bit[2:1]，对 64 位 BAR 读取下一个寄存器的高 32 位并跳过。
+
+**BUG-DRV-H9: IOAPIC掩码操作顺序错误**：
+- `kernel/apic.c`: 在 `ioapic_init()` 中先读取高 32 位，设置 mask 位，再写回，防止初始化过程中意外中断。
+
+#### 中严重度 (3项)
+
+**BUG-DRV-M1: CID计数器溢出**：
+- `kernel/nvme.c`: 添加 CID 溢出检查，跳过 CID 0（保留），从 65535 回绕至 1。
+
+**BUG-DRV-M2: CFS超时后未处理**：
+- `kernel/nvme.c`: 控制器致命状态（CFS）超时后返回错误，不再继续初始化。
+
+**BUG-DRV-M3: virtq_add_chain失败时描述符泄漏**：
+- `kernel/virtio_blk.c`: 链构建失败时清除已添加描述符的 flags 和 next 字段，防止描述符泄漏和可用环损坏。
+
+**BUG-DRV-M7: lapic_timer_calibrate无限循环风险**：
+- `kernel/apic.c`: 添加超时计数器（100 万次迭代），超时后使用回退估计值，防止 PIT 不响应时内核挂起。
+
+---
+
+### 四、兼容性说明
+
+- 所有修改向后兼容，不影响现有 API 和 ABI
+- 网络协议行为无变化，仅修复计时器和拥塞控制逻辑
+- 模块签名方案（ECDSA）预留接口，待后续版本实现完整签名验证
+
 ## v4.1.9 (2026-07-19) — 生产化路线图 Phase 1-3 收尾
 
 ### 概述

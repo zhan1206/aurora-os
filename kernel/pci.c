@@ -182,11 +182,28 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
     dev->subsystem_id     = pci_read_config16(bus, device, function,
                                               PCI_CONFIG_SUBSYS_ID);
 
-    /* Read BARs */
+    /* Read BARs.
+     * FIXED (v4.2.1): Handle 64-bit BARs.  If BAR type bits [2:1] == 0x2,
+     * the BAR is 64-bit and occupies two consecutive BAR registers.
+     * Read the upper 32 bits from the next register and skip it.
+     * (BUG-DRV-H8) */
     for (int i = 0; i < PCI_MAX_BARS; i++) {
         uint8_t bar_offset = (uint8_t)(PCI_CONFIG_BAR0 + i * 4);
-        dev->bars[i] = pci_read_config32(bus, device, function, bar_offset);
+        uint32_t bar_low = pci_read_config32(bus, device, function, bar_offset);
+        dev->bars[i] = bar_low;
         dev->bar_sizes[i] = pci_bar_size(bus, device, function, bar_offset);
+
+        /* Check if this is a 64-bit memory BAR */
+        if ((bar_low & 0x6) == 0x4 && i + 1 < PCI_MAX_BARS) {
+            /* 64-bit BAR: read upper 32 bits from next register */
+            uint32_t bar_high = pci_read_config32(bus, device, function,
+                                                  (uint8_t)(bar_offset + 4));
+            dev->bars[i] |= ((uint64_t)bar_high << 32);
+            /* Mark the next slot as consumed */
+            i++;
+            dev->bars[i] = 0;
+            dev->bar_sizes[i] = 0;
+        }
     }
 
     pci_add_device(dev);

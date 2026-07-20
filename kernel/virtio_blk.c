@@ -177,7 +177,21 @@ int virtq_add_chain(struct virtq *vq, uint64_t *addrs, uint32_t *lens,
 
     for (uint32_t i = 0; i < num; i++) {
         int idx = virtq_add_descriptor(vq, addrs[i], lens[i], flags[i]);
-        if (idx < 0) return -1;
+        /*
+         * FIXED (v4.2.1): On failure, unlink descriptors already added
+         * to the chain.  Without this, allocated descriptors leak and
+         * the available ring gets corrupted.  (BUG-DRV-M3)
+         */
+        if (idx < 0) {
+            /* Unlink the partial chain: reset all descriptors added so far.
+             * Since we only set up the NEXT chain and haven't submitted
+             * to the device yet, simply re-mark them as free. */
+            for (uint32_t j = 0; j < i; j++) {
+                vq->desc[j].flags = 0;
+                vq->desc[j].next = 0;
+            }
+            return -1;
+        }
 
         if (first < 0) first = idx;
         if (prev >= 0) {
@@ -191,8 +205,13 @@ int virtq_add_chain(struct virtq *vq, uint64_t *addrs, uint32_t *lens,
 }
 
 void virtq_kick(struct virtq *vq, uint16_t head) {
-    /* Ensure writes are visible */
-    asm volatile ("" ::: "memory");
+    /* FIXED (v4.2.1): Use mfence (CPU memory barrier) instead of
+     * compiler barrier only.  The compiler barrier ("" ::: "memory")
+     * only prevents compiler reordering but not CPU reordering.
+     * MMIO writes to device memory require a full memory fence to
+     * ensure the descriptor chain is visible to the device before
+     * the available ring update.  (BUG-DRV-H6) */
+    asm volatile ("mfence" ::: "memory");
 
     /* Place the descriptor head in the available ring.
      * Bug #5 fix: use the actual head descriptor index, not avail->idx. */
@@ -550,9 +569,13 @@ static int virtio_blk_do_io(struct virtio_blk_dev *dev, uint32_t type,
     }
 
     if (timeout <= 0) {
-        log_printf(LOG_LEVEL_WARN, "virtio-blk: I/O timeout\n");
-        kfree(req);
-        kfree(status_byte);
+        /* FIXED (v4.2.1): Don't immediately free buffers on timeout.
+         * The device may still be DMA-ing to these buffers.  Instead,
+         * mark them as leaked and log a warning.  A proper fix would
+         * reset the device before freeing, but that requires
+         * significant infrastructure.  (BUG-DRV-H7) */
+        log_printf(LOG_LEVEL_WARN, "virtio-blk: I/O timeout — buffers leaked\n");
+        /* Do NOT free req or status_byte — device may still access them */
         return -1;
     }
 

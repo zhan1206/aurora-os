@@ -50,6 +50,7 @@ struct tcp_cong_data {
     int      timestamp_ok;   /* Timestamp option supported */
     uint32_t recent_ts;      /* Most recent timestamp from peer */
     uint32_t last_ts_sent;   /* Last timestamp we sent */
+    int      sock_id;        /* FIXED (v4.2.1): socket ID for slot validation (BUG-NET-H6) */
 };
 
 /* ================================================================
@@ -104,6 +105,7 @@ void tcp_cong_socket_init(int sock_id) {
     tcp_cong_data[slot].window_scale = 0;
     tcp_cong_data[slot].sack_ok = 0;
     tcp_cong_data[slot].timestamp_ok = 0;
+    tcp_cong_data[slot].sock_id = sock_id;  /* FIXED (v4.2.1): track socket ID for slot validation (BUG-NET-H6) */
 
     spin_unlock(&tcp_cong_lock);
 }
@@ -113,7 +115,17 @@ void tcp_cong_socket_init(int sock_id) {
  * ================================================================ */
 static struct tcp_cong_data *tcp_cong_find_slot(int sock_id) {
     int slot = sock_id % MAX_TCP_CONG_SOCKETS;
-    return &tcp_cong_data[slot];
+    struct tcp_cong_data *cd = &tcp_cong_data[slot];
+    /*
+     * FIXED (v4.2.1): Validate that the slot belongs to this socket.
+     * If sock_id doesn't match and the slot is in use, it means two
+     * different sockets mapped to the same slot.  Return NULL to
+     * prevent cross-socket congestion control interference. (BUG-NET-H6)
+     */
+    if (cd->cwnd != 0 && cd->sock_id != 0 && cd->sock_id != sock_id) {
+        return NULL;  /* slot conflict */
+    }
+    return cd;
 }
 
 /* ================================================================
@@ -160,6 +172,14 @@ void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count) {
         /* New ACK */
         cd->dup_ack_count = 0;
         cd->last_ack = ack_seq;
+        /* FIXED (v4.2.1): Reset RTO backoff on successful ACK.
+         * Without this, a single timeout would permanently inflate srto
+         * because tcp_cong_on_timeout doubles it without reset. (BUG-NET-M11) */
+        if (cd->srto > TCP_RTO_INITIAL && cd->rtt > 0) {
+            cd->srto = cd->rtt + 4 * cd->rttvar;
+            if (cd->srto < TCP_RTO_MIN) cd->srto = TCP_RTO_MIN;
+            if (cd->srto > TCP_RTO_MAX) cd->srto = TCP_RTO_MAX;
+        }
     }
 
     int state = cd->cong_state;
@@ -242,7 +262,9 @@ void tcp_cong_on_timeout(int sock) {
     /* Reset congestion window to 1 MSS */
     cd->cwnd = TCP_MSS;
 
-    /* Back off RTO (exponential backoff) */
+    /* Back off RTO (exponential backoff).
+     * FIXED (v4.2.1): srto is reset on successful ACK in tcp_cong_on_ack
+     * to prevent permanent RTO inflation after a single timeout. (BUG-NET-M11) */
     cd->srto = cd->srto * 2;
     if (cd->srto > TCP_RTO_MAX) {
         cd->srto = TCP_RTO_MAX;

@@ -61,8 +61,39 @@
  * Allocate a new fd with given capabilities.
  * Returns fd number, or -1 on failure.
  */
+
+/* Forward declaration used by cap_fd_alloc's permission check */
+static struct cap_entry *cap_get(struct task_struct *t, int fd);
+
 int cap_fd_alloc(struct task_struct *t, void *filp, uint32_t caps) {
     if (!t || !filp) return -1;
+
+    /*
+     * FIXED (v4.2.1): Permission validation — a process can only
+     * assign capabilities that it already possesses (or is a subset
+     * thereof).  PID 1 (init) is exempt and can assign any caps.
+     * Without this check, any process could self-escalate privileges
+     * by assigning arbitrary capabilities to its own fds.
+     * (BUG-SEC-H6)
+     */
+    if (t->pid != 1) {
+        /* Iterate the process's existing fd_table to find the
+         * union of all capabilities it currently holds. */
+        uint32_t held_caps = 0;
+        for (int i = 0; i < MAX_FDS; i++) {
+            if (t->fd_table[i] != (uintptr_t)-1) {
+                struct cap_entry *e = cap_get(t, i);
+                if (e) held_caps |= e->caps;
+            }
+        }
+        /* The requested caps must be a subset of held_caps */
+        if ((caps & ~held_caps) != 0) {
+            log_printf(LOG_LEVEL_WARN,
+                       "cap: pid %d tried to escalate caps 0x%x (held 0x%x)\n",
+                       t->pid, caps, held_caps);
+            return -1;
+        }
+    }
 
     /*
      * NOTE: Currently any process can allocate capabilities via cap_fd_alloc.
@@ -183,7 +214,16 @@ int fd_derive(int old_fd, uint32_t new_caps) {
     vfs_file_dup((struct file *)entry->file);
 
     /* Allocate new fd with reduced capabilities, same file pointer */
-    return cap_fd_alloc(current, entry->file, new_caps);
+    int new_fd = cap_fd_alloc(current, entry->file, new_caps);
+    /*
+     * FIXED (v4.2.1): If cap_fd_alloc fails, we must decrement the
+     * refcount that vfs_file_dup incremented.  Otherwise the file
+     * will never be closed, causing a refcount leak.  (BUG-SEC-M5)
+     */
+    if (new_fd < 0) {
+        vfs_close((struct file *)entry->file);
+    }
+    return new_fd;
 }
 
 /*

@@ -87,6 +87,16 @@ static void nvme_queue_init(struct nvme_queue *q, uint16_t qid,
     q->cq_head = 0;
 }
 
+/*
+ * FIXED (v4.2.1): Free queue resources to prevent memory leaks
+ * on initialization failure.  (BUG-DRV-H4)
+ */
+static void nvme_queue_free(struct nvme_queue *q) {
+    if (!q) return;
+    if (q->sq) { kfree(q->sq); q->sq = NULL; }
+    if (q->cq) { kfree(q->cq); q->cq = NULL; }
+}
+
 static int nvme_submit_cmd(struct nvme_controller *ctrl,
                             struct nvme_queue *sq, struct nvme_queue *cq,
                             struct nvme_sqe *cmd) {
@@ -185,13 +195,19 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
         return -1;
     }
 
-    /* Wait for CSTS.CFS (Controller Fatal Status) to be clear */
+    /* Wait for CSTS.CFS (Controller Fatal Status) to be clear.
+     * FIXED (v4.2.1): If CFS is set after timeout, the controller is in
+     * a fatal state.  Return error instead of proceeding.  (BUG-DRV-M2) */
     timeout = 500000;
     while (timeout > 0) {
         uint32_t csts = nvme_read32(&bar[NVME_REG_CSTS / 4]);
         if (!(csts & NVME_CSTS_CFS)) break;
         timeout--;
         asm volatile ("pause" ::: "memory");
+    }
+    if (timeout <= 0) {
+        log_printf(LOG_LEVEL_WARN, "nvme: controller fatal status (CFS) set\n");
+        return -1;
     }
 
     /* Step 2: Read controller capabilities */
@@ -246,6 +262,9 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
     }
     if (timeout <= 0) {
         log_printf(LOG_LEVEL_WARN, "nvme: controller enable timeout\n");
+        /* FIXED (v4.2.1): Free admin queues on failure.  (BUG-DRV-H4) */
+        nvme_queue_free(&ctrl->admin_sq);
+        nvme_queue_free(&ctrl->admin_cq);
         return -1;
     }
 
@@ -436,7 +455,13 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
     struct nvme_sqe cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = opcode;
-    cmd.cid = nvme_cid_counter++;  /* FIXED (v4.1.8): unique CID per command (C-14) */
+    cmd.cid = nvme_cid_counter++;
+    /*
+     * FIXED (v4.2.1): Prevent CID counter overflow.  When CID wraps
+     * from 65535 to 0, it could collide with an in-flight command.
+     * Skip CID 0 (reserved) and wrap around.  (BUG-DRV-M1)
+     */
+    if (nvme_cid_counter == 0) nvme_cid_counter = 1;
     cmd.nsid = nsid;
     cmd.prp1 = buf_phys;
     cmd.prp2 = 0;
@@ -457,12 +482,14 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
             cmd.prp2 = (buf_phys + 0x1000ULL) & ~0xFFFULL;
         } else {
             /* Need a PRP list.
-             * FIXED (v4.1.8): PRP list must be page-aligned. Use a
-             * dedicated page-aligned allocation.  (C-13) */
+             * FIXED (v4.2.1): PRP list must be page-aligned per NVMe spec.
+             * Use alloc_page() instead of kmalloc() to guarantee page
+             * alignment.  kmalloc() returns slab-allocated memory which
+             * may not be page-aligned.  (BUG-DRV-H1) */
             struct nvme_prp_list *prp_list =
-                (struct nvme_prp_list *)kmalloc(4096);  /* full page for alignment */
+                (struct nvme_prp_list *)alloc_page();
             if (!prp_list) return -ENOMEM;
-            memset(prp_list, 0, sizeof(*prp_list));
+            memset(prp_list, 0, PAGE_SIZE);
 
             uint64_t data_addr = (buf_phys + 0x1000ULL) & ~0xFFFULL;
             /* Skip the first page (already in PRP1) */
@@ -480,16 +507,29 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
     /* Submit to I/O Submission Queue */
     struct nvme_queue *sq = &ctrl->io_sq;
     /*
-     * FIXED (v4.1.8): Check if queue is full before submitting.
+     * FIXED (v4.2.1): Check if queue is full before submitting.
      * Queue is full when (tail + 1) % num_entries == head.
-     * Since we don't track head directly (controller manages it),
-     * we check via the phase bit in the CQE.  For synchronous I/O,
-     * we wait for a completion slot if the queue appears full.
-     * (C-14: command ID wrap / queue underflow)
+     * For synchronous I/O, we busy-wait until a slot opens.
+     * (BUG-DRV-H2)
      */
     uint16_t tail = sq->sq_tail;
+    uint16_t next_tail = (tail + 1) % sq->num_entries;
+    int wait_count = 0;
+    while (next_tail == sq->sq_head) {
+        /* Queue is full — poll for completion to advance head */
+        if (++wait_count > 1000000) {
+            log_printf(LOG_LEVEL_ERR, "nvme: I/O submission queue stuck\n");
+            return -EIO;
+        }
+        asm volatile ("pause" ::: "memory");
+        /* Check if a completion freed up a slot */
+        struct nvme_cqe poll_cqe;
+        if (nvme_wait_completion(ctrl, &ctrl->io_cq, &poll_cqe) >= 0) {
+            /* sq_head was advanced by the controller */
+        }
+    }
     memcpy(&sq->sq[tail], &cmd, sizeof(struct nvme_sqe));
-    sq->sq_tail = (tail + 1) % sq->num_entries;
+    sq->sq_tail = next_tail;
 
     /* Ring doorbell */
     uint32_t stride = ctrl->doorbell_stride;
@@ -502,12 +542,14 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
     struct nvme_cqe cqe;
     int ret = nvme_wait_completion(ctrl, &ctrl->io_cq, &cqe);
 
-    /* Free PRP list if one was allocated */
+    /* Free PRP list if one was allocated.
+     * FIXED (v4.2.1): Use free_page() instead of kfree() since
+     * the PRP list is now allocated with alloc_page().  (BUG-DRV-H1) */
     if (cmd.prp2 && total_bytes > first_page_data) {
         uint64_t remaining = total_bytes - first_page_data;
         uint64_t remaining_pages = (remaining + 0xFFFULL) / 0x1000ULL;
         if (remaining_pages > 1) {
-            kfree((void *)(uintptr_t)cmd.prp2);
+            free_page((void *)(uintptr_t)cmd.prp2);
         }
     }
 
@@ -565,8 +607,9 @@ static int nvme_probe_device(struct pci_device *pci) {
     pci_write_config16(pci->bus, pci->device, pci->function,
                        PCI_CONFIG_COMMAND, cmd_reg);
 
-    /* Get BAR0 (MMIO base) */
-    uint32_t bar0 = pci->bars[0];
+    /* Get BAR0 (MMIO base).
+     * FIXED (v4.2.1): bars[] is now uint64_t for 64-bit BAR support.  (BUG-DRV-H8) */
+    uint64_t bar0 = pci->bars[0];
     if (!bar0 || (bar0 & PCI_BAR_IO)) {
         log_printf(LOG_LEVEL_WARN, "nvme: BAR0 is not a valid MMIO BAR\n");
         kfree(ctrl);

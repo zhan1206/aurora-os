@@ -186,15 +186,21 @@ struct arp_entry {
 
 static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 static int arp_age_counter = 0;
+static spinlock_t arp_lock;  /* FIXED (v4.2.1): protect ARP cache (BUG-NET-M6) */
 
 static struct arp_entry *arp_cache_find(const uint8_t ip[4]) {
     int i;
+    /* FIXED (v4.2.1): ARP cache operations must be protected by arp_lock
+     * to prevent SMP race conditions.  (BUG-NET-M6) */
+    spin_lock(&arp_lock);
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && memcmp(arp_cache[i].ip, ip, 4) == 0) {
             arp_cache[i].age = ++arp_age_counter;
+            spin_unlock(&arp_lock);
             return &arp_cache[i];
         }
     }
+    spin_unlock(&arp_lock);
     return NULL;
 }
 
@@ -205,6 +211,8 @@ static struct arp_entry *arp_cache_add(const uint8_t ip[4],
     int oldest_age = arp_cache[0].age;
     int i;
 
+    /* FIXED (v4.2.1): Protect with arp_lock (BUG-NET-M6) */
+    spin_lock(&arp_lock);
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (!arp_cache[i].valid) {
             target = i;
@@ -220,6 +228,7 @@ static struct arp_entry *arp_cache_add(const uint8_t ip[4],
     memcpy(arp_cache[target].mac, mac, 6);
     arp_cache[target].age = ++arp_age_counter;
     arp_cache[target].valid = 1;
+    spin_unlock(&arp_lock);
     return &arp_cache[target];
 }
 
@@ -232,12 +241,15 @@ static struct arp_entry *arp_cache_add(const uint8_t ip[4],
 
 static void arp_cache_age(void) {
     int i;
+    /* FIXED (v4.2.1): Protect with arp_lock (BUG-NET-M6) */
+    spin_lock(&arp_lock);
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid &&
             (arp_age_counter - arp_cache[i].age) > ARP_CACHE_AGE_THRESHOLD) {
             arp_cache[i].valid = 0;
         }
     }
+    spin_unlock(&arp_lock);
 }
 
 static void arp_send_request(struct net_if *iface, const uint8_t target_ip[4]) {
@@ -673,7 +685,7 @@ static int tcp_send_packet(struct tcp_socket *sock, uint8_t flags,
     tcp->seq_num = htonl(sock->seq_num);
     tcp->ack_num = htonl(sock->ack_num);
     tcp->data_offset_flags = htons((uint16_t)((5 << 12) | flags));
-    tcp->window = htons(TCP_RX_BUF_SIZE);  /* FIXED (v4.1.8): window = actual buffer size (H-22) */
+    tcp->window = htons((uint16_t)(TCP_RX_BUF_SIZE - sock->rx_len));  /* FIXED (v4.2.1): reflect actual free buffer space (BUG-NET-M7) */
     tcp->checksum = 0;
     tcp->urgent_ptr = 0;
 
@@ -784,10 +796,11 @@ int tcp_connect(int sock, const uint8_t dst_ip[4], uint16_t dst_port) {
     s->rcv_nxt = 0;
     s->state = TCP_SYN_SENT;
 
-    spin_unlock(&tcp_lock);
-
-    /* Send SYN */
+    /* FIXED (v4.2.1): Send SYN while holding tcp_lock to prevent
+     * SMP race — tcp_send_packet accesses sock fields that another
+     * CPU could modify if we release the lock first.  (BUG-NET-H2) */
     tcp_send_packet(s, TCP_SYN, NULL, 0);
+    spin_unlock(&tcp_lock);
     return 0;
 }
 
@@ -812,9 +825,10 @@ int tcp_send(int sock, const void *data, int len) {
     int send_len = len;
     if (send_len > TCP_MAX_SEGMENT) send_len = TCP_MAX_SEGMENT;
 
-    spin_unlock(&tcp_lock);
-
+    /* FIXED (v4.2.1): Hold lock through tcp_send_packet to prevent
+     * SMP race on socket fields.  (BUG-NET-H2) */
     int ret = tcp_send_packet(s, TCP_PSH | TCP_ACK, data, send_len);
+    spin_unlock(&tcp_lock);
     if (ret < 0) return ret;
     return send_len;
 }
@@ -862,15 +876,17 @@ int tcp_close(int sock) {
 
     if (s->state == TCP_ESTABLISHED) {
         s->state = TCP_FIN_WAIT1;
-        spin_unlock(&tcp_lock);
+        /* FIXED (v4.2.1): Hold lock through tcp_send_packet.  (BUG-NET-H2) */
         tcp_send_packet(s, TCP_FIN | TCP_ACK, NULL, 0);
+        spin_unlock(&tcp_lock);
         return 0;
     }
 
     if (s->state == TCP_CLOSE_WAIT) {
         s->state = TCP_LAST_ACK;
-        spin_unlock(&tcp_lock);
+        /* FIXED (v4.2.1): Hold lock through tcp_send_packet.  (BUG-NET-H2) */
         tcp_send_packet(s, TCP_FIN | TCP_ACK, NULL, 0);
+        spin_unlock(&tcp_lock);
         return 0;
     }
 
@@ -949,15 +965,17 @@ int tcp_shutdown(int sock, int how) {
 
     if (s->state == TCP_ESTABLISHED) {
         s->state = TCP_FIN_WAIT1;
-        spin_unlock(&tcp_lock);
+        /* FIXED (v4.2.1): Hold lock through tcp_send_packet.  (BUG-NET-H2) */
         tcp_send_packet(s, TCP_FIN | TCP_ACK, NULL, 0);
+        spin_unlock(&tcp_lock);
         return 0;
     }
 
     if (s->state == TCP_CLOSE_WAIT) {
         s->state = TCP_LAST_ACK;
-        spin_unlock(&tcp_lock);
+        /* FIXED (v4.2.1): Hold lock through tcp_send_packet.  (BUG-NET-H2) */
         tcp_send_packet(s, TCP_FIN | TCP_ACK, NULL, 0);
+        spin_unlock(&tcp_lock);
         return 0;
     }
 
@@ -966,6 +984,9 @@ int tcp_shutdown(int sock, int how) {
 }
 
 int tcp_getsockname(int sock, uint8_t local_ip[4], uint16_t *local_port) {
+    /* FIXED (v4.2.1): Validate output pointers before use.
+     * (BUG-NET-M5) */
+    if (!local_ip || !local_port) return -1;
     spin_lock(&tcp_lock);
     struct tcp_socket *s = tcp_find_socket(sock);
     if (!s) {
@@ -979,6 +1000,9 @@ int tcp_getsockname(int sock, uint8_t local_ip[4], uint16_t *local_port) {
 }
 
 int tcp_getpeername(int sock, uint8_t remote_ip[4], uint16_t *remote_port) {
+    /* FIXED (v4.2.1): Validate output pointers before use.
+     * (BUG-NET-M5) */
+    if (!remote_ip || !remote_port) return -1;
     spin_lock(&tcp_lock);
     struct tcp_socket *s = tcp_find_socket(sock);
     if (!s) {
@@ -1153,16 +1177,19 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
             /* Third handshake: ACK received, connection established */
             sock->ack_num = seq;
             sock->state = TCP_ESTABLISHED;
+            /* FIXED (v4.2.1): Initialize congestion control for server-side
+             * connections.  Previously only the client side (SYN_SENT→ESTABLISHED)
+             * initialized congestion control.  (BUG-NET-M2) */
+            tcp_cong_on_ack(sock->id, sock->ack_num, 0);
             spin_unlock(&tcp_lock);
             log_printf(LOG_LEVEL_DEBUG,
                        "tcp: server connection established sock=%d\n", sock->id);
         } else {
             /*
-             * FIXED (v4.1.8): Increment SYN_RECV timeout counter.
-             * When the counter exceeds the threshold, the socket is
-             * closed to prevent SYN flood DoS.  (BUG C-11)
+             * FIXED (v4.2.1): SYN_RECV counter is now incremented ONLY
+             * in net_poll() to prevent double-increment from both
+             * tcp_handle_packet and net_poll.  (BUG-NET-M1)
              */
-            sock->syn_recv_count++;
             spin_unlock(&tcp_lock);
         }
         break;
@@ -1277,23 +1304,11 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
 
     case TCP_TIME_WAIT:
         /*
-         * FIXED (v4.1.8): TIME_WAIT now auto-transitions to CLOSED
-         * after a threshold of poll cycles.  Previously, TIME_WAIT
-         * sockets were never cleaned up, causing the TCP socket table
-         * to fill up after 16 connections.  In a real system this
-         * would use a timer (2*MSL = 60s), but we use a simple counter
-         * as a proxy since we lack a kernel timer infrastructure.
-         * (BUG C-10)
+         * FIXED (v4.2.1): TIME_WAIT counter is now incremented ONLY
+         * in net_poll() to prevent double-increment from both
+         * tcp_handle_packet and net_poll.  (BUG-NET-M1)
          */
-        sock->time_wait_count++;
-        if (sock->time_wait_count > 1000) {
-            sock->state = TCP_CLOSED;
-            sock->in_use = 0;
-            spin_unlock(&tcp_lock);
-            log_printf(LOG_LEVEL_DEBUG, "tcp: TIME_WAIT expired sock=%d\n", sock->id);
-        } else {
-            spin_unlock(&tcp_lock);
-        }
+        spin_unlock(&tcp_lock);
         break;
 
     case TCP_CLOSED:
@@ -1426,6 +1441,7 @@ void net_init(void) {
 
     spin_init(&udp_lock);
     spin_init(&tcp_lock);
+    spin_init(&arp_lock);  /* FIXED (v4.2.1): init ARP cache lock (BUG-NET-M6) */
 
     /* FIXED (v4.1.8): Initialize TCP congestion control.
      * Previously, tcp_cong.c was compiled but never called,

@@ -198,7 +198,11 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
                 pos += 2;  /* Compressed name pointer */
                 break;
             }
-            pos += 1 + rx_buf[pos];
+            /* FIXED (v4.2.1): Validate label length to prevent pos from
+             * jumping past rx_len and causing out-of-bounds read. (BUG-NET-M9) */
+            uint8_t label_len = rx_buf[pos];
+            if (pos + 1 + label_len > rx_len) break;
+            pos += 1 + label_len;
         }
         pos += 1;  /* Skip terminating zero */
         pos += 4;  /* Skip QTYPE + QCLASS */

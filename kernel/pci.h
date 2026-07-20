@@ -91,7 +91,7 @@ struct pci_device {
     uint8_t  header_type;
     uint8_t  irq_line;
     uint8_t  irq_pin;
-    uint32_t bars[PCI_MAX_BARS];
+    uint64_t bars[PCI_MAX_BARS];     /* FIXED (v4.2.1): uint64_t for 64-bit BAR support (BUG-DRV-H8) */
     uint32_t bar_sizes[PCI_MAX_BARS];
     uint32_t subsystem_vendor;
     uint32_t subsystem_id;

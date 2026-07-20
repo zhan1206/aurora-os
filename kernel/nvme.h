@@ -132,7 +132,7 @@ struct nvme_cqe {
 
 /* Status field breakdown */
 #define NVME_STATUS_SC_SHIFT     1
-#define NVME_STATUS_SC_MASK      0x01FE
+#define NVME_STATUS_SC_MASK      0x03FE  /* FIXED (v4.2.1): bits 1-10 per NVMe spec (BUG-DRV-H3) */
 #define NVME_STATUS_SC_SUCCESS   0x0000
 #define NVME_STATUS_DNR          0x4000
 #define NVME_STATUS_MORE         0x8000

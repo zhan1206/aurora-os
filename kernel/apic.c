@@ -135,13 +135,22 @@ static void lapic_timer_calibrate(void) {
     outb(0x42, (uint8_t)((pit_count >> 8) & 0xFF));
 
     /* Wait for PIT to count down (mode 0: output goes high when done).
-     * Read back command: latch count for channel 2. */
-    while (1) {
+     * Read back command: latch count for channel 2.
+     * FIXED (v4.2.1): Add timeout counter to prevent infinite loop
+     * if the PIT doesn't respond.  (BUG-DRV-M7) */
+    int calib_timeout = 1000000;
+    while (calib_timeout > 0) {
+        calib_timeout--;
         outb(0x43, 0xE2); /* read-back: channel 2, latch count, don't latch status */
         uint8_t lo = inb(0x42);
         uint8_t hi = inb(0x42);
         uint16_t count = lo | ((uint16_t)hi << 8);
         if (count == 0 || count > pit_count) break;
+    }
+    if (calib_timeout <= 0) {
+        log_printf(LOG_LEVEL_WARN, "apic: timer calibration timeout\n");
+        lapic_timer_calib_count = 0xFFFFFFFFU / 100;  /* fallback estimate */
+        return;
     }
 
     /* Read current count and calculate elapsed */
@@ -347,12 +356,17 @@ void ioapic_init(uint64_t ioapic_base) {
     outb(0x21, 0xFF);  /* mask all on master PIC */
     outb(0xA1, 0xFF);  /* mask all on slave PIC */
 
-    /* Mask all I/O APIC redirection entries */
+    /* Mask all I/O APIC redirection entries.
+     * FIXED (v4.2.1): Set mask bit BEFORE modifying low 32 bits.
+     * Previously, we wrote 0 to the high 32 bits (clearing the mask),
+     * then read back and set the mask.  This left a window where
+     * interrupts could fire with incorrect routing.  Now we read the
+     * high 32 bits first, set the mask, and write back atomically.
+     * (BUG-DRV-H9) */
     for (int i = 0; i <= max_redir; i++) {
         uint32_t regsel = IOAPIC_REDTBL_BASE + 2 * i;
+        /* Select high 32 bits, read current value, set mask bit */
         *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_REGSEL) = regsel + 1;
-        *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN) = 0;
-        /* mask bit = 0x10000 in high 32 bits */
         uint32_t high = *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN);
         *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN) = high | 0x10000;
     }

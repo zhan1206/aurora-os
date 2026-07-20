@@ -184,9 +184,16 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
             /*
              * Indirect load: X + k is the offset into seccomp_data.
              * Read 4 bytes at that offset.
+             *
+             * FIXED (v4.2.1): Check for integer overflow in X + k.
+             * If X + k wraps around, the subsequent bounds check would
+             * be bypassed, allowing arbitrary 4-byte reads from kernel
+             * memory.  (BUG-SEC-H2)
              */
             {
-                uint32_t offset = X + k;
+                uint32_t offset;
+                if (X > UINT32_MAX - k) return -1;  /* overflow check */
+                offset = X + k;
                 const uint8_t *base = (const uint8_t *)data;
                 if (offset + 4 > sizeof(struct seccomp_data)) return -1;
                 A = *(const uint32_t *)(base + offset);
@@ -309,13 +316,22 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
          * BPF_RET: Return
          * ================================================ */
         case BPF_RET | BPF_K:
-        case BPF_RET | BPF_A:
             /*
              * Return value interpretation:
              *   SECCOMP_RET_ALLOW (0x7FFF0000) → allow (return 0)
              *   Anything else → kill (return -1)
              */
             if (k == SECCOMP_RET_ALLOW) return 0;
+            return -1;
+
+        case BPF_RET | BPF_A:
+            /*
+             * FIXED (v4.2.1): BPF_RET | BPF_A returns the value in
+             * register A, not the immediate k.  Previously, both
+             * BPF_RET | BPF_K and BPF_RET | BPF_A used k, which
+             * ignored the computed A register value.  (BUG-SEC-M1)
+             */
+            if (A == SECCOMP_RET_ALLOW) return 0;
             return -1;
 
         /* ================================================
