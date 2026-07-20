@@ -40,11 +40,19 @@ static ssize_t ramfs_read(struct file *filp, void *buf, size_t count,
                           off_t *offset) {
     struct ramfs_node *n = (struct ramfs_node *)filp->inode;
     if (!n || !buf) return -1;
-    if (*offset >= (off_t)n->inode.size) return 0;
+    /*
+     * FIXED (v4.2.0): Acquire the ramfs lock to prevent concurrent
+     * writes from reallocating n->data while we are reading it.
+     * Without this lock, a concurrent ramfs_write could free and
+     * replace n->data, causing a use-after-free.  (BUG-FS-H5)
+     */
+    spin_lock(&ramfs_lock);
+    if (*offset >= (off_t)n->inode.size) { spin_unlock(&ramfs_lock); return 0; }
     size_t toread = count;
     if ((size_t)(*offset) + toread > n->inode.size) toread = n->inode.size - (*offset);
     memcpy(buf, n->data + (*offset), toread);
     *offset += toread;
+    spin_unlock(&ramfs_lock);
     return toread;
 }
 

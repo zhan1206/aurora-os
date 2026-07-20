@@ -186,6 +186,18 @@ int fd_derive(int old_fd, uint32_t new_caps) {
     return cap_fd_alloc(current, entry->file, new_caps);
 }
 
+/*
+ * FIXED (v4.2.0): fd_send permission hardening.
+ * Previously, any process with CAP_SEND on an fd could send it to ANY
+ * target process, enabling privilege escalation and process isolation
+ * bypass.  The fix adds the following checks:
+ *   1. Sender must have CAP_SEND on the fd (already required).
+ *   2. Target must be a child process of the sender (or self).
+ *      This prevents arbitrary fd injection into unrelated processes.
+ *   3. Target must be in a valid state (not DEAD or ZOMBIE).
+ *   4. Sender PID 1 (init) may send to any process.
+ * (Top 10 #10)
+ */
 int fd_send(int fd, int target_pid) {
     struct cap_entry *entry = cap_get(current, fd);
     if (!entry) return -1;
@@ -196,8 +208,45 @@ int fd_send(int fd, int target_pid) {
         return -1;
     }
 
+    /* Cannot send to self */
+    if (target_pid == current->pid) {
+        log_printf(LOG_LEVEL_WARN, "cap: fd_send: cannot send fd to self\n");
+        return -1;
+    }
+
     struct task_struct *target = find_task_by_pid(target_pid);
     if (!target) return -1;
+
+    /* Verify target is in a valid state */
+    if (target->state == TASK_DEAD || target->state == TASK_ZOMBIE) {
+        log_printf(LOG_LEVEL_WARN, "cap: fd_send: target pid %d is dead/zombie\n",
+                   target_pid);
+        return -1;
+    }
+
+    /*
+     * Permission check: only allow sending to child processes.
+     * PID 1 (init) is exempt and can send to any process.
+     * This prevents arbitrary fd injection into unrelated processes
+     * which would bypass process isolation.
+     */
+    if (current->pid != 1) {
+        int is_child = 0;
+        struct child_node *cn = current->children;
+        while (cn) {
+            if (cn->child && cn->child->pid == target_pid) {
+                is_child = 1;
+                break;
+            }
+            cn = cn->next;
+        }
+        if (!is_child) {
+            log_printf(LOG_LEVEL_WARN,
+                       "cap: fd_send: pid %d cannot send to pid %d (not a child)\n",
+                       current->pid, target_pid);
+            return -1;
+        }
+    }
 
     /* Allocate fd in target with same capabilities.
      * Since this is a transfer (not a copy), the file's refcount

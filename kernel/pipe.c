@@ -79,6 +79,8 @@ struct pipe_ring {
     volatile uint32_t lock;  /* spinlock for SMP safety */
     struct pipe_blocked_node *blocked_readers;  /* linked list of blocked readers */
     struct pipe_blocked_node *blocked_writers;  /* linked list of blocked writers */
+    struct inode *read_inode;   /* FIXED (v4.2.0): back-pointer to read inode */
+    struct inode *write_inode;  /* FIXED (v4.2.0): back-pointer to write inode */
 };
 
 /* ================================================================
@@ -300,9 +302,12 @@ static int pipe_close(struct inode *inode, struct file *filp) {
     }
 
     /* If both ends closed, free the ring.
-     * Clear inode->priv BEFORE releasing the lock to prevent another
-     * CPU from accessing the freed ring buffer. */
+     * FIXED (v4.2.0): Set both inode->priv to NULL to prevent
+     * caller from accessing freed memory via the other inode.
+     * (BUG-FS-H1 / Top 10 #5) */
     if (!ring->read_open && !ring->write_open) {
+        if (ring->read_inode)  ring->read_inode->priv  = NULL;
+        if (ring->write_inode) ring->write_inode->priv = NULL;
         inode->priv = NULL;
         pipe_spin_unlock(&ring->lock);
         kfree(ring);
@@ -353,6 +358,7 @@ int sys_pipe(int *fds) {
     rinode->name = "r";
     rinode->ops  = &pipe_read_ops;
     rinode->priv = ring;
+    ring->read_inode = rinode;  /* FIXED (v4.2.0): back-pointer for cleanup */
 
     /* Create write-end inode */
     struct inode *winode = (struct inode *)kmalloc(sizeof(*winode));
@@ -361,6 +367,7 @@ int sys_pipe(int *fds) {
     winode->name = "w";
     winode->ops  = &pipe_write_ops;
     winode->priv = ring;
+    ring->write_inode = winode;  /* FIXED (v4.2.0): back-pointer for cleanup */
 
     /* Create file objects */
     struct file *rfilp = (struct file *)kmalloc(sizeof(*rfilp));
@@ -384,16 +391,33 @@ int sys_pipe(int *fds) {
         else if (rfilp) { kfree(rfilp); rfilp = NULL; }
         if (wfd >= 0) fd_close(current, wfd);
         else if (wfilp) { kfree(wfilp); wfilp = NULL; }
-        /* Clean up remaining resources: inodes and ring buffer */
-        kfree(ring); kfree(rinode); kfree(winode);
+        /*
+         * FIXED (v4.2.0): Only free ring if pipe_close didn't already
+         * free it (i.e., both ends weren't closed).  Check inode->priv
+         * to determine if the ring was already freed by pipe_close.
+         * Also clear inode->priv to prevent dangling pointers.
+         * (BUG-FS-H1 / Top 10 #5)
+         */
+        if (rinode->priv) kfree(rinode->priv);
+        kfree(rinode); kfree(winode);
         return -1;
     }
 
     /* Write fds to user space */
     int kfds[2] = { rfd, wfd };
     if (copy_to_user(fds, kfds, sizeof(kfds)) != 0) {
+        /*
+         * FIXED (v4.2.0): fd_close may free the ring buffer via
+         * pipe_close when both ends are closed.  After fd_close,
+         * the ring, rinode, and winode are still allocated but
+         * ring may be freed.  We must free the remaining inodes
+         * to prevent memory leaks.  (BUG-FS-H1 / Top 10 #5)
+         */
         fd_close(current, rfd);
         fd_close(current, wfd);
+        /* ring may have been freed by pipe_close; check before freeing */
+        if (rinode->priv) kfree(rinode->priv);
+        kfree(rinode); kfree(winode);
         return -1;
     }
 

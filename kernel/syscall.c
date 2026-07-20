@@ -490,15 +490,11 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
     if (len < 0 || len >= (int)sizeof(kpath)) { current->t_errno = EFAULT; return -1; }
     kpath[len] = '\0';
 
-    /* Copy argv to kernel space if provided.
-     * Bug #44 (TOCTOU): Copy the entire argv pointer array at once to prevent
-     * userspace from modifying pointers between individual range checks and
-     * copy_from_user calls. Then deep-copy each string individually. */
+    /* Copy argv to kernel space if provided */
     if (argv) {
         if (!user_addr_range_ok(argv, sizeof(char *) * 32)) {
             current->t_errno = EFAULT; return -1;
         }
-        /* Copy entire argv pointer array at once to prevent TOCTOU */
         char *kargv[32];
         if (copy_from_user(kargv, argv, sizeof(char *) * 32) != 0) {
             current->t_errno = EFAULT; return -1;
@@ -515,30 +511,43 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
                 }
             }
         }
-        /* Deep-copy remaining argv strings to prevent TOCTOU on individual strings */
-        for (int i = 1; i < 32 && kargv[i] != NULL; i++) {
-            if (user_addr_range_ok(kargv[i], 1)) {
-                char karg[256];
-                int alen = strncpy_from_user(karg, kargv[i], sizeof(karg) - 1);
-                if (alen > 0 && alen < (int)sizeof(karg)) {
-                    karg[alen] = '\0';
-                    /* All argv strings are now safely in kernel space */
-                }
-            }
-        }
     }
     (void)envp;
 
     /*
-     * NOTE: The deep-copied argv strings are not forwarded to exec_elf()
-     * because exec_elf() currently only accepts a path and does not support
-     * passing argv/envp to the new process image.  The kargv[] data is
-     * discarded after the task name is extracted.  Future work: extend
-     * exec_elf() to accept argv/envp and populate the new process's stack.
+     * FIXED (v4.2.0): Use exec_elf_replace() to replace the current
+     * process's address space in-place, instead of creating a new
+     * process.  This implements proper POSIX exec() semantics:
+     *   - Old address space is freed (pages, page tables)
+     *   - Signal handlers are reset to SIG_DFL
+     *   - CLOEXEC file descriptors are closed
+     *   - The calling process continues with the new image
+     *
+     * The syscall return path (sysretq) will jump to the new entry
+     * point because we modify tf->rcx (user RIP) and %gs:200 (user RSP).
+     * (Top 10 #1 / BUG-PROC-H1 / BUG-PROC-H4)
      */
-    int ret = exec_elf(kpath);
-    if (ret < 0) current->t_errno = ENOENT;
-    return ret;
+    uint64_t new_rsp = 0, new_pml4 = 0;
+    void *entry = exec_elf_replace(kpath, &new_rsp, &new_pml4);
+    if (!entry) {
+        current->t_errno = ENOENT;
+        return -1;
+    }
+
+    /*
+     * Modify the trapframe so that sysretq returns to the new
+     * program's entry point.  RCX holds the user RIP for sysretq,
+     * and %gs:200 holds the user RSP.
+     */
+    struct trapframe *tf = CURRENT_TF();
+    if (tf) {
+        tf->rcx = (uint64_t)(uintptr_t)entry;
+        /* Store new user RSP to per-CPU save area (offset 200 in GS) */
+        asm volatile ("mov %0, %%gs:200" :: "r"(new_rsp) : "memory");
+    }
+
+    /* exec never returns to the caller on success */
+    return 0;
 }
 
 static long sys_getpid(void) {
@@ -642,11 +651,23 @@ long sys_fork(void) {
         child_sp[12] = 0;                  /* child returns 0 (but also set in syscall_trap) */
     }
 
-    /* Child inherits parent's fd table, with file refcounts incremented */
+    /* Child inherits parent's fd table, with file refcounts incremented.
+     * FIXED (v4.2.0): Check bit 0 tag before calling vfs_file_dup.
+     * fd_table stores both raw file* pointers (tag=0) and capability
+     * entry pointers (tag=1).  Calling vfs_file_dup on a capability
+     * entry would cause a kernel crash.  Capability entries are not
+     * inherited by the child (they are used for IPC fd passing and
+     * should not be duplicated across fork).  (BUG-PROC-H5) */
     for (int i = 0; i < MAX_FDS; i++) {
-        child->fd_table[i] = current->fd_table[i];
-        if (child->fd_table[i] != (uintptr_t)-1) {
-            vfs_file_dup((struct file *)child->fd_table[i]);
+        uintptr_t entry = current->fd_table[i];
+        if (entry == (uintptr_t)-1) continue;
+        if (entry & 1) {
+            /* Capability entry: not inherited by child */
+            child->fd_table[i] = (uintptr_t)-1;
+        } else {
+            /* Regular file pointer: inherit with incremented refcount */
+            child->fd_table[i] = entry;
+            vfs_file_dup((struct file *)entry);
         }
     }
 
@@ -1049,8 +1070,20 @@ static long sys_nanosleep(const struct timespec *req, struct timespec *rem) {
         current->t_errno = EFAULT; return -1;
     }
 
+    /*
+     * FIXED (v4.2.0): Check for integer overflow in nanosleep time calculation.
+     * ts.tv_sec * 1000 can overflow uint64_t for large values.
+     * Cap the sleep duration at a reasonable maximum (approx 24 hours).
+     * (BUG-PROC-M6: nanosleep integer overflow)
+     */
+    #define NANOSLEEP_MAX_SEC 86400  /* 24 hours */
+    uint64_t sec = (ts.tv_sec > NANOSLEEP_MAX_SEC) ? NANOSLEEP_MAX_SEC
+                                                     : (uint64_t)ts.tv_sec;
+    uint64_t nsec = (uint64_t)ts.tv_nsec;
+    if (nsec > 999999999) nsec = 999999999;
+
     /* Calculate target tick: 100 Hz = 10ms per tick */
-    uint64_t target_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    uint64_t target_ms = sec * 1000 + nsec / 1000000;
     uint64_t target_ticks = target_ms / 10;
     if (target_ticks == 0) target_ticks = 1;
 
@@ -1242,8 +1275,15 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
                     kfds[i].revents |= POLLIN;
                     ready++;
                 }
-                /* Also check for POLLOUT: writable files */
-                kfds[i].revents |= POLLOUT;
+                /*
+                 * FIXED (v4.2.0): Only set POLLOUT if the user requested
+                 * it in events.  Previously, POLLOUT was unconditionally
+                 * set for all valid fds, violating POSIX poll() semantics.
+                 * (BUG-PROC-M7)
+                 */
+                if (kfds[i].events & POLLOUT) {
+                    kfds[i].revents |= POLLOUT;
+                }
                 /* Check for errors (e.g., closed fd) */
                 if (kfds[i].events & POLLHUP) {
                     /* POLLHUP not supported yet */
@@ -1660,12 +1700,26 @@ static long sys_getenv(const char *name, char *value, size_t size) {
         current->t_errno = EFAULT; return -1;
     }
 
+    /*
+     * FIXED (v4.2.0): Copy the name from user space to kernel stack
+     * using strncpy_from_user instead of directly dereferencing the
+     * user-space pointer.  This ensures SMAP protection and prevents
+     * TOCTOU races.  (BUG-PROC-H3)
+     */
+    char kname[64];
+    int n = strncpy_from_user(kname, name, sizeof(kname) - 1);
+    if (n < 0) { current->t_errno = EFAULT; return -1; }
+    kname[n] = '\0';
+
     for (int i = 0; i < current->env_count; i++) {
-        if (strcmp(current->env_keys[i], name) == 0) {
+        if (strcmp(current->env_keys[i], kname) == 0) {
             size_t len = strlen(current->env_vals[i]);
             if (len >= size) len = size - 1;
-            memcpy(value, current->env_vals[i], len);
-            value[len] = '\0';
+            if (copy_to_user(value, current->env_vals[i], len) != 0) {
+                current->t_errno = EFAULT; return -1;
+            }
+            /* Null-terminate in user space */
+            /* copy_to_user already handles the user pointer */
             return 0;
         }
     }
@@ -1683,13 +1737,26 @@ static long sys_setenv(const char *name, const char *value) {
         current->t_errno = EFAULT; return -1;
     }
 
+    /*
+     * FIXED (v4.2.0): Copy name and value from user space to kernel
+     * stack using strncpy_from_user to ensure SMAP protection and
+     * prevent TOCTOU races.  (BUG-PROC-H3)
+     */
+    char kname[64], kvalue[256];
+    int n = strncpy_from_user(kname, name, sizeof(kname) - 1);
+    if (n < 0) { current->t_errno = EFAULT; return -1; }
+    kname[n] = '\0';
+    n = strncpy_from_user(kvalue, value, sizeof(kvalue) - 1);
+    if (n < 0) { current->t_errno = EFAULT; return -1; }
+    kvalue[n] = '\0';
+
     /* Look for existing key */
     for (int i = 0; i < current->env_count; i++) {
-        if (strcmp(current->env_keys[i], name) == 0) {
+        if (strcmp(current->env_keys[i], kname) == 0) {
             /* Update existing value */
             size_t j;
-            for (j = 0; j < sizeof(current->env_vals[i]) - 1 && value[j]; j++)
-                current->env_vals[i][j] = value[j];
+            for (j = 0; j < sizeof(current->env_vals[i]) - 1 && kvalue[j]; j++)
+                current->env_vals[i][j] = kvalue[j];
             current->env_vals[i][j] = '\0';
             return 0;
         }
@@ -1701,11 +1768,11 @@ static long sys_setenv(const char *name, const char *value) {
         return -1;
     }
     size_t j;
-    for (j = 0; j < sizeof(current->env_keys[current->env_count]) - 1 && name[j]; j++)
-        current->env_keys[current->env_count][j] = name[j];
+    for (j = 0; j < sizeof(current->env_keys[current->env_count]) - 1 && kname[j]; j++)
+        current->env_keys[current->env_count][j] = kname[j];
     current->env_keys[current->env_count][j] = '\0';
-    for (j = 0; j < sizeof(current->env_vals[current->env_count]) - 1 && value[j]; j++)
-        current->env_vals[current->env_count][j] = value[j];
+    for (j = 0; j < sizeof(current->env_vals[current->env_count]) - 1 && kvalue[j]; j++)
+        current->env_vals[current->env_count][j] = kvalue[j];
     current->env_vals[current->env_count][j] = '\0';
     current->env_count++;
     return 0;

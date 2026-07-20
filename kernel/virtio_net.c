@@ -78,35 +78,57 @@ static struct virtio_net_dev *net_dev_list = NULL;
  * MMIO Access Helpers
  * ================================================================ */
 
+/*
+ * FIXED (v4.2.0): Added memory barriers (mb()) to MMIO accessors.
+ * VirtIO MMIO registers must be accessed in program order; without
+ * barriers, the compiler or CPU could reorder reads/writes, causing
+ * device state inconsistency (e.g., writing QUEUE_SELECT before
+ * reading QUEUE_SIZE could be reordered by the compiler).
+ * (Top 10 #8)
+ */
+#define mmio_mb() asm volatile ("mfence" ::: "memory")
+
 static inline uint8_t mmio_read8(volatile uint8_t *addr) {
-    return *addr;
+    uint8_t v = *addr;
+    mmio_mb();
+    return v;
 }
 
 static inline uint16_t mmio_read16(volatile uint16_t *addr) {
-    return *addr;
+    uint16_t v = *addr;
+    mmio_mb();
+    return v;
 }
 
 static inline uint32_t mmio_read32(volatile uint32_t *addr) {
-    return *addr;
+    uint32_t v = *addr;
+    mmio_mb();
+    return v;
 }
 
 static inline uint64_t mmio_read64(volatile uint64_t *addr) {
-    return *addr;
+    uint64_t v = *addr;
+    mmio_mb();
+    return v;
 }
 
 static inline void mmio_write8(volatile uint8_t *addr, uint8_t val) {
+    mmio_mb();
     *addr = val;
 }
 
 static inline void mmio_write16(volatile uint16_t *addr, uint16_t val) {
+    mmio_mb();
     *addr = val;
 }
 
 static inline void mmio_write32(volatile uint32_t *addr, uint32_t val) {
+    mmio_mb();
     *addr = val;
 }
 
 static inline void mmio_write64(volatile uint64_t *addr, uint64_t val) {
+    mmio_mb();
     *addr = val;
 }
 

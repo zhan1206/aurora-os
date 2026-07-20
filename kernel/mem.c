@@ -340,6 +340,11 @@ static struct page *buddy_split(uint32_t order) {
     uint64_t pfn = page_to_pfn(p);
     uint64_t buddy_pfn = pfn + (1ULL << new_order);
 
+    /* FIXED (v4.2.0): Bounds-check buddy_pfn to prevent array
+     * out-of-bounds access if the block is near the end of memory.
+     * (BUG-MEM-H2) */
+    if (buddy_pfn >= total_phys_pages) return NULL;
+
     struct page *left  = &page_array[pfn];
     struct page *right = &page_array[buddy_pfn];
 
@@ -755,6 +760,21 @@ void free_pages(void *ptr, uint32_t order) {
         return;
     }
 
+    /*
+     * FIXED (v4.2.0): Validate that the order matches what was
+     * recorded at allocation time.  A mismatch means the caller
+     * passed the wrong order, which can corrupt the buddy system:
+     * too small leaves buddy pages still in use, too large covers
+     * adjacent memory.  (BUG-MEM-H1)
+     */
+    if (order != 0 && p->order != 0 && p->order != order) {
+        buddy_unlock();
+        log_printf(LOG_LEVEL_ERR, "free_pages: order mismatch at pa=%p: "
+                   "expected %u, got %u\n",
+                   (void *)(uintptr_t)pa, (unsigned int)p->order, (unsigned int)order);
+        return;
+    }
+
     p->flags |= PAGE_FLAG_FREE;
     p->order = order;
     p->ref_count = 0;
@@ -871,42 +891,39 @@ void *kmalloc(size_t size) {
 
         slab_lock();
 
-        /* If no free objects, release lock, grow cache, then retry.
+        /*
+         * If no free objects, release lock, grow cache, then retry.
          * This avoids lock ordering violation: slab_grow calls alloc_page
          * which acquires buddy_lock, and buddy_lock must be acquired
          * BEFORE slab_lock per the lock ordering rules.
          *
-         * Use a 'growing' flag to prevent TOCTOU double-grow races:
-         * two threads seeing an empty free_list would both drop the
-         * lock and call slab_grow(), wasting a page.  The flag ensures
-         * only one thread performs the grow. */
+         * FIXED (v4.2.0): Replaced fragile retry logic with proper
+         * spin-wait.  The 'growing' flag prevents TOCTOU double-grow
+         * races.  When another thread is already growing, the current
+         * thread spin-waits until the grow completes, then rechecks
+         * free_list.  This eliminates spurious allocation failures
+         * under high concurrency.  (BUG-MEM-H3)
+         */
         if (!cache->free_list) {
             if (cache->growing) {
                 /* Another thread is already growing this cache.
-                 * Release the lock, wait briefly, and retry. */
+                 * Spin-wait for the grow to complete, then retry. */
                 slab_unlock();
-                asm volatile ("pause" ::: "memory");
-                slab_lock();
-                if (cache->free_list) goto slab_pop;
-                if (cache->growing) {
-                    /* Still growing — spin on the lock boundary */
-                    slab_unlock();
-                    for (volatile int s = 0; s < 100; s++)
-                        asm volatile ("pause" ::: "memory");
-                    slab_lock();
-                    if (!cache->free_list) {
-                        slab_unlock();
-                        return NULL;
-                    }
-                    goto slab_pop;
+                while (cache->growing) {
+                    asm volatile ("pause" ::: "memory");
                 }
+                slab_lock();
+                if (!cache->free_list) {
+                    /* Grow failed or another grow is needed */
+                    slab_unlock();
+                    return NULL;
+                }
+                goto slab_pop;
             }
             cache->growing = 1;
             slab_unlock();
             if (slab_grow(cache) != 0) {
-                slab_lock();
                 cache->growing = 0;
-                slab_unlock();
                 log_printf(LOG_LEVEL_WARN, "kmalloc: slab grow failed (size=%d)\n", (int)size);
                 return NULL;
             }

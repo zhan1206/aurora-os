@@ -77,8 +77,7 @@ struct task_struct;
 #define BPF_W     0x00  /* 32-bit word */
 #define BPF_H     0x08  /* 16-bit halfword */
 #define BPF_B     0x10  /* 8-bit byte */
-
-/* BPF misc */
+#define BPF_A     0x10  /* Return A (BPF_RET context) */
 #define BPF_TAX   0x00  /* Transfer A to X */
 #define BPF_TXA   0x80  /* Transfer X to A */
 

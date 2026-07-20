@@ -674,14 +674,16 @@ static int squashfs_read_inode_raw(struct squashfs_sb_info *sbi,
                 return -EIO;
             }
             info->block_list = (uint32_t *)kmalloc(num_blocks * sizeof(uint32_t));
-            if (info->block_list) {
-                uint8_t *blist = meta + sizeof(struct squashfs_reg_inode);
-                for (uint32_t i = 0; i < num_blocks; i++) {
-                    info->block_list[i] = ((uint32_t)blist[i * 4]) |
-                                          ((uint32_t)blist[i * 4 + 1] << 8) |
-                                          ((uint32_t)blist[i * 4 + 2] << 16) |
-                                          ((uint32_t)blist[i * 4 + 3] << 24);
-                }
+            if (!info->block_list) {
+                kfree(meta);
+                return -ENOMEM;  /* FIXED (v4.2.0): report allocation failure (BUG-FS-M7) */
+            }
+            uint8_t *blist = meta + sizeof(struct squashfs_reg_inode);
+            for (uint32_t i = 0; i < num_blocks; i++) {
+                info->block_list[i] = ((uint32_t)blist[i * 4]) |
+                                      ((uint32_t)blist[i * 4 + 1] << 8) |
+                                      ((uint32_t)blist[i * 4 + 2] << 16) |
+                                      ((uint32_t)blist[i * 4 + 3] << 24);
             }
         }
         break;

@@ -262,38 +262,47 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
         case BPF_JMP | BPF_JA:
             /* Unconditional jump */
             pc += insn->k;
+            if (pc >= len) return -1;  /* bounds check */
             continue;  /* skip pc++ at end of loop */
 
         case BPF_JMP | BPF_JEQ | BPF_K:
             if (A == k) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JGT | BPF_K:
             if (A > k) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JGE | BPF_K:
             if (A >= k) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JSET | BPF_K:
             if (A & k) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JEQ | BPF_X:
             if (A == X) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JGT | BPF_X:
             if (A > X) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JGE | BPF_X:
             if (A >= X) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         case BPF_JMP | BPF_JSET | BPF_X:
             if (A & X) pc += insn->jt; else pc += insn->jf;
+            if (pc >= len) return -1;
             continue;
 
         /* ================================================

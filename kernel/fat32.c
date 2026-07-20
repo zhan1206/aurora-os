@@ -19,6 +19,7 @@
 #include "include/errno.h"
 #include "include/string.h"
 #include "mem.h"
+#include "smp.h"
 
 /* Forward declarations for file_ops tables (referenced before definition) */
 static struct file_ops fat32_file_ops;
@@ -165,6 +166,17 @@ static int fat32_set_cluster(struct fat32_sb_info *sbi, uint32_t cluster,
 }
 
 /*
+ * FIXED (v4.2.0): Added global allocation lock to prevent race
+ * condition between scanning and marking free clusters.  Without
+ * this lock, two concurrent allocations could find the same free
+ * cluster and both try to use it, corrupting the FAT chain.
+ * (BUG-FS-H4 / Top 10 #7)
+ */
+static spinlock_t fat32_alloc_lock_ = {0};
+#define fat32_alloc_lock()   spin_lock(&fat32_alloc_lock_)
+#define fat32_alloc_unlock() spin_unlock(&fat32_alloc_lock_)
+
+/*
  * Find a free cluster.
  * Scans the FAT table for a cluster marked as free (0x00000000).
  * Returns the cluster number, or 0 on failure.
@@ -172,15 +184,19 @@ static int fat32_set_cluster(struct fat32_sb_info *sbi, uint32_t cluster,
 uint32_t fat32_find_free_cluster(struct fat32_sb_info *sbi) {
     uint32_t cluster;
 
+    fat32_alloc_lock();
+
     for (cluster = 2; cluster < sbi->total_clusters + 2; cluster++) {
         uint32_t val = fat32_get_cluster(sbi, cluster);
         if (val == FAT32_CLUSTER_FREE) {
             /* Mark as end-of-chain */
             fat32_set_cluster(sbi, cluster, FAT32_CLUSTER_EOC_MAX);
+            fat32_alloc_unlock();
             return cluster;
         }
     }
 
+    fat32_alloc_unlock();
     return 0;
 }
 
@@ -267,7 +283,7 @@ static ssize_t fat32_transfer_file(struct fat32_sb_info *sbi,
                                    uint32_t file_size,
                                    uint8_t *buf, size_t count,
                                    uint64_t offset, int is_write,
-                                   uint32_t *new_size) {
+                                   uint64_t *new_size) {
     uint32_t cluster_size = sbi->cluster_size;
     uint32_t clusters_per_chain = 0;
     uint32_t cluster;
@@ -368,9 +384,9 @@ static ssize_t fat32_transfer_file(struct fat32_sb_info *sbi,
 
     if (is_write && new_size) {
         if (offset > (uint64_t)file_size)
-            *new_size = (uint32_t)offset;
+            *new_size = offset;
         else
-            *new_size = file_size;
+            *new_size = (uint64_t)file_size;
     }
 
     return (ssize_t)total_done;
@@ -1374,13 +1390,13 @@ static ssize_t fat32_file_write(struct file *filp, const void *buf, size_t count
     struct fat32_inode_info *info = (struct fat32_inode_info *)filp->inode->priv;
     struct fat32_sb_info *sbi = info->sbi;
 
-    uint32_t new_size = info->file_size;
+    uint64_t new_size = info->file_size;
     ssize_t ret = fat32_transfer_file(sbi, info->first_cluster, info->file_size,
                                       (uint8_t *)buf, count, (uint64_t)(*offset),
                                       1, &new_size);
     if (ret > 0) {
         *offset += (off_t)ret;
-        info->file_size = new_size;
+        info->file_size = (uint32_t)new_size;
         filp->inode->size = (size_t)new_size;
 
         /* Bug #20: Update the directory entry with the new file size.

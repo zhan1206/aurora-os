@@ -74,7 +74,16 @@ int do_sys_kill(int pid, int sig) {
         if (!(target->sig->blocked & (1U << sig))) {
             if (sig == SIGKILL ||
                 (target->sig->actions[sig].sa_handler != SIG_IGN)) {
+                /*
+                 * FIXED (v4.2.0): Release signal_lock before modifying
+                 * task state to avoid lock ordering violation with the
+                 * runqueue lock.  The signal is already recorded in
+                 * target->sig->pending, so the task will process it
+                 * when it wakes up.  (BUG-PROC-M2)
+                 */
+                spin_unlock(&signal_lock);
                 target->state = TASK_READY;
+                return 0;
             }
         }
     }
@@ -280,9 +289,10 @@ void check_signals(void) {
          */
         uint64_t user_rsp = current->current_tf->rsp;
 
-        /* Trampoline code: mov eax, SYS_SIGRETURN; syscall (7 bytes) */
-        #define TRAMPOLINE_SIZE 16  /* 16-byte aligned for safety */
-        uint64_t frame_size = sizeof(struct sigframe) + 8 + TRAMPOLINE_SIZE;
+        /* Trampoline code: mov eax, SYS_SIGRETURN; syscall (7 bytes)
+         * Named SIG_TRAMPOLINE_SIZE to avoid conflict with smp.h's TRAMPOLINE_SIZE */
+        #define SIG_TRAMPOLINE_SIZE 16  /* 16-byte aligned for safety */
+        uint64_t frame_size = sizeof(struct sigframe) + 8 + SIG_TRAMPOLINE_SIZE;
 
         /* Check user stack bounds */
         if (user_rsp < frame_size + 0x1000) {
@@ -314,7 +324,7 @@ void check_signals(void) {
         }
 
         /* Validate the entire trampoline + sigframe region is in valid user memory */
-        size_t frame_total = 8 + TRAMPOLINE_SIZE + sizeof(struct sigframe);
+        size_t frame_total = 8 + SIG_TRAMPOLINE_SIZE + sizeof(struct sigframe);
         if (!user_addr_range_ok((const void *)(uintptr_t)new_rsp, frame_total) ||
             !user_pages_mapped((const void *)(uintptr_t)new_rsp, frame_total)) {
             log_printf(LOG_LEVEL_ERR, "signal: user stack region invalid at %p\n",
@@ -342,13 +352,13 @@ void check_signals(void) {
         tramp[5] = 0x0F;                        /* syscall */
         tramp[6] = 0x05;
         /* Zero the remaining trampoline bytes for security */
-        memset(tramp + 7, 0, TRAMPOLINE_SIZE - 7);
+        memset(tramp + 7, 0, SIG_TRAMPOLINE_SIZE - 7);
 
         /* Write return address pointing to trampoline code */
         *(uint64_t *)(uintptr_t)new_rsp = new_rsp + 8;
 
         /* Place sigframe above trampoline */
-        struct sigframe *frame = (struct sigframe *)(uintptr_t)(new_rsp + 8 + TRAMPOLINE_SIZE);
+        struct sigframe *frame = (struct sigframe *)(uintptr_t)(new_rsp + 8 + SIG_TRAMPOLINE_SIZE);
 
         /* Save current user context */
         frame->signo  = s;
@@ -411,7 +421,7 @@ void signal_child_event(struct task_struct *child, int event) {
 void signal_reset_on_exec(struct task_struct *task) {
     if (!task || !task->sig) return;
 
-    for (int i = 1; i <= NSIG; i++) {
+    for (int i = 1; i < NSIG; i++) {
         /* Skip SIGKILL and SIGSTOP — they can't be caught */
         if (i == SIGKILL || i == SIGSTOP) continue;
 

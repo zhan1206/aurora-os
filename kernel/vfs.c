@@ -746,6 +746,7 @@ int vfs_rename(const char *oldpath, const char *newpath) {
     old_parent_path[old_parent_len] = '\0';
     if (old_parent_len == 1) old_parent_path[0] = '/';
     const char *oldname = old_slash + 1;
+    if (*oldname == '\0') return -1;  /* FIXED (v4.2.0): reject empty filename (BUG-FS-M2) */
 
     /* Parse new path */
     const char *new_slash = NULL;
@@ -762,6 +763,7 @@ int vfs_rename(const char *oldpath, const char *newpath) {
     new_parent_path[new_parent_len] = '\0';
     if (new_parent_len == 1) new_parent_path[0] = '/';
     const char *newname = new_slash + 1;
+    if (*newname == '\0') return -1;  /* FIXED (v4.2.0): reject empty filename (BUG-FS-M2) */
 
     struct inode *olddir = vfs_lookup(old_parent_path);
     struct inode *newdir = vfs_lookup(new_parent_path);

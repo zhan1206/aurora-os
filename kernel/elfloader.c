@@ -930,23 +930,104 @@ void *elf_load(const char *path, uint64_t *pml4_out) {
 }
 
 /*
- * elf_load_pie: Load a PIE executable and set up a full user stack
- * with argv, envp, and auxiliary vector.
+ * exec_elf_replace - Replace current process with a new ELF image.
  *
- * @path:       path to the ELF file in VFS
- * @argv:       NULL-terminated argument vector (may be NULL)
- * @envp:       NULL-terminated environment vector (may be NULL)
- * @pml4_out:   output — physical address of the new PML4 table
- * @stack_out:  output — initial user stack pointer (RSP)
- * Returns:     user virtual entry point, or NULL on failure.
+ * FIXED (v4.2.0): Completely rewritten to implement proper POSIX exec()
+ * semantics.  Previously, exec_elf() created a new process via
+ * create_user_task_from_entry(), which leaked the old process's
+ * memory, page tables, and file descriptors.  The new implementation
+ * replaces the current process's address space in-place.
+ *
+ * Steps:
+ *   1. Clone the kernel page table (clone_kernel_pml4) as the base
+ *   2. Load the ELF into the new address space
+ *   3. Replace current->cr3 with the new PML4 (and reload CR3)
+ *   4. Free the old page table
+ *   5. Reset signal handlers (signal_reset_on_exec)
+ *   6. Close CLOEXEC file descriptors
+ *   7. Return the new entry point and stack pointer
+ *
+ * The caller (sys_execve) is responsible for:
+ *   - Setting tf->rcx to the new entry point (for sysretq)
+ *   - Storing the new RSP to %gs:200 (for sysretq RSP restore)
+ *
+ * Returns: new user entry point, or NULL on failure.
+ * On success: *new_rsp_out is set to the new stack pointer.
+ *             *new_pml4_out is set to the new PML4 physical address.
+ *
+ * (Top 10 #1 / BUG-PROC-H1)
  */
+/* Forward declaration */
 void *elf_load_pie(const char *path, char *const argv[], char *const envp[],
-                   uint64_t *pml4_out, uint64_t *stack_out) {
-    if (!stack_out) return NULL;
-    return elf_load_core(path, pml4_out, stack_out, argv, envp);
+                   uint64_t *pml4_out, uint64_t *stack_out);
+
+void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
+                       uint64_t *new_pml4_out) {
+    if (!path || !new_rsp_out || !new_pml4_out) return NULL;
+
+    /* 1. Create a fresh address space (kernel mappings only) */
+    uint64_t new_pml4 = clone_kernel_pml4();
+    if (!new_pml4) {
+        log_printf(LOG_LEVEL_ERR, "exec: clone_kernel_pml4 failed\n");
+        return NULL;
+    }
+
+    /* 2. Load the ELF into the new address space */
+    uint64_t stack = 0;
+    void *entry = elf_load_pie(path, NULL, NULL, &new_pml4, &stack);
+    if (!entry) {
+        log_printf(LOG_LEVEL_ERR, "exec: elf_load_pie failed for %s\n", path);
+        free_pagetable(new_pml4);
+        return NULL;
+    }
+
+    /* 3. Replace the current address space.
+     *    Save the old PML4 first, then switch CR3.
+     *    The kernel is identity-mapped, so this is safe. */
+    uint64_t old_pml4 = current->cr3;
+
+    /* Disable interrupts during CR3 switch to prevent
+     * interrupt handlers from using stale page tables. */
+    uint64_t irq_flags;
+    asm volatile (
+        "pushfq\n\t"
+        "pop %0\n\t"
+        "cli"
+        : "=r"(irq_flags) :: "memory"
+    );
+
+    current->cr3 = new_pml4;
+    asm volatile ("mov %0, %%cr3" :: "r"(new_pml4) : "memory");
+
+    /* Restore interrupt state */
+    if (irq_flags & (1 << 9)) {
+        asm volatile ("sti" ::: "memory");
+    }
+
+    /* 4. Free the old page table (user pages are freed via ref_count) */
+    if (old_pml4) {
+        free_pagetable(old_pml4);
+    }
+
+    /* 5. Reset signal handlers to default (POSIX requirement) */
+    extern void signal_reset_on_exec(struct task_struct *task);
+    signal_reset_on_exec(current);
+
+    /* 6. Close file descriptors marked with CLOEXEC */
+    extern void fd_close_exec(struct task_struct *t);
+    fd_close_exec(current);
+
+    /* 7. Clear pending signals */
+    if (current->sig) {
+        current->sig->pending = 0;
+    }
+
+    *new_rsp_out = stack;
+    *new_pml4_out = new_pml4;
+    return entry;
 }
 
-/* helper to create task from ELF path */
+/* helper to create task from ELF path (DEPRECATED — use exec_elf_replace for correct exec) */
 int exec_elf(const char *path) {
     uint64_t pml4 = 0;
     uint64_t stack = 0;
@@ -954,4 +1035,10 @@ int exec_elf(const char *path) {
     if (!entry) return -1;
     int pid = create_user_task_from_entry((void(*)(void))entry, pml4, stack);
     return pid;
+}
+
+void *elf_load_pie(const char *path, char *const argv[], char *const envp[],
+                   uint64_t *pml4_out, uint64_t *stack_out) {
+    if (!stack_out) return NULL;
+    return elf_load_core(path, pml4_out, stack_out, argv, envp);
 }

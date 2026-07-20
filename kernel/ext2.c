@@ -46,6 +46,7 @@ struct ext2_inode_info {
     struct ext2_inode raw;              /* cached on-disk inode */
     uint32_t inode_num;                 /* inode number */
     struct ext2_sb_info *sbi;           /* pointer to fs-private data */
+    spinlock_t write_lock;              /* FIXED (v4.2.0): per-inode write lock (BUG-FS-H3) */
 };
 
 /* ================================================================
@@ -573,15 +574,30 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
     struct ext2_sb_info *sbi = info->sbi;
     uint32_t block_size = sbi->block_size;
 
+    /*
+     * FIXED (v4.2.0): Acquire the per-inode lock to prevent concurrent
+     * writes from corrupting the file.  Without this lock, two processes
+     * writing to the same file could interleave block allocation and
+     * write operations, causing data loss or file corruption.
+     * (BUG-FS-H3)
+     */
+    spin_lock(&info->write_lock);
+
     /* Only support writing within the first 12 direct blocks */
     uint32_t max_blocks = EXT2_NDIR_BLOCKS;
     uint32_t max_offset = max_blocks * block_size;
 
-    if (*offset >= (off_t)max_offset) return -ENOSPC;
+    if (*offset >= (off_t)max_offset) {
+        spin_unlock(&info->write_lock);
+        return -ENOSPC;
+    }
 
     size_t total_written = 0;
     uint8_t *block_buf = (uint8_t *)kmalloc(block_size);
-    if (!block_buf) return -ENOMEM;
+    if (!block_buf) {
+        spin_unlock(&info->write_lock);
+        return -ENOMEM;
+    }
 
     while (count > 0 && *offset < (off_t)max_offset) {
         uint32_t logical_block = (uint32_t)(*offset / block_size);
@@ -592,6 +608,7 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
             uint32_t new_blk = ext2_alloc_block(sbi);
             if (new_blk == 0) {
                 kfree(block_buf);
+                spin_unlock(&info->write_lock);
                 return total_written > 0 ? (ssize_t)total_written : -ENOSPC;
             }
             info->raw.i_block[logical_block] = new_blk;
@@ -605,6 +622,7 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
         if (block_offset != 0 || count < (size_t)block_size) {
             if (ext2_read_data_block(sbi, &info->raw, logical_block, block_buf) < 0) {
                 kfree(block_buf);
+                spin_unlock(&info->write_lock);
                 return total_written > 0 ? (ssize_t)total_written : -EIO;
             }
         }
@@ -616,6 +634,7 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
 
         if (ext2_write_data_block(sbi, &info->raw, logical_block, block_buf) < 0) {
             kfree(block_buf);
+            spin_unlock(&info->write_lock);
             return total_written > 0 ? (ssize_t)total_written : -EIO;
         }
 
@@ -636,6 +655,7 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
     }
 
     kfree(block_buf);
+    spin_unlock(&info->write_lock);
     return (ssize_t)total_written;
 }
 
@@ -1059,9 +1079,17 @@ struct inode *ext2_create(struct super_block *sb, struct inode *dir,
         new_de->file_type = (mode & EXT2_S_IFDIR) ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
         memcpy(new_de->name, name, name_len);
 
-        write_block(sbi->bdev, block_size, dir_info->raw.i_block[blk_idx], block_buf);
+        /*
+         * FIXED (v4.2.0): Check write_block return value and handle
+         * i_size correctly.  i_size is the total directory size in bytes;
+         * it should be set to the end of the last entry.  (BUG-FS-M4, M5)
+         */
+        if (write_block(sbi->bdev, block_size,
+                        dir_info->raw.i_block[blk_idx], block_buf) < 0) {
+            goto out_free_block;
+        }
 
-        dir_info->raw.i_size = new_offset + new_rec_len;
+        dir_info->raw.i_size = (blk_idx + 1) * block_size;
     }
 
     /* Update parent directory inode */

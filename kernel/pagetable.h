@@ -138,8 +138,23 @@ int vma_find(struct task_struct *task, uint64_t addr);
  * exec_elf: Load an ELF executable and create a new process.
  * @path: VFS path to the ELF binary.
  * Returns: new PID on success, negative on error.
+ *
+ * DEPRECATED: Use exec_elf_replace() instead for correct POSIX
+ * exec() semantics (replaces current process in-place).
  */
 int exec_elf(const char *path);
+
+/*
+ * FIXED (v4.2.0): exec_elf_replace - Replace current process with
+ * a new ELF image (proper POSIX exec semantics).
+ * @path:          VFS path to the ELF binary.
+ * @new_rsp_out:   output — new user stack pointer.
+ * @new_pml4_out:  output — new PML4 physical address.
+ * Returns: new user entry point, or NULL on failure.
+ * (Top 10 #1 / BUG-PROC-H1)
+ */
+void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
+                       uint64_t *new_pml4_out);
 
 /*
  * rodata_protect: Mark the kernel's read-only data segment as

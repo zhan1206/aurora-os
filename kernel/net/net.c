@@ -1014,6 +1014,25 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
 
     if (data_offset < sizeof(struct tcp_hdr) || (int)data_offset > len) return;
 
+    /*
+     * FIXED (v4.2.0): Verify TCP checksum on receive.
+     * Without this check, forged TCP segments with incorrect checksums
+     * would be accepted, allowing attackers to inject spoofed data or
+     * RST packets.  The checksum covers the pseudo-header + TCP header
+     * + payload.  (Top 10 #4)
+     */
+    uint16_t received_csum = tcp->checksum;
+    /* Zero out the checksum field in a local copy for verification */
+    struct tcp_hdr tcp_copy = *tcp;
+    tcp_copy.checksum = 0;
+    /* Compute checksum over pseudo-header + TCP header + payload */
+    uint16_t computed_csum = tcp_udp_checksum(src_ip, dst_ip, IP_PROTO_TCP,
+                                               &tcp_copy, len);
+    if (received_csum != 0 && computed_csum != received_csum) {
+        /* Checksum mismatch — silently drop */
+        return;
+    }
+
     uint16_t src_port = ntohs(tcp->src_port);
     uint16_t dst_port = ntohs(tcp->dst_port);
     uint32_t seq = ntohl(tcp->seq_num);

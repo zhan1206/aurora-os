@@ -510,9 +510,19 @@ int map_huge_page_2mb(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64
 		if (entry & PTE_PS) {
 			/* Already a 2MB huge page — overwrite */
 		} else {
-			/* 4KB page table: free it */
+			/*
+			 * 4KB page table: check ref_count before freeing.
+			 * FIXED (v4.2.0): Use page_ref_dec to safely decrement
+			 * the reference count; only free when it reaches 0.
+			 * Direct free_page() would leak the PT if it is still
+			 * referenced by a COW clone.  (BUG-MEM-H5)
+			 */
 			uint64_t old_pt_phys = entry & PTE_ADDR_MASK;
-			free_page((void *)(uintptr_t)old_pt_phys);
+			page_ref_dec(old_pt_phys);
+			uint32_t ref = page_ref_get(old_pt_phys);
+			if (ref == 0) {
+				free_page((void *)(uintptr_t)old_pt_phys);
+			}
 		}
 	}
 
@@ -753,12 +763,17 @@ uint64_t clone_current_pml4(void) {
     return new_cr3;
 
 fail:
-    /* On failure, free the partially-built new PML4 */
+    /* On failure, free the partially-built new PML4.
+     * Return 0 so the caller knows allocation failed.
+     * FIXED (v4.2.0): Return 0 instead of kernel_cr3 to prevent
+     * the caller from using the kernel page table as the child's
+     * address space, which would cause the child to share the
+     * parent's address space.  (BUG-MEM-H4 / Top 10 #6) */
     log_printf(LOG_LEVEL_ERR, "pagetable: clone_current_pml4: allocation failed\n");
     free_pagetable(new_cr3);
     spin_unlock(&pt_lock);
     irq_restore(irq_flags);
-    return kernel_cr3;
+    return 0;
 }
 
 /* ================================================================
@@ -976,12 +991,23 @@ void pf_handler_c(uint64_t error_code) {
             return;
         }
 
+        /*
+         * FIXED (v4.2.0): Add NULL check for current before lazy alloc.
+         * In kernel thread context, current may be NULL, and dereferencing
+         * current->cr3 at map_user_page() would cause a page fault.
+         * (BUG-MEM-M1)
+         */
+        if (!current) {
+            log_printf(LOG_LEVEL_ERR, "Lazy alloc: no current task, cannot map page\n");
+            return;
+        }
+
         /* Allocate a zero-filled physical page */
         void *new_page = alloc_page();
         if (!new_page) {
             log_printf(LOG_LEVEL_ERR, "Lazy alloc: out of memory at CR2=%p, sending SIGSEGV\n",
                        (void *)cr2);
-            if (current) do_sys_kill(current->pid, SIGSEGV);
+            do_sys_kill(current->pid, SIGSEGV);
             return;
         }
 
