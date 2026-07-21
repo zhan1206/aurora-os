@@ -1319,6 +1319,7 @@ static struct inode *fat32_make_inode(struct fat32_sb_info *sbi,
     info->file_size = file_size;
     info->attributes = attr;
     info->is_dir = (uint8_t)is_dir;
+    spin_init(&info->write_lock);  /* FIXED (v4.2.2): per-file write lock (BUG-FS-M4) */
 
     struct inode *inode = (struct inode *)kmalloc(sizeof(*inode));
     if (!inode) {
@@ -1375,10 +1376,14 @@ static ssize_t fat32_file_read(struct file *filp, void *buf, size_t count,
     struct fat32_inode_info *info = (struct fat32_inode_info *)filp->inode->priv;
     struct fat32_sb_info *sbi = info->sbi;
 
+    /* FIXED (v4.2.2): Per-file lock to protect concurrent reads/writes
+     * from corrupting file data and cluster chains.  (BUG-FS-M4) */
+    spin_lock(&info->write_lock);
     ssize_t ret = fat32_transfer_file(sbi, info->first_cluster, info->file_size,
                                       (uint8_t *)buf, count, (uint64_t)(*offset),
                                       0, NULL);
     if (ret > 0) *offset += (off_t)ret;
+    spin_unlock(&info->write_lock);
     return ret;
 }
 
@@ -1390,6 +1395,9 @@ static ssize_t fat32_file_write(struct file *filp, const void *buf, size_t count
     struct fat32_inode_info *info = (struct fat32_inode_info *)filp->inode->priv;
     struct fat32_sb_info *sbi = info->sbi;
 
+    /* FIXED (v4.2.2): Per-file lock to protect concurrent writes
+     * from corrupting file data and cluster chains.  (BUG-FS-M4) */
+    spin_lock(&info->write_lock);
     uint64_t new_size = info->file_size;
     ssize_t ret = fat32_transfer_file(sbi, info->first_cluster, info->file_size,
                                       (uint8_t *)buf, count, (uint64_t)(*offset),
@@ -1416,6 +1424,7 @@ static ssize_t fat32_file_write(struct file *filp, const void *buf, size_t count
             }
         }
     }
+    spin_unlock(&info->write_lock);
     return ret;
 }
 

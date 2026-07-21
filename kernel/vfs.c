@@ -174,6 +174,150 @@ static struct dentry *dentry_lookup_child(struct dentry *parent,
 }
 
 /* ================================================================
+ * FIXED (v4.2.2): Inode cache
+ *
+ * Simple array-based inode cache with LRU eviction.
+ * Caches inodes by (device, inode_number) key.
+ * Uses a global histogram-like LRU counter for eviction ordering.
+ * Protected by vfs_lock.
+ * ================================================================ */
+
+struct inode_cache_entry {
+    uint32_t      dev;          /* device number */
+    uint32_t      ino;          /* inode number */
+    struct inode *inode;        /* cached inode pointer */
+    int           refcount;     /* reference count */
+    uint32_t      last_access;  /* LRU timestamp (counter) */
+};
+
+static struct inode_cache_entry inode_cache[MAX_INODE_CACHE];
+static uint32_t ino_lru_counter = 0;  /* global LRU timestamp counter */
+
+void vfs_inode_cache_init(void) {
+    for (int i = 0; i < MAX_INODE_CACHE; i++) {
+        inode_cache[i].dev = 0;
+        inode_cache[i].ino = 0;
+        inode_cache[i].inode = NULL;
+        inode_cache[i].refcount = 0;
+        inode_cache[i].last_access = 0;
+    }
+    ino_lru_counter = 0;
+}
+
+/*
+ * vfs_iget: Get or create a cached inode by (dev, ino) key.
+ *
+ * Searches the inode cache for a matching entry. If found, increments
+ * the reference count, updates the LRU timestamp, and returns the cached
+ * inode. If not found, allocates a new inode, finds a free slot (or evicts
+ * the LRU entry with refcount == 0), and returns the new inode.
+ *
+ * Must be called under vfs_lock.
+ */
+struct inode *vfs_iget(uint32_t dev, uint32_t ino) {
+    int i;
+    int empty_slot = -1;
+    uint32_t oldest_time = 0xFFFFFFFF;
+    int oldest_slot = -1;
+
+    /* Search for an existing entry with matching (dev, ino) */
+    for (i = 0; i < MAX_INODE_CACHE; i++) {
+        if (inode_cache[i].inode != NULL &&
+            inode_cache[i].dev == dev &&
+            inode_cache[i].ino == ino) {
+            /* Cache hit: increment refcount and update LRU */
+            inode_cache[i].refcount++;
+            inode_cache[i].last_access = ++ino_lru_counter;
+            /* Handle counter wrap-around by resetting all timestamps */
+            if (ino_lru_counter == 0) {
+                for (int j = 0; j < MAX_INODE_CACHE; j++) {
+                    inode_cache[j].last_access = 0;
+                }
+                ino_lru_counter = 1;
+                inode_cache[i].last_access = 1;
+            }
+            return inode_cache[i].inode;
+        }
+        /* Track empty slots */
+        if (inode_cache[i].inode == NULL) {
+            if (empty_slot < 0) empty_slot = i;
+        }
+        /* Track LRU candidate for eviction (only entries with refcount == 0) */
+        if (inode_cache[i].inode != NULL &&
+            inode_cache[i].refcount == 0 &&
+            inode_cache[i].last_access < oldest_time) {
+            oldest_time = inode_cache[i].last_access;
+            oldest_slot = i;
+        }
+    }
+
+    /* Cache miss: need to allocate a new inode and find a slot */
+    struct inode *new_inode = (struct inode *)kmalloc(sizeof(*new_inode));
+    if (!new_inode) return NULL;
+    memset(new_inode, 0, sizeof(*new_inode));
+    new_inode->dev = dev;
+    new_inode->ino = ino;
+
+    /* Determine which slot to use */
+    int slot = empty_slot;
+    if (slot < 0) {
+        /* No empty slot: evict the LRU entry with refcount == 0 */
+        if (oldest_slot < 0) {
+            /* All entries are referenced — cannot evict */
+            kfree(new_inode);
+            return NULL;
+        }
+        /* Free the evicted inode */
+        struct inode *old = inode_cache[oldest_slot].inode;
+        if (old) {
+            if (old->name) kfree((void *)old->name);
+            if (old->priv) kfree(old->priv);
+            kfree(old);
+        }
+        slot = oldest_slot;
+    }
+
+    /* Fill the cache entry */
+    inode_cache[slot].dev = dev;
+    inode_cache[slot].ino = ino;
+    inode_cache[slot].inode = new_inode;
+    inode_cache[slot].refcount = 1;
+    inode_cache[slot].last_access = ++ino_lru_counter;
+    /* Handle counter wrap-around */
+    if (ino_lru_counter == 0) {
+        for (int j = 0; j < MAX_INODE_CACHE; j++) {
+            inode_cache[j].last_access = 0;
+        }
+        ino_lru_counter = 1;
+        inode_cache[slot].last_access = 1;
+    }
+
+    return new_inode;
+}
+
+/*
+ * vfs_iput: Release an inode reference.
+ *
+ * Decrements the reference count of the cached inode. When the refcount
+ * reaches 0, the cache entry becomes eligible for LRU eviction (the inode
+ * itself is not freed until evicted by a subsequent vfs_iget allocation).
+ *
+ * Must be called under vfs_lock.
+ */
+void vfs_iput(struct inode *inode) {
+    if (!inode) return;
+
+    for (int i = 0; i < MAX_INODE_CACHE; i++) {
+        if (inode_cache[i].inode == inode) {
+            if (inode_cache[i].refcount > 0) {
+                inode_cache[i].refcount--;
+            }
+            return;
+        }
+    }
+}
+
+/* ================================================================
  * VFS init
  * ================================================================ */
 
@@ -181,6 +325,7 @@ void vfs_init(void) {
     root_sb    = NULL;
     root_dentry = NULL;
     lru_init();
+    vfs_inode_cache_init();
     dentry_total = 0;
     dentry_evicted = 0;
 }
@@ -336,22 +481,17 @@ void vfs_dentry_evict_locked(void) {
          * when parent's dentry is later traversed via dentry_lookup_child. */
         dentry_remove_child(d);
 
-        /* Free the inode if it's only referenced by this dentry.
-         * BUGFIX: Skip freeing the inode if this dentry is a mount point.
-         * The inode is the super_block's root inode — freeing it would
-         * leave a dangling pointer in sb->root, causing UAF later. */
+        /* FIXED (v4.2.2): Release the inode reference via vfs_iput
+         * instead of directly freeing the inode. The inode cache
+         * tracks the reference count and will free the inode when
+         * its refcount reaches 0 and the cache needs space for a
+         * new entry (LRU eviction in vfs_iget). */
         if (d->inode && !(d->flags & DENTRY_FLAG_MOUNT)) {
-            /* Only free the inode if its dentry back-pointer still points
-             * to this dentry. If two dentries share the same inode,
-             * evicting one must not free the inode out from under the other. */
+            /* Only release the inode if its dentry back-pointer still
+             * points to this dentry. If two dentries share the same
+             * inode, evicting one must not release the inode. */
             if (d->inode->dentry == d) {
-                if (d->inode->name) {
-                    kfree((void *)d->inode->name);
-                }
-                if (d->inode->priv) {
-                    kfree(d->inode->priv);
-                }
-                kfree(d->inode);
+                vfs_iput(d->inode);
             }
         }
 
@@ -401,6 +541,9 @@ static int is_path_traversal(const char *name, size_t len) {
     return 0;
 }
 
+/* FIXED (v4.2.2): Global inode number counter for assigning unique inode numbers */
+static uint32_t next_ino = 1;
+
 struct inode *vfs_lookup(const char *path) {
     if (!root_sb || !root_dentry) return NULL;
     if (!path || path[0] != '/') return NULL;
@@ -417,7 +560,15 @@ struct inode *vfs_lookup(const char *path) {
     const char *p = path + 1;  /* skip leading '/' */
 
     /* Handle root path "/" */
-    if (*p == '\0') return cur->inode;
+    /* FIXED (v4.2.2): Use vfs_iget to track root inode reference */
+    if (*p == '\0') {
+        if (cur->inode) {
+            vfs_lock();
+            vfs_iget(cur->inode->dev, cur->inode->ino);
+            vfs_unlock();
+        }
+        return cur->inode;
+    }
 
     /*
      * FIXED (v4.1.8): Path depth counter to prevent stack overflow
@@ -458,25 +609,59 @@ struct inode *vfs_lookup(const char *path) {
         struct dentry *child = dentry_lookup_child(cur, name);
 
         if (child && child->inode) {
-            /* Cache hit — mark as recently used */
+            /*
+             * FIXED (v4.2.2): Cache hit — increment inode refcount
+             * via vfs_iget and mark dentry as recently used.
+             */
             child->access_count++;
             lru_touch(child);
+            vfs_iget(child->inode->dev, child->inode->ino);
             vfs_unlock();
             cur = child;
         } else {
-            /* Cache miss: allocate and add dentry under lock */
+            /*
+             * FIXED (v4.2.2): Cache miss — pre-allocate an inode via
+             * vfs_iget before calling the filesystem's lookup. This
+             * ensures the inode is tracked in the inode cache with a
+             * proper reference count from the start.
+             */
             if (!child) {
                 child = dentry_alloc(name, cur);
                 if (!child) { vfs_unlock(); return NULL; }
                 dentry_add_child(cur, child);
             }
+
+            /* Pre-allocate an inode from the cache */
+            struct inode *pre_inode = vfs_iget(0, ++next_ino);
+            if (!pre_inode) {
+                /* Cache full and all entries referenced — fall back */
+                vfs_unlock();
+                if (cur->inode && cur->inode->ops && cur->inode->ops->lookup) {
+                    cur->inode->ops->lookup(cur->inode, child);
+                }
+                vfs_lock();
+                if (!child->inode) {
+                    child->flags |= DENTRY_FLAG_NEGATIVE;
+                    vfs_unlock();
+                    return NULL;
+                }
+                child->inode->dentry = child;
+                vfs_unlock();
+                cur = child;
+                if (*p == '/') p++;
+                continue;
+            }
+            child->inode = pre_inode;
+
             /* Increment parent dentry refcount to prevent eviction
              * while the lock is released for the filesystem callback.
              * FIXED (v4.1.8): Prevent overflow of refcount. (L-5) */
             if (cur->refcount < 0x7FFFFFFF) cur->refcount++;
             vfs_unlock();
 
-            /* Ask parent inode to resolve this component (outside lock) */
+            /* Ask parent inode to resolve this component (outside lock).
+             * The filesystem's lookup op fills in the pre-allocated inode
+             * (sets ops, priv, name, is_dir, size, etc.). */
             if (cur->inode && cur->inode->ops && cur->inode->ops->lookup) {
                 cur->inode->ops->lookup(cur->inode, child);
             }
@@ -484,6 +669,16 @@ struct inode *vfs_lookup(const char *path) {
             vfs_lock();
             /* Decrement parent refcount now that we hold the lock again */
             if (cur->refcount > 0) cur->refcount--;
+
+            /*
+             * FIXED (v4.2.2): If the filesystem allocated its own inode
+             * (overwriting child->inode), release our pre-allocated inode
+             * and use the filesystem's one instead.
+             */
+            if (child->inode != pre_inode) {
+                vfs_iput(pre_inode);
+            }
+
             if (!child->inode) {
                 /*
                  * Negative dentry: component not found.

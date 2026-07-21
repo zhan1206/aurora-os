@@ -485,13 +485,29 @@ static void icmp_handle_packet(struct net_device *netdev,
  * UDP Layer
  * ================================================================ */
 #define MAX_UDP_SOCKETS 16
+#define UDP_RX_QUEUE_SIZE 8   /* FIXED (v4.2.2): circular packet queue */
+#define UDP_RX_BUF_SIZE 2048
+
+/* FIXED (v4.2.2): Per-packet structure for circular queue.
+ * Each slot holds one received UDP datagram with source address. */
+struct udp_pkt {
+    uint8_t  data[UDP_RX_BUF_SIZE];
+    int      len;
+    uint8_t  src_ip[4];
+    uint16_t src_port;
+    int      valid;
+};
+
 struct udp_socket {
     uint16_t local_port;
     int      in_use;
-    uint8_t  rx_buf[2048];
-    int      rx_len;
-    uint8_t  rx_src_ip[4];
-    uint16_t rx_src_port;
+    /* FIXED (v4.2.2): Circular packet queue replaces single rx_buf.
+     * rx_head = next to dequeue, rx_tail = next to enqueue,
+     * rx_count = number of packets waiting. */
+    struct udp_pkt rx_queue[UDP_RX_QUEUE_SIZE];
+    int      rx_head;
+    int      rx_tail;
+    int      rx_count;
 };
 
 static struct udp_socket udp_sockets[MAX_UDP_SOCKETS];
@@ -550,17 +566,34 @@ static void udp_handle_packet(const uint8_t src_ip[4],
     int i;
     for (i = 0; i < MAX_UDP_SOCKETS; i++) {
         if (udp_sockets[i].in_use && udp_sockets[i].local_port == dst_port) {
+            struct udp_socket *sock = &udp_sockets[i];
+
+            /* FIXED (v4.2.2): Enqueue into circular packet queue.
+             * If the queue is full, drop the oldest packet (head)
+             * to make room for the new one. */
+            if (sock->rx_count >= UDP_RX_QUEUE_SIZE) {
+                /* Drop oldest: advance head, marking slot as free */
+                sock->rx_queue[sock->rx_head].valid = 0;
+                sock->rx_head = (sock->rx_head + 1) % UDP_RX_QUEUE_SIZE;
+                sock->rx_count--;
+            }
+
+            /* Write new packet at tail position */
             int copy_len = data_len;
-            if (copy_len > (int)sizeof(udp_sockets[i].rx_buf)) {
-                copy_len = (int)sizeof(udp_sockets[i].rx_buf);
+            if (copy_len > (int)sizeof(sock->rx_queue[0].data)) {
+                copy_len = (int)sizeof(sock->rx_queue[0].data);
             }
             if (copy_len > 0) {
-                memcpy(udp_sockets[i].rx_buf,
+                memcpy(sock->rx_queue[sock->rx_tail].data,
                        data + sizeof(struct udp_hdr), (size_t)copy_len);
             }
-            udp_sockets[i].rx_len = copy_len;
-            memcpy(udp_sockets[i].rx_src_ip, src_ip, 4);
-            udp_sockets[i].rx_src_port = src_port;
+            sock->rx_queue[sock->rx_tail].len = copy_len;
+            memcpy(sock->rx_queue[sock->rx_tail].src_ip, src_ip, 4);
+            sock->rx_queue[sock->rx_tail].src_port = src_port;
+            sock->rx_queue[sock->rx_tail].valid = 1;
+
+            sock->rx_tail = (sock->rx_tail + 1) % UDP_RX_QUEUE_SIZE;
+            sock->rx_count++;
             break;
         }
     }
@@ -577,13 +610,24 @@ int udp_recvfrom(uint16_t port, void *buf, int max_len,
     int i;
     for (i = 0; i < MAX_UDP_SOCKETS; i++) {
         if (udp_sockets[i].in_use && udp_sockets[i].local_port == port &&
-            udp_sockets[i].rx_len > 0) {
-            int copy_len = udp_sockets[i].rx_len;
+            udp_sockets[i].rx_count > 0) {
+            struct udp_socket *sock = &udp_sockets[i];
+
+            /* FIXED (v4.2.2): Dequeue from circular packet queue.
+             * Read the oldest packet at rx_head, then advance head. */
+            struct udp_pkt *pkt = &sock->rx_queue[sock->rx_head];
+
+            int copy_len = pkt->len;
             if (copy_len > max_len) copy_len = max_len;
-            memcpy(buf, udp_sockets[i].rx_buf, (size_t)copy_len);
-            if (src_ip) memcpy(src_ip, udp_sockets[i].rx_src_ip, 4);
-            if (src_port) *src_port = udp_sockets[i].rx_src_port;
-            udp_sockets[i].rx_len = 0;
+            memcpy(buf, pkt->data, (size_t)copy_len);
+            if (src_ip) memcpy(src_ip, pkt->src_ip, 4);
+            if (src_port) *src_port = pkt->src_port;
+
+            /* Mark slot as consumed and advance head */
+            pkt->valid = 0;
+            sock->rx_head = (sock->rx_head + 1) % UDP_RX_QUEUE_SIZE;
+            sock->rx_count--;
+
             spin_unlock(&udp_lock);
             return copy_len;
         }
@@ -1526,8 +1570,16 @@ void net_init(void) {
     /* Initialize IPv6 stack */
     ipv6_init();
 
-    /* Try to obtain IP via DHCP */
-    dhcp_run();
+    /* FIXED (v4.2.2): Initialize DNS cache subsystem */
+    dns_init();
+
+    /*
+     * FIXED (v4.2.2): Use dhcp_start() instead of dhcp_run().
+     * dhcp_start() initiates the async DHCP state machine without
+     * blocking.  The state machine is advanced by dhcp_poll() which
+     * is called from net_poll() in the main loop.
+     */
+    dhcp_start();
 }
 
 void net_poll(void) {
@@ -1586,6 +1638,10 @@ void net_poll(void) {
      * FIXED (v4.1.9): Periodic DHCP lease renewal check.
      * Called from net_poll() to automatically renew the DHCP lease
      * before it expires.  (H-25: DHCP lease 24h no renewal)
+     *
+     * FIXED (v4.2.2): dhcp_poll() now also advances the async DHCP
+     * state machine (DISCOVER → OFFER → REQUEST → ACK → BOUND)
+     * without blocking the kernel.
      */
     dhcp_poll();
 }

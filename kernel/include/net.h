@@ -359,12 +359,14 @@ void tcp_cong_on_timeout(int sock);
 
 /* DHCP */
 int dhcp_init(void);
-int dhcp_run(void);
-void dhcp_poll(void);  /* FIXED (v4.1.9): Periodic lease renewal check */
+void dhcp_start(void);  /* FIXED (v4.2.2): Async DHCP state machine entry */
+void dhcp_poll(void);   /* FIXED (v4.1.9): Periodic lease renewal check */
+                        /* FIXED (v4.2.2): Now also advances async state machine */
 
 /* DNS */
 int  dns_query(const char *hostname, uint8_t ip_out[4]);
 void dns_set_server(const uint8_t ip[4]);
+void dns_init(void);  /* FIXED (v4.2.2): initialize DNS cache lock */
 
 /* HTTP */
 int  http_get(const char *url, char *response_buf, size_t buf_size);

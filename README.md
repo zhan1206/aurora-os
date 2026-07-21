@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Lines of Code](https://img.shields.io/badge/code-~26,500%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.1.4-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.2.2-blue)](CHANGELOG.md)
 
 **100% 自研代码** | 无 Linux 内核代码 | 无第三方内核组件
 
@@ -209,18 +209,18 @@ x86_64-elf-gdb build/kernel.elf \
 
 ```
 AuroraOS
-├── kernel/           # 内核源码（52 个 C 文件，32 个头文件，2 个汇编）
+├── kernel/           # 内核源码（57 个 C 文件，18 个公共头文件，2 个汇编）
 │   ├── entry.S       # Multiboot1 入口 + 32→64 位模式自切换
 │   ├── mem.c/h       # 伙伴系统物理页分配器 + Slab 内核堆
 │   ├── pagetable.c/h # x86_64 四级页表 + COW 写时复制
 │   ├── sched.c/h     # VRFair 调度器（CFS/EEVDF 启发式）+ 进程树 + 五状态机
-│   ├── syscall.c/h   # 45 个系统调用 + 6 参数 ABI
+│   ├── syscall.c/h   # 77 个系统调用 + 6 参数 ABI
 │   ├── signal.c/h    # POSIX 信号框架（5 种信号）
 │   ├── vfs.c/h       # VFS 层 + dentry 缓存 + LRU 驱逐
 │   ├── console.c/h   # VGA 文本模式 + ANSI + 行编辑
 │   ├── keyboard.c    # PS/2 键盘驱动 + E0 键处理
-│   ├── selftest.c    # 内核自测试（13 项）
-│   └── include/      # 公共头文件（17 个）
+│   ├── selftest.c    # 内核自测试（26 组）
+│   └── include/      # 公共头文件（18 个）
 ├── arch/x86_64/      # 架构相关汇编（10 个文件）
 ├── userspace/        # 用户态程序
 ├── docs/             # 设计文档 + API 文档 + 调试报告
@@ -249,7 +249,7 @@ AuroraOS
 - **Fork**: COW 页面克隆 + 完整寄存器状态复制
 - **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列，负载均衡
 
-### 系统调用（35+ 个）
+### 系统调用（77 个）
 
 | 类别 | 系统调用 |
 |------|----------|
@@ -419,7 +419,7 @@ A: 构建 Debug 版本：`make debug && make iso`。日志级别可通过 `LOG_L
 AuroraOS/
 ├── kernel/              # 内核源码
 │   ├── include/         # 公共头文件（theme, errno, portio, log 等）
-│   ├── *.c, *.h         # 核心模块（30+ C 文件）
+│   ├── *.c, *.h         # 核心模块（57 个 C 文件 + 55 个头文件）
 │   └── *.S              # 汇编文件（entry.S, irq_handler.S）
 ├── arch/x86_64/          # 架构相关汇编
 │   ├── context.S         # 上下文切换
@@ -457,7 +457,7 @@ AuroraOS/
 
 ### 内核自测试
 
-项目内置 13 项自测试，在启动时自动运行：
+项目内置 26 组自测试，在启动时自动运行：
 
 ```
 ======== Kernel Self-Test ========

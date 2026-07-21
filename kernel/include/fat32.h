@@ -7,6 +7,7 @@
 #define FAT32_H
 
 #include <stdint.h>
+#include "../smp.h"
 
 /* ================================================================
  * FAT32 file attribute constants
@@ -154,6 +155,9 @@ struct fat32_inode_info {
     /* Bug #20: Track parent directory entry position for file size updates */
     uint32_t parent_cluster;       /* Cluster of parent directory containing this entry */
     uint32_t dir_entry_offset;     /* Byte offset within parent cluster of this entry */
+    /* FIXED (v4.2.2): Per-file write lock to prevent concurrent writes
+     * from corrupting file data and cluster chains.  (BUG-FS-M4) */
+    spinlock_t write_lock;
 };
 
 /* ================================================================

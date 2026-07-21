@@ -15,6 +15,9 @@
 /* Maximum number of cached dentries before LRU eviction */
 #define MAX_DENTRIES  512
 
+/* FIXED (v4.2.2): Maximum number of cached inodes in the inode cache */
+#define MAX_INODE_CACHE  64
+
 void vfs_init(void);
 int vfs_mount_root(struct super_block *sb);
 
@@ -84,5 +87,18 @@ void vfs_dentry_evict_locked(void);
 
 /* Dentry cache statistics */
 void vfs_dentry_stats(int *total, int *evicted);
+
+/*
+ * FIXED (v4.2.2): Inode cache API
+ *
+ * vfs_inode_cache_init: Initialize the inode cache (called from vfs_init).
+ * vfs_iget: Get or create a cached inode by (device, inode_number) key.
+ *           Increments the inode's reference count. Returns the inode.
+ * vfs_iput: Release an inode reference (decrements refcount).
+ *           When refcount reaches 0, the cache entry is eligible for LRU eviction.
+ */
+void vfs_inode_cache_init(void);
+struct inode *vfs_iget(uint32_t dev, uint32_t ino);
+void vfs_iput(struct inode *inode);
 
 #endif

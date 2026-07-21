@@ -1,5 +1,74 @@
 # AuroraOS Changelog
 
+## v4.2.2 (2026-07-22) — 架构优化与文档完善
+
+### 概述
+
+v4.2.2 完成了文件系统、网络栈、内存管理三大子系统的架构优化，以及文档全面更新。修改 **10 个文件**，新增 **+800 行**，删除 **-30 行**。
+
+---
+
+### 一、文件系统优化 (3项)
+
+**FAT32 文件级锁 (BUG-FS-M4)**：
+- `kernel/include/fat32.h`: 在 `struct fat32_inode_info` 中添加 `spinlock_t write_lock` 字段
+- `kernel/fat32.c`: 在 `fat32_file_read` 和 `fat32_file_write` 中添加自旋锁保护，防止并发读写导致文件数据和簇链损坏
+
+**VFS inode 缓存**：
+- `kernel/vfs.c`: 实现 `vfs_iget()`/`vfs_iput()` 接口，支持最多 64 条 inode 缓存条目，LRU 驱逐策略，减少文件系统查找开销
+
+**VFS inode 缓存初始化**：
+- `kernel/vfs.c`: 在 `vfs_init()` 中添加 `vfs_inode_cache_init()` 调用，启动时自动初始化缓存
+
+---
+
+### 二、网络栈优化 (4项)
+
+**异步 DHCP 状态机**：
+- `kernel/net/dhcp.c`: 将同步阻塞 DHCP 客户端转换为异步状态机，支持 DISCOVER→OFFER→REQUEST→ACK 全流程非阻塞轮询，含超时重试和错误恢复
+
+**UDP 数据包队列**：
+- `kernel/net/net.c`: 在 `struct udp_socket` 中添加环形数据包队列（8 条目），`udp_handle_packet` 入队，`udp_recvfrom` 出队，防止丢包
+
+**DNS 缓存 LRU 淘汰**：
+- `kernel/net/dns.c`: 添加 `age` 字段和 `dns_age_counter`，实现 LRU 淘汰策略和 TTL 过期（300 秒），添加 `dns_cache_lock` 自旋锁保护并发访问
+
+**IPv6 扩展头处理**：
+- `kernel/net/ipv6.c`: 实现 `ipv6_walk_headers()` 函数，支持逐跳选项(Hop-by-Hop)、路由(Routing)、分片(Fragment)、目的选项(Dest-Opts)等扩展头解析，最大 8 层嵌套
+
+---
+
+### 三、文档更新 (3项)
+
+**README.md 更新**：
+- 版本号统一为 v4.2.2
+- 自测试数量从"13 项"更正为"26 组"
+- 系统调用数量确认为 77 个
+- procfs 条目数统一为 12 项
+
+**architecture.md 更新**：
+- 版本号统一为 v4.2.2
+- 系统调用数量从"45 个"更正为"77 个"
+- procfs 条目从 10 项补充为 12 项（添加 /proc/self/maps, /proc/self/cmdline）
+- SMAP/SMEP 状态标记为"已启用"
+- 自测试数量更新为 26 组
+- 启动流程补充 KASLR 初始化步骤
+
+**api.md 全面重写**：
+- 从 20 个系统调用扩展为 77 个完整文档
+- 按功能分类：I/O、进程管理、内存管理、信号、管道、文件描述符、文件系统操作、网络 Socket、时间、系统信息、用户/组、资源限制、环境变量、随机数
+- 补充错误码参考表（40+ 个错误码）
+
+---
+
+### 四、兼容性说明
+
+- 所有修改向后兼容，不改变现有系统调用 ABI
+- FAT32 文件级锁对性能影响极小（仅在文件读写时加锁）
+- 异步 DHCP 状态机保持与原有 DHCP 客户端相同的协议兼容性
+
+---
+
 ## v4.2.1 (2026-07-20) — 安全加固与驱动稳定性修复
 
 ### 概述

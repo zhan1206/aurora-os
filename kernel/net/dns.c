@@ -25,14 +25,23 @@ static uint8_t dns_server_ip[4] = { 8, 8, 8, 8 };  /* Default: Google DNS */
 
 /* DNS cache */
 #define DNS_CACHE_SIZE 16
+#define DNS_CACHE_TTL 300  /* FIXED (v4.2.2): TTL ~300 seconds (approximate via counter) */
+
+/* FIXED (v4.2.2): Added age field for LRU eviction and TTL-based expiration.
+ * dns_age_counter increments on each dns_cache_lookup; the oldest entry
+ * (lowest age) is evicted when the cache is full.  Entries with age
+ * difference > DNS_CACHE_TTL are considered stale and invalidated. */
 struct dns_cache_entry {
     uint32_t hash;
     uint8_t  ip[4];
     int      valid;
+    int      age;
 };
 
 static struct dns_cache_entry dns_cache[DNS_CACHE_SIZE];
 static uint16_t dns_query_id = 0;  /* FIXED (v4.1.8): randomized DNS query ID */
+static int dns_age_counter = 0;    /* FIXED (v4.2.2): LRU age counter */
+static spinlock_t dns_cache_lock;  /* FIXED (v4.2.2): protect DNS cache from SMP races */
 
 /* Simple hash function for hostname */
 static uint32_t dns_hash(const char *hostname) {
@@ -51,6 +60,27 @@ void dns_set_server(const uint8_t ip[4]) {
     memcpy(dns_server_ip, ip, 4);
     log_printf(LOG_LEVEL_INFO, "dns: server set to %d.%d.%d.%d\n",
                ip[0], ip[1], ip[2], ip[3]);
+}
+
+/* FIXED (v4.2.2): Initialize DNS cache spinlock for SMP safety. */
+void dns_init(void) {
+    spin_init(&dns_cache_lock);
+    log_printf(LOG_LEVEL_DEBUG, "dns: cache initialized\n");
+}
+
+/* FIXED (v4.2.2): Invalidate DNS cache entries whose age has exceeded
+ * DNS_CACHE_TTL.  Called before each cache lookup to ensure stale
+ * entries are not returned. */
+static void dns_cache_age(void) {
+    int i;
+    spin_lock(&dns_cache_lock);
+    for (i = 0; i < DNS_CACHE_SIZE; i++) {
+        if (dns_cache[i].valid &&
+            (dns_age_counter - dns_cache[i].age) > DNS_CACHE_TTL) {
+            dns_cache[i].valid = 0;
+        }
+    }
+    spin_unlock(&dns_cache_lock);
 }
 
 /* ================================================================
@@ -84,16 +114,26 @@ static int dns_encode_name(uint8_t *out, const char *hostname) {
 int dns_query(const char *hostname, uint8_t ip_out[4]) {
     if (!hostname || !ip_out) return -1;
 
+    /* FIXED (v4.2.2): Age out stale entries and increment age counter
+     * before cache lookup. */
+    dns_cache_age();
+    dns_age_counter++;
+
     /* Check cache */
     uint32_t hash = dns_hash(hostname);
     int i;
+    spin_lock(&dns_cache_lock);
     for (i = 0; i < DNS_CACHE_SIZE; i++) {
         if (dns_cache[i].valid && dns_cache[i].hash == hash) {
             memcpy(ip_out, dns_cache[i].ip, 4);
+            /* FIXED (v4.2.2): Update LRU age on cache hit */
+            dns_cache[i].age = dns_age_counter;
+            spin_unlock(&dns_cache_lock);
             log_printf(LOG_LEVEL_DEBUG, "dns: cache hit for %s\n", hostname);
             return 0;
         }
     }
+    spin_unlock(&dns_cache_lock);
 
     /* Build DNS query packet */
     int name_max = (int)strlen(hostname) * 2 + 4;  /* Worst case */
@@ -241,15 +281,30 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
                 if (pos + 4 <= rx_len) {
                     memcpy(ip_out, rx_buf + pos, 4);
 
-                    /* Add to cache */
+                    /* FIXED (v4.2.2): Add to cache with LRU eviction.
+                     * If the cache is full, evict the least recently used
+                     * entry (lowest age).  Otherwise use the first invalid slot. */
+                    spin_lock(&dns_cache_lock);
+                    int target = 0;
+                    int oldest_age = dns_cache[0].age;
+                    int found_slot = 0;
                     for (i = 0; i < DNS_CACHE_SIZE; i++) {
                         if (!dns_cache[i].valid) {
-                            dns_cache[i].hash = hash;
-                            memcpy(dns_cache[i].ip, ip_out, 4);
-                            dns_cache[i].valid = 1;
+                            target = i;
+                            found_slot = 1;
                             break;
                         }
+                        if (dns_cache[i].age < oldest_age) {
+                            oldest_age = dns_cache[i].age;
+                            target = i;
+                        }
                     }
+                    /* If no empty slot, target is the LRU entry */
+                    dns_cache[target].hash = hash;
+                    memcpy(dns_cache[target].ip, ip_out, 4);
+                    dns_cache[target].age = dns_age_counter;
+                    dns_cache[target].valid = 1;
+                    spin_unlock(&dns_cache_lock);
 
                     log_printf(LOG_LEVEL_DEBUG,
                                "dns: resolved %s -> %d.%d.%d.%d\n",

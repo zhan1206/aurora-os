@@ -46,6 +46,15 @@ static inline uint16_t htons(uint16_t n) {
 #define NDP_OPT_SOURCE_LLADDR    1
 #define NDP_OPT_TARGET_LLADDR    2
 
+/* FIXED (v4.2.2): IPv6 Extension Header numbers */
+#define IPV6_EXT_HOP_BY_HOP    0
+#define IPV6_EXT_ROUTING      43
+#define IPV6_EXT_FRAGMENT     44
+#define IPV6_EXT_DEST_OPTS    60
+
+/* FIXED (v4.2.2): Safety limit for extension header chain walking */
+#define IPV6_MAX_EXT_HEADERS   8
+
 /* ================================================================
  * NDP Neighbor Solicitation
  * ================================================================ */
@@ -66,6 +75,12 @@ struct ndp_neighbor_adv {
 #define NDP_FLAG_ROUTER    0x80
 #define NDP_FLAG_SOLICITED  0x40
 #define NDP_FLAG_OVERRIDE   0x20
+
+/* FIXED (v4.2.2): IPv6 Extension Header */
+struct ipv6_ext_hdr {
+    uint8_t next_header;
+    uint8_t hdr_ext_len;   /* length in 8-byte units, not including first 8 bytes */
+} __attribute__((packed));
 
 /* ================================================================
  * IPv6 Neighbor Cache
@@ -415,6 +430,61 @@ int ipv6_recv(void *buf, int max_len, ipv6_addr_t *src, ipv6_addr_t *dst) {
 }
 
 /* ================================================================
+ * FIXED (v4.2.2): Walk IPv6 Extension Header Chain
+ *
+ * Walks the extension header chain to find the actual upper-layer
+ * protocol. Each extension header has a "next header" field and a
+ * "header length" field (hdr_ext_len, in 8-byte units, not including
+ * the first 8 bytes of the header).
+ *
+ * Handles: Hop-by-Hop Options (0), Routing (43), Fragment (44),
+ *          Destination Options (60).
+ *
+ * Parameters:
+ *   next_header  - initial next_header value from the IPv6 header
+ *   payload      - pointer to payload data; updated on success
+ *   payload_len  - remaining payload length; updated on success
+ *
+ * Returns the actual upper-layer protocol number on success,
+ * or -1 on error (malformed header, too many extensions, etc.).
+ * ================================================================ */
+static int ipv6_walk_headers(uint8_t next_header,
+                              const uint8_t **payload, int *payload_len) {
+    int ext_count = 0;
+
+    while (ext_count < IPV6_MAX_EXT_HEADERS) {
+        /* Check if this is an extension header we need to walk past */
+        if (next_header != IPV6_EXT_HOP_BY_HOP &&
+            next_header != IPV6_EXT_ROUTING &&
+            next_header != IPV6_EXT_FRAGMENT &&
+            next_header != IPV6_EXT_DEST_OPTS) {
+            /* Not an extension header - this is the upper-layer protocol */
+            return (int)next_header;
+        }
+
+        /* Need at least 2 bytes for the extension header to read length */
+        if (*payload_len < 2) return -1;
+
+        const struct ipv6_ext_hdr *ext =
+            (const struct ipv6_ext_hdr *)(*payload);
+
+        /* Total header size: (hdr_ext_len + 1) * 8 bytes */
+        int ext_len = (int)(ext->hdr_ext_len + 1) * 8;
+
+        /* Validate: minimum size and must fit within remaining payload */
+        if (ext_len < 2 || ext_len > *payload_len) return -1;
+
+        next_header = ext->next_header;
+        *payload += ext_len;
+        *payload_len -= ext_len;
+        ext_count++;
+    }
+
+    /* Too many extension headers - possible infinite loop */
+    return -1;
+}
+
+/* ================================================================
  * IPv6 Packet Handler (called from Ethernet layer)
  * ================================================================ */
 void ipv6_handle_packet(struct net_device *netdev,
@@ -457,14 +527,17 @@ void ipv6_handle_packet(struct net_device *netdev,
 
     if (!for_us) return;
 
+    /* FIXED (v4.2.2): Walk IPv6 extension header chain to find the
+     * actual upper-layer protocol. This replaces the old direct
+     * next_header check which could not handle packets with
+     * Hop-by-Hop, Routing, Fragment, or Destination Options headers. */
+    int actual_proto = ipv6_walk_headers(ip6->next_header, &payload, &payload_len);
+    if (actual_proto < 0) return;
+
     /* Handle ICMPv6 */
-    if (ip6->next_header == IPV6_PROTO_ICMPV6) {
+    if (actual_proto == IPV6_PROTO_ICMPV6) {
         if (payload_len < 4) return;
 
-        /* NOTE: Known limitation - IPv6 extension headers are not
-         * parsed. A full implementation would walk the extension
-         * header chain (Hop-by-Hop, Routing, Fragment, etc.) to
-         * find the actual upper-layer protocol header. */
         uint8_t icmp_type = payload[0];
 
         switch (icmp_type) {

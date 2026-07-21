@@ -1,10 +1,10 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
 
 ## 1. 概述
 
 AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用混合内核（Hybrid Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载和硬件性能监控。
 
-- **版本**: 4.1.7
+- **版本**: 4.2.2
 - **目标架构**: x86_64 (AMD64)
 - **内核类型**: 混合内核（宏内核 + 可加载模块）
 - **启动方式**: Multiboot1 (GRUB2) / UEFI
@@ -163,7 +163,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| 系统调用分发 | `syscall.c` | 系统调用实现与分发（45 个系统调用） |
+| 系统调用分发 | `syscall.c` | 系统调用实现与分发（77 个系统调用） |
 | 系统调用入口 | `syscall_entry.c` | MSR 寄存器配置 |
 | 系统调用号 | `syscall.h` | 系统调用号枚举 |
 | 汇编入口 | `arch/x86_64/syscall.S` | syscall 指令入口 |
@@ -193,7 +193,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 | 栈保护 | `stack_protect.c` | 栈金丝雀保护（`-fstack-protector-strong`） |
 | ASLR | `aslr.c` | 地址空间布局随机化（ChaCha20 CSPRNG，栈/mmap 随机化） |
 | Seccomp | `seccomp.c` | 系统调用访问控制（256 位位图过滤器） |
-| SMAP/SMEP | `pagetable.c` | 内核访问保护（CR4 位 20/21），[Planned] STAC/CLAC 框架已就绪于 `userspace.h`，CR4 启用代码待实现 |
+| SMAP/SMEP | `pagetable.c` | 内核访问保护（CR4 位 20/21），已启用，STAC/CLAC 框架已集成 |
 | 模块签名 | `module_sign.c` | 内核模块完整性验证演示（占位实现，XOR 哈希 + 硬编码密钥，尚未启用） |
 
 ### 3.11 ELF 加载
@@ -299,19 +299,20 @@ ASLR 随机化:
    e. phys_mem_init()        - 初始化物理内存管理 (E820/MB1/MB2/UEFI)
    f. slab_init()            - 初始化 Slab 分配器
    g. aslr_init()            - 初始化 ASLR 随机数生成器
-   h. page_table_init()      - 初始化 4 级页表 (NX 启用)
-   i. scheduler_init()       - 初始化调度器 (per-CPU 就绪队列)
-   j. syscall_init()         - 配置 MSR 系统调用
-   k. irq_init()             - 初始化 IDT + PIC/IOAPIC + 键盘
-   l. smp_init()             - SMP 初始化，解析 ACPI MADT，启动 AP
-   m. rodata_protect()       - 标记只读数据段为只读
-   n. pit_init(100)          - 初始化 PIT 定时器 (100 Hz)
-   o. perf_init()            - 初始化性能计数器 (TSC 频率校准)
-   p. sysctl_init()          - 初始化系统控制接口 (12 项统计)
-   q. ramdisk_init() + fs_init() - 创建 RAM 磁盘，挂载 ext2/ramfs
-   r. module_init()          - 初始化模块加载器 (内核符号表)
-   s. kernel_selftest()      - 运行 13 项内核自检
-   t. shell_main()           - 启动 Shell
+   h. kaslr_init()           - 初始化 KASLR 内核地址空间随机化（ChaCha20 CSPRNG）
+   i. page_table_init()      - 初始化 4 级页表 (NX 启用)
+   j. scheduler_init()       - 初始化调度器 (per-CPU 就绪队列)
+   k. syscall_init()         - 配置 MSR 系统调用
+   l. irq_init()             - 初始化 IDT + PIC/IOAPIC + 键盘
+   m. smp_init()             - SMP 初始化，解析 ACPI MADT，启动 AP
+   n. rodata_protect()       - 标记只读数据段为只读
+   o. pit_init(100)          - 初始化 PIT 定时器 (100 Hz)
+   p. perf_init()            - 初始化性能计数器 (TSC 频率校准)
+   q. sysctl_init()          - 初始化系统控制接口 (12 项统计)
+   r. ramdisk_init() + fs_init() - 创建 RAM 磁盘，挂载 ext2/ramfs
+   s. module_init()          - 初始化模块加载器 (内核符号表)
+   t. kernel_selftest()      - 运行 26 组内核自检
+   u. shell_main()           - 启动 Shell
 ```
 
 ## 7. 关键设计决策
@@ -378,6 +379,8 @@ ASLR 随机化:
 - `/proc/cmdline` — 内核命令行参数
 - `/proc/kmsg` — 内核日志环形缓冲区（受 CoolPotOS 内核日志子系统启发）
 - `/proc/self/stat` — 当前进程状态
+- `/proc/self/maps` — 当前进程内存映射
+- `/proc/self/cmdline` — 当前进程命令行
 
 ## 8. 与 CoolPotOS 架构对比
 
@@ -389,7 +392,7 @@ ASLR 随机化:
 | 构建系统 | Makefile + CMake | CMake | 均支持 CMake 构建 |
 | 代码质量 | clang-format + clang-tidy | clang-format + clang-tidy | 均采用静态分析工具 |
 | 模块签名 | 演示性占位实现（未启用） | ECC 密钥验证 | 不同签名方案 |
-| procfs | 10 项 | 丰富 | 均受 Linux procfs 启发 |
+| procfs | 12 项 | 丰富 | 均受 Linux procfs 启发 |
 | 文件系统 | VFS + RamFS + EXT2 | VFS + procfs + pipefs + devtmpfs + squashfs | CoolPotOS 文件系统类型更丰富 |
 | 终端 | VGA + 帧缓冲 | flanterm 终端渲染 | 不同终端实现方案 |
 | 容器化 | Dockerfile | Dockerfile | 均支持可复现构建 |

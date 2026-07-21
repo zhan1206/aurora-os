@@ -38,6 +38,9 @@ struct inode {
     struct dentry   *dentry; /* back-pointer to dentry (may be NULL for root) */
     int              is_dir; /* 1 if this inode represents a directory */
     size_t           size;   /* file size in bytes (0 for directories) */
+    /* FIXED (v4.2.2): Added device and inode number for inode cache keying */
+    uint32_t         dev;    /* device number */
+    uint32_t         ino;    /* inode number */
 };
 
 /* Dentry: directory entry cache */
