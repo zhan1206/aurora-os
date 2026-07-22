@@ -12,6 +12,7 @@
 #include "log.h"
 #include "string.h"
 #include "../mem.h"
+#include "../perf.h"
 #include <stdint.h>
 
 /* Byte order conversion (local, same as net.c) */
@@ -77,12 +78,18 @@ static int  dhcp_timeout_ticks = 0;     /* Poll ticks elapsed in current state *
  * Without renewal, the IP becomes invalid after the lease period
  * (typically 24 hours).  (H-25: DHCP lease 24h no renewal)
  */
-static uint64_t dhcp_lease_expiry = 0;   /* TSC-based expiry timestamp */
+static uint64_t dhcp_lease_expiry = 0;   /* Tick-based expiry timestamp (perf.uptime_ticks) */
 static uint32_t dhcp_lease_seconds = 0;  /* lease duration in seconds */
 static int      dhcp_configured = 0;      /* 1 when DHCP ACK received */
 
-/* Estimated TSC ticks per second (calibrated at boot) */
-#define DHCP_TSC_PER_SEC_ESTIMATE  1000000000ULL  /* ~1 GHz TSC */
+/*
+ * FIXED (v4.2.3): Use system tick counter (perf.uptime_ticks) instead
+ * of raw TSC for lease expiry.  The TSC frequency varies across CPUs
+ * (1-5 GHz), making the hardcoded 1 GHz estimate inaccurate by up to
+ * 5x.  System ticks are calibrated to 100 Hz and provide a reliable
+ * time source.  (BUG-NET-02)
+ */
+#define DHCP_TICKS_PER_SEC  100  /* System tick rate is 100 Hz */
 
 /* ================================================================
  * dhcp_init
@@ -344,14 +351,11 @@ static void dhcp_configure_interface(const uint8_t *buf, int len) {
             dhcp_lease_seconds = 86400;  /* Default: 24 hours */
         }
 
-        /* Set expiry: current TSC + lease time in TSC ticks.
+        /* Set expiry: current ticks + lease time in ticks.
          * Renew at 50% of lease time (T1) per RFC 2131. */
-        uint32_t tsc_low, tsc_high;
-        asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
-        uint64_t tsc_now = ((uint64_t)tsc_high << 32) | tsc_low;
         uint64_t renew_ticks = (uint64_t)dhcp_lease_seconds *
-                               DHCP_TSC_PER_SEC_ESTIMATE / 2;
-        dhcp_lease_expiry = tsc_now + renew_ticks;
+                               (uint64_t)DHCP_TICKS_PER_SEC / 2;
+        dhcp_lease_expiry = perf.uptime_ticks + renew_ticks;
         dhcp_configured = 1;
 
         log_printf(LOG_LEVEL_INFO,
@@ -531,11 +535,7 @@ void dhcp_poll(void) {
      */
     if (dhcp_state == DHCP_BOUND) {
         if (dhcp_configured && dhcp_lease_expiry != 0) {
-            uint32_t tsc_low, tsc_high;
-            asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
-            uint64_t tsc_now = ((uint64_t)tsc_high << 32) | tsc_low;
-
-            if (tsc_now >= dhcp_lease_expiry) {
+            if (perf.uptime_ticks >= dhcp_lease_expiry) {
                 log_printf(LOG_LEVEL_INFO, "dhcp: lease renewal time reached, "
                            "restarting discovery\n");
                 dhcp_lease_expiry = 0;

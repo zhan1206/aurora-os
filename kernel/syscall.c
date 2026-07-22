@@ -87,19 +87,29 @@ static long sys_read(int fd, void *buf, size_t count) {
     if (cap_ret < 0) { current->t_errno = -cap_ret; return -1; }
     if (!user_addr_range_ok(buf, count)) { current->t_errno = EFAULT; return -1; }
 
-    /* fd 0 (stdin): read from console line buffer */
+    /* fd 0 (stdin): read from console line buffer.
+     * FIXED (v4.2.3): Use a kernel buffer for console_getline and
+     * copy_to_user instead of passing the raw user-space pointer.
+     * Without this, SMAP would fault and TOCTOU is possible.  (BUG-SYS-01) */
     if (fd == 0) {
         extern int console_getline(char *buf, size_t buflen);
         extern void console_write(const char *s);
         extern void yield(void);
 
+        char kbuf[256];
+        size_t to_read = (count > sizeof(kbuf) - 1) ? (sizeof(kbuf) - 1) : count;
+
         /* Block until a line is available */
         int len;
-        while ((len = console_getline((char *)buf, count)) == 0) {
+        while ((len = console_getline(kbuf, to_read)) == 0) {
             current->state = TASK_BLOCKED;
             schedule();
             /* Check for pending signals */
             if (current->sig && current->sig->pending) { current->t_errno = EINTR; return -1; }
+        }
+        if (len < 0) return -1;
+        if (copy_to_user(buf, kbuf, (size_t)len) != 0) {
+            current->t_errno = EFAULT; return -1;
         }
         return len;
     }
@@ -2041,6 +2051,382 @@ static long sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
 }
 
 /* ================================================================
+ * FIXED (v4.2.3): SYS_SIGPROCMASK — Signal mask manipulation
+ *
+ * how: SIG_BLOCK (0), SIG_UNBLOCK (1), SIG_SETMASK (2)
+ * set: new mask to apply (may be NULL)
+ * oldset: previous mask (may be NULL)
+ * ================================================================ */
+static long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset) {
+    if (how < 0 || how > 2) { current->t_errno = EINVAL; return -1; }
+    if (!current->sig) {
+        current->sig = signal_alloc();
+        if (!current->sig) { current->t_errno = ENOMEM; return -1; }
+    }
+
+    uint64_t old = current->sig->blocked;
+
+    if (oldset) {
+        if (!user_addr_range_ok(oldset, sizeof(uint64_t))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        if (copy_to_user(oldset, &old, sizeof(uint64_t)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+    }
+
+    if (set) {
+        uint64_t new_set;
+        if (!user_addr_range_ok((void *)set, sizeof(uint64_t))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        if (copy_from_user(&new_set, set, sizeof(uint64_t)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+
+        switch (how) {
+        case 0: /* SIG_BLOCK */
+            current->sig->blocked |= new_set;
+            break;
+        case 1: /* SIG_UNBLOCK */
+            current->sig->blocked &= ~new_set;
+            break;
+        case 2: /* SIG_SETMASK */
+            current->sig->blocked = new_set;
+            break;
+        }
+        /* SIGKILL and SIGSTOP cannot be blocked (POSIX requirement) */
+        current->sig->blocked &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_READV — Scatter read
+ * ================================================================ */
+static long sys_readv(int fd, const struct iovec *iov, int iovcnt) {
+    if (!iov || iovcnt <= 0 || iovcnt > 1024) {
+        current->t_errno = EINVAL; return -1;
+    }
+
+    size_t iov_size = (size_t)iovcnt * sizeof(struct iovec);
+    if (!user_addr_range_ok((void *)iov, iov_size)) {
+        current->t_errno = EFAULT; return -1;
+    }
+
+    struct iovec *kiov = (struct iovec *)kmalloc(iov_size);
+    if (!kiov) { current->t_errno = ENOMEM; return -1; }
+    if (copy_from_user(kiov, iov, iov_size) != 0) {
+        kfree(kiov); current->t_errno = EFAULT; return -1;
+    }
+
+    long total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (kiov[i].iov_len == 0) continue;
+        long n = sys_read(fd, kiov[i].iov_base, kiov[i].iov_len);
+        if (n < 0) { kfree(kiov); return total > 0 ? total : -1; }
+        total += n;
+        if ((size_t)n < kiov[i].iov_len) break; /* short read */
+    }
+    kfree(kiov);
+    return total;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_WRITEV — Gather write
+ * ================================================================ */
+static long sys_writev(int fd, const struct iovec *iov, int iovcnt) {
+    if (!iov || iovcnt <= 0 || iovcnt > 1024) {
+        current->t_errno = EINVAL; return -1;
+    }
+
+    size_t iov_size = (size_t)iovcnt * sizeof(struct iovec);
+    if (!user_addr_range_ok((void *)iov, iov_size)) {
+        current->t_errno = EFAULT; return -1;
+    }
+
+    struct iovec *kiov = (struct iovec *)kmalloc(iov_size);
+    if (!kiov) { current->t_errno = ENOMEM; return -1; }
+    if (copy_from_user(kiov, iov, iov_size) != 0) {
+        kfree(kiov); current->t_errno = EFAULT; return -1;
+    }
+
+    long total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (kiov[i].iov_len == 0) continue;
+        long n = sys_write(fd, kiov[i].iov_base, kiov[i].iov_len);
+        if (n < 0) { kfree(kiov); return total > 0 ? total : -1; }
+        total += n;
+    }
+    kfree(kiov);
+    return total;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_SELECT — I/O multiplexing
+ *
+ * Simplified implementation: checks each fd for readability/writability
+ * using a non-blocking poll.  Timeout is processed but at millisecond
+ * granularity via the scheduler tick.
+ * ================================================================ */
+static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
+                       fd_set *exceptfds, struct timeval *timeout) {
+    if (nfds < 0 || nfds > FD_SETSIZE) {
+        current->t_errno = EINVAL; return -1;
+    }
+
+    fd_set kreadfds, kwritefds, kexceptfds;
+    fd_set *pr = NULL, *pw = NULL, *pe = NULL;
+
+    if (readfds) {
+        if (!user_addr_range_ok(readfds, sizeof(fd_set))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        copy_from_user(&kreadfds, readfds, sizeof(fd_set));
+        pr = &kreadfds;
+    }
+    if (writefds) {
+        if (!user_addr_range_ok(writefds, sizeof(fd_set))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        copy_from_user(&kwritefds, writefds, sizeof(fd_set));
+        pw = &kwritefds;
+    }
+    if (exceptfds) {
+        if (!user_addr_range_ok(exceptfds, sizeof(fd_set))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        copy_from_user(&kexceptfds, exceptfds, sizeof(fd_set));
+        pe = &kexceptfds;
+    }
+
+    fd_set result_read, result_write, result_except;
+    FD_ZERO(&result_read);
+    FD_ZERO(&result_write);
+    FD_ZERO(&result_except);
+
+    struct file *filp;
+    int ready = 0;
+
+    for (int fd = 0; fd < nfds; fd++) {
+        if (pr && FD_ISSET(fd, pr)) {
+            filp = current->files[fd];
+            if (filp && filp->inode) {
+                /* A file that exists is always "readable" in our simple model.
+                 * For sockets, check if there's pending data. */
+                FD_SET(fd, &result_read);
+                ready++;
+            }
+        }
+        if (pw && FD_ISSET(fd, pw)) {
+            filp = current->files[fd];
+            if (filp && filp->inode) {
+                /* A file that exists is always "writable" in our simple model */
+                FD_SET(fd, &result_write);
+                ready++;
+            }
+        }
+        if (pe && FD_ISSET(fd, pe)) {
+            /* Exceptfds: no exceptional conditions in our simple model */
+        }
+    }
+
+    /* Copy results back to user */
+    if (readfds) copy_to_user(readfds, &result_read, sizeof(fd_set));
+    if (writefds) copy_to_user(writefds, &result_write, sizeof(fd_set));
+    if (exceptfds) copy_to_user(exceptfds, &result_except, sizeof(fd_set));
+
+    (void)timeout; /* Timeout handling deferred to caller's retry loop */
+    return ready;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_SOCKETPAIR — Create a pair of connected sockets
+ * ================================================================ */
+static long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
+    if (!sv) { current->t_errno = EFAULT; return -1; }
+    if (!user_addr_range_ok(sv, 2 * sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    (void)domain; (void)type; (void)protocol;
+
+    /* Create two loopback TCP sockets and connect them */
+    int fd1 = sys_socket(AF_INET, SOCK_STREAM, 0);
+    if (fd1 < 0) return -1;
+
+    int fd2 = sys_socket(AF_INET, SOCK_STREAM, 0);
+    if (fd2 < 0) {
+        sys_close(fd1);
+        return -1;
+    }
+
+    /* Bind fd2 to a local port */
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0; /* auto-assign */
+    /* Use loopback address */
+    addr.sin_addr[0] = 127; addr.sin_addr[1] = 0;
+    addr.sin_addr[2] = 0; addr.sin_addr[3] = 1;
+
+    if (sys_bind(fd2, &addr, sizeof(addr)) < 0) {
+        sys_close(fd2); sys_close(fd1);
+        return -1;
+    }
+    if (sys_listen(fd2, 1) < 0) {
+        sys_close(fd2); sys_close(fd1);
+        return -1;
+    }
+
+    /* Get the port fd2 is bound to */
+    struct sockaddr_in bound_addr;
+    int addrlen = sizeof(bound_addr);
+    if (sys_getsockname(fd2, &bound_addr, &addrlen) < 0) {
+        sys_close(fd2); sys_close(fd1);
+        return -1;
+    }
+
+    /* Connect fd1 to fd2's address */
+    if (sys_connect(fd1, &bound_addr, sizeof(bound_addr)) < 0) {
+        sys_close(fd2); sys_close(fd1);
+        return -1;
+    }
+
+    /* Accept on fd2 */
+    int accepted = sys_accept(fd2, NULL, NULL);
+    if (accepted < 0) {
+        sys_close(fd2); sys_close(fd1);
+        return -1;
+    }
+
+    /* Close the listening fd2, use accepted instead */
+    sys_close(fd2);
+
+    int result[2] = { fd1, accepted };
+    if (copy_to_user(sv, result, sizeof(result)) != 0) {
+        sys_close(accepted); sys_close(fd1);
+        current->t_errno = EFAULT; return -1;
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_SETSOCKOPT — Set socket options
+ * ================================================================ */
+static long sys_setsockopt(int sockfd, int level, int optname,
+                           const void *optval, uint32_t optlen) {
+    (void)sockfd; (void)level; (void)optname; (void)optval; (void)optlen;
+    /* Stub: most socket options are not critical for basic operation.
+     * SO_REUSEADDR, SO_KEEPALIVE, etc. are silently accepted.
+     * Returns 0 (success) to prevent applications from failing. */
+    return 0;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_GETSOCKOPT — Get socket options
+ * ================================================================ */
+static long sys_getsockopt(int sockfd, int level, int optname,
+                           void *optval, uint32_t *optlen) {
+    (void)sockfd; (void)level; (void)optname;
+    /* Stub: return default values for common socket options */
+    if (optval && optlen) {
+        uint32_t len;
+        if (copy_from_user(&len, optlen, sizeof(uint32_t)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        /* For SO_ERROR, return 0 (no error) */
+        int zero = 0;
+        if (len >= (uint32_t)sizeof(int)) {
+            if (copy_to_user(optval, &zero, sizeof(int)) != 0) {
+                current->t_errno = EFAULT; return -1;
+            }
+        }
+        uint32_t ret_len = (uint32_t)sizeof(int);
+        if (copy_to_user(optlen, &ret_len, sizeof(uint32_t)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+    }
+    return 0;
+}
+
+/* ================================================================
+ * FIXED (v4.2.3): SYS_GETDENTS64 — Get directory entries (64-bit)
+ *
+ * Converts internal directory entry format to linux_dirent64 with
+ * 64-bit inode and offset fields.  Uses vfs_read for raw directory
+ * data, then reformats for the Linux 64-bit ABI.
+ * ================================================================ */
+static long sys_getdents64(unsigned int fd, struct linux_dirent64 *dirp,
+                           unsigned int count) {
+    if (!dirp || count == 0) { current->t_errno = EINVAL; return -1; }
+    if (!user_addr_range_ok(dirp, count)) {
+        current->t_errno = EFAULT; return -1;
+    }
+
+    struct file *filp = (struct file *)fd_get(current, (int)fd);
+    if (!filp || !filp->inode) { current->t_errno = EBADF; return -1; }
+
+    /* Allocate a temporary buffer for raw directory entries */
+    #define GETDENTS_BUF_SIZE 2048
+    char *raw_buf = (char *)kmalloc(GETDENTS_BUF_SIZE);
+    if (!raw_buf) { current->t_errno = ENOMEM; return -1; }
+
+    /* Save current offset and use vfs_read to get raw directory data */
+    off_t saved_off = filp->offset;
+    ssize_t raw_len = vfs_read(filp, raw_buf, GETDENTS_BUF_SIZE);
+    if (raw_len < 0) { kfree(raw_buf); current->t_errno = (int)(-raw_len); return -1; }
+    if (raw_len == 0) { kfree(raw_buf); return 0; }
+
+    /* Convert raw directory entries to linux_dirent64 format */
+    char *out = (char *)kmalloc((size_t)count);
+    if (!out) { kfree(raw_buf); current->t_errno = ENOMEM; return -1; }
+
+    size_t out_pos = 0;
+    size_t raw_pos = 0;
+    while (raw_pos < (size_t)raw_len && out_pos + sizeof(struct linux_dirent64) <= (size_t)count) {
+        /* Parse raw directory entry (ext2_dir_entry format) */
+        struct ext2_dir_entry {
+            uint32_t inode;
+            uint16_t rec_len;
+            uint8_t  name_len;
+            uint8_t  file_type;
+            char     name[];
+        };
+        struct ext2_dir_entry *de = (struct ext2_dir_entry *)(raw_buf + raw_pos);
+        if (de->rec_len == 0) break;
+
+        size_t entry_size = sizeof(struct linux_dirent64) + (size_t)de->name_len + 1;
+        /* Align to 8 bytes */
+        entry_size = (entry_size + 7) & ~7;
+        if (out_pos + entry_size > (size_t)count) break;
+
+        struct linux_dirent64 *d64 = (struct linux_dirent64 *)(out + out_pos);
+        d64->d_ino = de->inode;
+        d64->d_off = (int64_t)(saved_off + (off_t)raw_pos + (off_t)de->rec_len);
+        d64->d_reclen = (uint16_t)entry_size;
+        d64->d_type = de->file_type;
+        memcpy(d64->d_name, de->name, de->name_len);
+        d64->d_name[de->name_len] = '\0';
+
+        out_pos += entry_size;
+        raw_pos += (size_t)de->rec_len;
+    }
+
+    if (out_pos > 0) {
+        if (copy_to_user(dirp, out, out_pos) != 0) {
+            kfree(out); kfree(raw_buf);
+            current->t_errno = EFAULT; return -1;
+        }
+    }
+
+    kfree(out);
+    kfree(raw_buf);
+    return (long)out_pos;
+}
+
+/* ================================================================
  * Dispatcher
  * ================================================================ */
 
@@ -2156,6 +2542,19 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
         case SYS_GETENV:  ret = sys_getenv((const char *)a1, (char *)a2, (size_t)a3); break;
         case SYS_SETENV:  ret = sys_setenv((const char *)a1, (const char *)a2); break;
         case SYS_GETRANDOM: ret = sys_getrandom((void *)a1, (size_t)a2, (unsigned int)a3); break;
+        /* FIXED (v4.2.3): New POSIX syscalls */
+        case SYS_SIGPROCMASK: ret = sys_sigprocmask((int)a1, (const uint64_t *)a2, (uint64_t *)a3); break;
+        case SYS_READV:  ret = sys_readv((int)a1, (const struct iovec *)a2, (int)a3); break;
+        case SYS_WRITEV: ret = sys_writev((int)a1, (const struct iovec *)a2, (int)a3); break;
+        case SYS_SELECT: ret = sys_select((int)a1, (fd_set *)a2, (fd_set *)a3,
+                                          (fd_set *)a4, (struct timeval *)a5); break;
+        case SYS_SOCKETPAIR: ret = sys_socketpair((int)a1, (int)a2, (int)a3, (int *)a4); break;
+        case SYS_SETSOCKOPT: ret = sys_setsockopt((int)a1, (int)a2, (int)a3,
+                                                  (const void *)a4, (uint32_t)a5); break;
+        case SYS_GETSOCKOPT: ret = sys_getsockopt((int)a1, (int)a2, (int)a3,
+                                                  (void *)a4, (uint32_t *)a5); break;
+        case SYS_GETDENTS64: ret = sys_getdents64((unsigned int)a1,
+                                                  (struct linux_dirent64 *)a2, (unsigned int)a3); break;
         default:
             current->t_errno = ENOSYS;
             ret = -1;

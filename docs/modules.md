@@ -186,13 +186,21 @@ switch(num) → sys_read/sys_write/sys_fork/...
 返回用户空间
 ```
 
-**支持的完整系统调用列表**:
-- I/O: read, write, open, close, fstat, lseek, getdents
-- 进程: fork, execve, exit, getpid, waitpid
-- 内存: mmap, mprotect
+**支持的完整系统调用列表（77个）**:
+- I/O: read, write, open, close, stat, fstat, poll, lseek, ioctl, access, getdents
+- 进程: fork, execve, exit, getpid, waitpid, getppid, nice, sched_yield, brk, sbrk
+- 内存: mmap, mprotect, madvise
 - 信号: kill, sigaction, sigreturn
-- 管道: pipe
-- 文件描述符: dup, dup2
+- 管道: pipe, pipe2
+- 文件描述符: dup, dup2, fcntl
+- 文件系统: mkdir, rmdir, unlink, rename, chmod, fchmod, chown, fchown, fsync, ftruncate, symlink, readlink, getcwd, chdir
+- 网络: socket, bind, connect, listen, accept, send, recv, sendto, recvfrom, shutdown, getsockname
+- 时间: gettimeofday, nanosleep, clock_gettime, times
+- 系统信息: uname, sysinfo
+- 用户/组: getuid, geteuid, getgid, getegid, setuid, setgid, getpgid, setpgid, setsid
+- 资源限制: getrlimit, setrlimit
+- 环境变量: getenv, setenv
+- 随机数: getrandom
 
 ---
 

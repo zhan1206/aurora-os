@@ -23,6 +23,7 @@
 #include "include/kstdio.h"
 #include "include/theme.h"
 #include "include/explain.h"
+#include "include/version.h"
 #include "pagetable.h"       /* for exec_elf() */
 #include "layout.h"
 #include "vfs.h"
@@ -997,7 +998,7 @@ static void do_sysinfo(void) {
 
 static void do_about(void) {
     const char *lines[] = {
-        "  AuroraOS v3.2.0",
+        "  " AURORAOS_VERSION,
         "",
         "  Author: AuroraOS Team",
         "  License: MIT",

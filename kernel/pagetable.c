@@ -638,12 +638,108 @@ uint64_t clone_current_pml4(void) {
     }
 
     /*
-     * PML4[0]: Copy as-is to preserve the kernel's identity mapping
-     * (0-1GB, 2MB huge pages). This is required so that kernel code,
-     * data, and stack remain accessible when the new PML4 is loaded.
-     * map_page() will split 2MB pages as needed when mapping user pages.
+     * PML4[0]: Deep-copy user-space PDPT entries, keep kernel
+     * identity mapping shared.
+     *
+     * PML4[0] covers virtual addresses 0-512GB.  The kernel's
+     * identity mapping of the first 1GB resides in PDPT[0].
+     * We keep PDPT[0] shared (identity mapping) but deep-copy
+     * PDPT[1..511] for COW protection of user-space mappings
+     * in the 0-512GB region.
+     *
+     * FIXED (v4.2.3): Previously, dst_pml4[0]=src_pml4[0] shared
+     * the entire PML4[0] subtree, meaning any map_page() call in
+     * the child that modified PDPT entries under PML4[0] would
+     * corrupt the parent's page tables.  (BUG-PG-01)
      */
-    dst_pml4[0] = src_pml4[0];
+    dst_pml4[0] = src_pml4[0];  /* Start with shared identity mapping */
+
+    /* Deep-copy user-space PDPT entries under PML4[0] (PDPT[1..511]).
+     * PDPT[0] is the kernel identity mapping (0-1GB) and stays shared. */
+    uint64_t src_pdpt0_phys = src_pml4[0] & PTE_ADDR_MASK;
+    uint64_t *src_pdpt0 = phys_to_virt(src_pdpt0_phys);
+    uint64_t *dst_pdpt0 = phys_to_virt(dst_pml4[0] & PTE_ADDR_MASK);
+
+    /* Allocate a new PDPT for deep-copying user-space entries */
+    uint64_t new_pdpt0_phys = alloc_table_page();
+    if (!new_pdpt0_phys) goto fail;
+    uint64_t *new_pdpt0 = phys_to_virt(new_pdpt0_phys);
+
+    /* Copy PDPT[0] (kernel identity mapping) from the original */
+    new_pdpt0[0] = src_pdpt0[0];
+
+    /* Deep-copy PDPT[1..511] with COW */
+    for (int j = 1; j < 512; ++j) {
+        uint64_t src_pdpte = src_pdpt0[j];
+        if (!(src_pdpte & PTE_PRESENT)) {
+            new_pdpt0[j] = 0;
+            continue;
+        }
+
+        uint64_t new_pd_phys = alloc_table_page();
+        if (!new_pd_phys) {
+            /* Free the partially-built PDPT */
+            free_pagetable_subtree(new_pdpt0_phys, 1);
+            goto fail;
+        }
+        new_pdpt0[j] = new_pd_phys | PTE_STRUCT_FLAGS;
+
+        uint64_t src_pd_phys = src_pdpte & PTE_ADDR_MASK;
+        uint64_t *src_pd = phys_to_virt(src_pd_phys);
+        uint64_t *dst_pd = phys_to_virt(new_pd_phys);
+
+        for (int k = 0; k < 512; ++k) {
+            uint64_t src_pde = src_pd[k];
+            if (!(src_pde & PTE_PRESENT)) {
+                dst_pd[k] = 0;
+                continue;
+            }
+
+            if (src_pde & PTE_PS) {
+                /* 2MB huge page: skip (these are kernel identity mappings) */
+                dst_pd[k] = 0;
+                continue;
+            }
+
+            uint64_t new_pt_phys = alloc_table_page();
+            if (!new_pt_phys) {
+                free_pagetable_subtree(new_pdpt0_phys, 1);
+                goto fail;
+            }
+            dst_pd[k] = new_pt_phys | PTE_STRUCT_FLAGS;
+
+            uint64_t src_pt_phys = src_pde & PTE_ADDR_MASK;
+            uint64_t *src_pt = phys_to_virt(src_pt_phys);
+            uint64_t *dst_pt = phys_to_virt(new_pt_phys);
+
+            for (int l = 0; l < 512; ++l) {
+                uint64_t src_pte = src_pt[l];
+                if (!(src_pte & PTE_PRESENT)) {
+                    dst_pt[l] = 0;
+                    continue;
+                }
+
+                uint64_t phys_page = src_pte & PTE_ADDR_MASK;
+                uint64_t old_flags = src_pte & ~PTE_ADDR_MASK;
+
+                page_ref_inc(phys_page);
+
+                uint64_t cow_flags = (old_flags & ~PTE_RW) | PTE_PRESENT;
+                if (old_flags & PTE_USER) cow_flags |= PTE_USER;
+                if (old_flags & PTE_NX)   cow_flags |= PTE_NX;
+
+                src_pt[l] = phys_page | cow_flags;
+                dst_pt[l] = phys_page | cow_flags;
+
+                uint64_t va = ((uint64_t)j << 30) | ((uint64_t)k << 21) |
+                              ((uint64_t)l << 12);
+                smp_tlb_shootdown(va);
+            }
+        }
+    }
+
+    /* Replace the shared PDPT with our new COW-capable PDPT */
+    dst_pml4[0] = new_pdpt0_phys | PTE_STRUCT_FLAGS;
 
     /* Deep-copy user-half PML4[1..255] for COW */
     for (int i = 1; i < 256; ++i) {

@@ -343,7 +343,13 @@ static struct page *buddy_split(uint32_t order) {
     /* FIXED (v4.2.0): Bounds-check buddy_pfn to prevent array
      * out-of-bounds access if the block is near the end of memory.
      * (BUG-MEM-H2) */
-    if (buddy_pfn >= total_phys_pages) return NULL;
+    if (buddy_pfn >= total_phys_pages) {
+        /* FIXED (v4.2.3): Return the page to free list before failing.
+         * The page was removed from free_area[order] above via list_del.
+         * Without returning it, the page is permanently leaked.  (BUG-MEM-06) */
+        list_add(&free_area[order], p);
+        return NULL;
+    }
 
     struct page *left  = &page_array[pfn];
     struct page *right = &page_array[buddy_pfn];

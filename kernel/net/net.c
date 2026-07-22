@@ -1090,12 +1090,45 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
      * + payload.  (Top 10 #4)
      */
     uint16_t received_csum = tcp->checksum;
-    /* Zero out the checksum field in a local copy for verification */
-    struct tcp_hdr tcp_copy = *tcp;
-    tcp_copy.checksum = 0;
-    /* Compute checksum over pseudo-header + TCP header + payload */
-    uint16_t computed_csum = tcp_udp_checksum(src_ip, dst_ip, IP_PROTO_TCP,
-                                               &tcp_copy, len);
+    /*
+     * FIXED (v4.2.3): Compute the TCP checksum over the actual packet
+     * data, not a 20-byte stack copy.  Previously, &tcp_copy (sizeof
+     * tcp_hdr = 20 bytes) was passed with len (which includes the
+     * payload), causing the checksum function to read stack garbage
+     * for the payload bytes.  The checksum was effectively random.
+     * (BUG-NET-01)
+     */
+    uint16_t computed_csum;
+    {
+        /* Build a temporary buffer: pseudo-header (12 bytes) + TCP header + payload */
+        struct tcp_pseudo_hdr {
+            uint8_t  src_ip[4];
+            uint8_t  dst_ip[4];
+            uint8_t  zero;
+            uint8_t  protocol;
+            uint16_t tcp_length;
+        } __attribute__((packed)) pseudo;
+        memcpy(pseudo.src_ip, src_ip, 4);
+        memcpy(pseudo.dst_ip, dst_ip, 4);
+        pseudo.zero = 0;
+        pseudo.protocol = IP_PROTO_TCP;
+        pseudo.tcp_length = htons((uint16_t)len);
+
+        /* Compute checksum: pseudo-header (12) + raw packet data (len) */
+        uint32_t sum = 0;
+        uint16_t *ptr = (uint16_t *)&pseudo;
+        for (int i = 0; i < 6; i++) sum += ntohs(ptr[i]);
+        /* Add TCP header + payload, skipping the checksum field */
+        uint16_t *data16 = (uint16_t *)data;
+        for (int i = 0; i < len / 2; i++) {
+            if (i == 8) continue;  /* Skip checksum field (offset 16-17) */
+            sum += ntohs(data16[i]);
+        }
+        if (len & 1) sum += ((uint16_t)data[len - 1]) << 8;
+        /* Fold carry */
+        while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+        computed_csum = htons((uint16_t)(~sum));
+    }
     if (received_csum != 0 && computed_csum != received_csum) {
         /* Checksum mismatch — silently drop */
         return;
@@ -1195,6 +1228,11 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
             sock->state = TCP_ESTABLISHED;
             /* FIXED (v4.1.8): Initialize congestion control for the new connection.
              * (BUG C-7) */
+            /* FIXED (v4.2.3): Call tcp_cong_socket_init() to create the
+             * congestion control slot before tcp_cong_on_ack().  Previously
+             * the slot was never created, causing tcp_cong_on_ack() to
+             * return immediately without doing anything.  (BUG-NET-03) */
+            tcp_cong_socket_init(sock->id);
             tcp_cong_on_ack(sock->id, sock->ack_num, 0);
             spin_unlock(&tcp_lock);
 
@@ -1224,6 +1262,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
             /* FIXED (v4.2.1): Initialize congestion control for server-side
              * connections.  Previously only the client side (SYN_SENT→ESTABLISHED)
              * initialized congestion control.  (BUG-NET-M2) */
+            /* FIXED (v4.2.3): Call tcp_cong_socket_init() to create the
+             * congestion control slot first.  (BUG-NET-03) */
+            tcp_cong_socket_init(sock->id);
             tcp_cong_on_ack(sock->id, sock->ack_num, 0);
             spin_unlock(&tcp_lock);
             log_printf(LOG_LEVEL_DEBUG,

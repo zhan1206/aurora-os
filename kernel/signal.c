@@ -394,8 +394,14 @@ void check_signals(void) {
             asm volatile ("clac" ::: "memory");
         }
 
-        /* Block the signal during handler execution */
-        sig->blocked |= (1U << s);
+        /*
+         * Block the signal being delivered AND any additional signals
+         * specified in sa_mask during handler execution.
+         * FIXED (v4.2.3): Previously only the delivered signal was blocked,
+         * ignoring sa_mask which allows users to specify additional signals
+         * to be blocked during handler execution (POSIX requirement).
+         */
+        sig->blocked |= (1U << s) | sig->actions[s].sa_mask;
 
         log_printf(LOG_LEVEL_DEBUG, "signal: delivering sig=%d handler=%p\n",
                    s, (void *)handler);
@@ -408,8 +414,20 @@ void check_signals(void) {
  * ================================================================ */
 void signal_child_event(struct task_struct *child, int event) {
     (void)event;
-    if (!child || !child->parent) return;
-    do_sys_kill(child->parent->pid, SIGCHLD);
+    /*
+     * FIXED (v4.2.3): Protect child->parent access with child_lock
+     * to prevent UAF if the parent is being freed concurrently.
+     * (BUG-PROC-08)
+     */
+    spin_lock((spinlock_t*)&child->child_lock);
+    struct task_struct *parent = child->parent;
+    if (!parent || parent->state == TASK_DEAD) {
+        spin_unlock((spinlock_t*)&child->child_lock);
+        return;
+    }
+    int parent_pid = parent->pid;
+    spin_unlock((spinlock_t*)&child->child_lock);
+    do_sys_kill(parent_pid, SIGCHLD);
 }
 
 /*

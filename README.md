@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Lines of Code](https://img.shields.io/badge/code-~26,500%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.2.2-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.2.3-blue)](CHANGELOG.md)
 
 **100% 自研代码** | 无 Linux 内核代码 | 无第三方内核组件
 
@@ -209,7 +209,7 @@ x86_64-elf-gdb build/kernel.elf \
 
 ```
 AuroraOS
-├── kernel/           # 内核源码（57 个 C 文件，18 个公共头文件，2 个汇编）
+├── kernel/           # 内核源码（64 个 C 文件，55 个头文件，2 个汇编）
 │   ├── entry.S       # Multiboot1 入口 + 32→64 位模式自切换
 │   ├── mem.c/h       # 伙伴系统物理页分配器 + Slab 内核堆
 │   ├── pagetable.c/h # x86_64 四级页表 + COW 写时复制
@@ -221,7 +221,11 @@ AuroraOS
 │   ├── keyboard.c    # PS/2 键盘驱动 + E0 键处理
 │   ├── selftest.c    # 内核自测试（26 组）
 │   └── include/      # 公共头文件（18 个）
-├── arch/x86_64/      # 架构相关汇编（10 个文件）
+├── arch/              # 多架构支持
+│   ├── x86_64/        # x86_64 架构汇编（10 个文件）
+│   ├── riscv64/       # RISC-V 64 架构（Sv39 页表 + SBI + 上下文切换）
+│   ├── aarch64/       # ARM64 架构（TTBR 页表 + GIC + 上下文切换）
+│   └── loongarch64/   # LoongArch 64 架构（CSR + TLB + 上下文切换）
 ├── userspace/        # 用户态程序
 ├── docs/             # 设计文档 + API 文档 + 调试报告
 ├── scripts/          # 构建辅助脚本
@@ -419,13 +423,17 @@ A: 构建 Debug 版本：`make debug && make iso`。日志级别可通过 `LOG_L
 AuroraOS/
 ├── kernel/              # 内核源码
 │   ├── include/         # 公共头文件（theme, errno, portio, log 等）
-│   ├── *.c, *.h         # 核心模块（57 个 C 文件 + 55 个头文件）
+│   ├── *.c, *.h         # 核心模块（64 个 C 文件 + 55 个头文件）
 │   └── *.S              # 汇编文件（entry.S, irq_handler.S）
-├── arch/x86_64/          # 架构相关汇编
+├── arch/                 # 多架构支持
+│   ├── x86_64/           # x86_64 架构汇编（10 个文件）
 │   ├── context.S         # 上下文切换
 │   ├── syscall.S         # 系统调用入口/返回
 │   ├── gdt.S, tss.S      # GDT + TSS（IST 独立栈）
-│   └── ...               # 异常处理、缺页、键盘中断桩
+│   │   └── ...               # 异常处理、缺页、键盘中断桩
+│   ├── riscv64/           # RISC-V 64 架构（boot.S, context.S, pagetable.h, sbi.h）
+│   ├── aarch64/           # ARM64 架构（boot.S, context.S, pagetable.h, gic.h）
+│   └── loongarch64/       # LoongArch 64 架构（boot.S, context.S, csr.h）
 ├── userspace/            # 用户态程序
 │   ├── libc.c            # 自研 libc
 │   ├── shell.c           # 用户态 Shell

@@ -1037,9 +1037,11 @@ struct module_sign_header {
 /* ================================================================
  * Embedded ECDSA public key (secp256r1, 64 bytes: Qx || Qy)
  *
- * This is a placeholder development key.  In production, the key
- * MUST be generated at build time from a securely stored private key
- * and injected via a build-system-generated header file.
+ * FIXED (v4.2.3): Stronger warning about development key usage.
+ * In production, the key MUST be generated from a securely stored
+ * private key and injected via a build-system-generated header file.
+ * The current values are intentionally invalid placeholders to
+ * prevent accidental use in production.  (BUG-SEC-03)
  *
  * To generate a real key pair:
  *   openssl ecparam -genkey -name prime256v1 -noout -out private.pem

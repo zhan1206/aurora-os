@@ -890,9 +890,28 @@ retry:
 
         /*
          * No ZOMBIE child found.
-         * If WNOHANG is set, return 0 immediately (non-blocking).
-         * Otherwise block until a child exits.
+         *
+         * FIXED (v4.2.3): If a specific pid was requested (not -1),
+         * verify it's actually a child before blocking.  Waiting for
+         * a non-child pid would block the caller forever.  (BUG-PROC-07)
          */
+        if (pid != -1) {
+            int is_child = 0;
+            struct child_node *node3 = current->children;
+            while (node3) {
+                if (node3->child && node3->child->pid == pid) {
+                    is_child = 1;
+                    break;
+                }
+                node3 = node3->next;
+            }
+            if (!is_child) {
+                return -1;  /* errno ECHILD set by caller */
+            }
+        }
+
+        /* If WNOHANG is set, return 0 immediately (non-blocking).
+         * Otherwise block until a child exits. */
         if (options & WNOHANG) {
             return 0;
         }

@@ -122,6 +122,27 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
     uint32_t X = 0;  /* index register */
     uint32_t pc = 0; /* program counter */
 
+    /*
+     * FIXED (v4.2.3): BPF instruction execution limit to prevent
+     * infinite loops.  Classic BPF supports backward jumps (JMP with
+     * negative offset), which could create infinite loops.  Linux
+     * kernel uses BPF_MAXINSNS=4096.  We limit to 4096 instructions
+     * per evaluation; exceeding this returns SECCOMP_RET_KILL.
+     */
+    #define BPF_MAX_EXEC_INSNS 4096
+    uint32_t insn_count = 0;
+
+    /*
+     * FIXED (v4.2.3): BPF scratch memory (M[0..15]).
+     * Classic BPF programs use scratch memory for temporary storage
+     * via LDX/ST/STX instructions.  Previously, LDX|BPF_MEM returned
+     * X=0 and ST/STX were silently ignored, effectively bypassing
+     * any filter that uses scratch memory.  (BUG-SEC-01)
+     */
+    #define BPF_SCRATCH_SIZE 16
+    uint32_t scratch[BPF_SCRATCH_SIZE];
+    memset(scratch, 0, sizeof(scratch));
+
     while (pc < len) {
         const struct sock_filter *insn = &prog[pc];
         uint16_t code = insn->code;
@@ -208,8 +229,14 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
             break;
 
         case BPF_LDX | BPF_W | BPF_MEM:
-            /* Load from scratch memory (not implemented) */
-            X = 0;
+            /* Load from scratch memory M[k].
+             * FIXED (v4.2.3): Implemented scratch memory.  Previously
+             * always returned 0, bypassing filters that use scratch.
+             * (BUG-SEC-01) */
+            {
+                uint32_t idx = k & (BPF_SCRATCH_SIZE - 1);
+                X = scratch[idx];
+            }
             break;
 
         case BPF_LDX | BPF_W | BPF_LEN:
@@ -345,6 +372,27 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
         case BPF_MISC | BPF_TXA:
             /* Transfer X to A */
             A = X;
+            break;
+
+        /* ================================================
+         * BPF_ST / BPF_STX: Store to scratch memory
+         * FIXED (v4.2.3): Implemented scratch memory store
+         * instructions.  (BUG-SEC-01)
+         * ================================================ */
+        case BPF_ST:
+            /* M[k] = A */
+            {
+                uint32_t idx = k & (BPF_SCRATCH_SIZE - 1);
+                scratch[idx] = A;
+            }
+            break;
+
+        case BPF_STX:
+            /* M[k] = X */
+            {
+                uint32_t idx = k & (BPF_SCRATCH_SIZE - 1);
+                scratch[idx] = X;
+            }
             break;
 
         /* ================================================

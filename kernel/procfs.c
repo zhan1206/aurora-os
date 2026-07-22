@@ -30,6 +30,7 @@
 #include "cmdline.h"
 #include "include/log.h"
 #include "include/kstdio.h"
+#include "include/version.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -212,7 +213,8 @@ static int read_uptime(char *buf, size_t size) {
  * read_version: Returns kernel version string.
  */
 static int read_version(char *buf, size_t size) {
-    const char *version = "AuroraOS v3.0.2\n";
+    /* FIXED (v4.2.3): Use actual version from version.h instead of hardcoded "v3.0.2" */
+    const char *version = AURORAOS_VERSION "\n";
     int len = 0;
     for (const char *p = version; *p && len < (int)size - 1; p++)
         buf[len++] = *p;
@@ -603,33 +605,40 @@ static ssize_t procfs_read(struct file *filp, void *buf, size_t count,
     /* Generate content into a temporary buffer, then copy to user buffer.
      * FIXED (v4.1.4): Increased buffer from 1024 to 4096 to prevent
      * truncation of large procfs entries like /proc/interrupts which
-     * can output up to ~10KB for 256 vectors.  (BUG 3.7) */
-    char tmp[4096];
+     * can output up to ~10KB for 256 vectors.  (BUG 3.7)
+     * FIXED (v4.2.3): Use kmalloc instead of stack allocation.  A 4KB
+     * stack buffer consumes ~50% of the kernel stack (8KB), risking
+     * stack overflow when called from deep call chains.  (BUG-LOW-04) */
+    #define PROCFS_TMP_BUF_SIZE 4096
+    char *tmp = (char *)kmalloc(PROCFS_TMP_BUF_SIZE);
+    if (!tmp) return -ENOMEM;
     int len = 0;
 
     if (data->type == PROC_INODE_FILE && data->entry && data->entry->read_func) {
-        len = data->entry->read_func(tmp, sizeof(tmp));
+        len = data->entry->read_func(tmp, PROCFS_TMP_BUF_SIZE);
     } else if (data->type == PROC_INODE_SELF) {
         /* /proc/self/<name> */
         if (filp->inode->name && strcmp(filp->inode->name, "maps") == 0) {
-            len = read_self_maps(tmp, sizeof(tmp));
+            len = read_self_maps(tmp, PROCFS_TMP_BUF_SIZE);
         } else if (filp->inode->name && strcmp(filp->inode->name, "cmdline") == 0) {
-            len = read_self_cmdline(tmp, sizeof(tmp));
+            len = read_self_cmdline(tmp, PROCFS_TMP_BUF_SIZE);
         } else {
             /* Default: /proc/self/stat */
-            len = read_self_stat(tmp, sizeof(tmp));
+            len = read_self_stat(tmp, PROCFS_TMP_BUF_SIZE);
         }
     } else {
+        kfree(tmp);
         return 0;
     }
 
-    if (len < 0) return -1;
-    if (len == 0) return 0;
+    if (len < 0) { kfree(tmp); return -1; }
+    if (len == 0) { kfree(tmp); return 0; }
 
     size_t to_copy = (size_t)len;
     if (to_copy > count) to_copy = count;
     memcpy(buf, tmp, to_copy);
     *offset += (off_t)to_copy;
+    kfree(tmp);
 
     return (ssize_t)to_copy;
 }
