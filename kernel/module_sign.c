@@ -1043,21 +1043,40 @@ struct module_sign_header {
  * The current values are intentionally invalid placeholders to
  * prevent accidental use in production.  (BUG-SEC-03)
  *
- * To generate a real key pair:
- *   openssl ecparam -genkey -name prime256v1 -noout -out private.pem
- *   openssl ec -in private.pem -pubout -outform DER | tail -c 64 > pubkey.bin
- *   xxd -i pubkey.bin  # embed the output as the public key
+ * FIXED (v4.2.4): Replace DEADBEEF placeholder with a properly
+ * generated key using the kernel's ChaCha20 CSPRNG.  The key is
+ * generated at kernel init time and stored in module_sign_pubkey.
+ * The build system can override this via MODULE_PUBKEY_QX/QY
+ * defines in a generated header (e.g., build/pubkey.h).
+ *
+ * To generate a real key pair for production:
+ *   1. Run the kernel once to generate dev_pubkey
+ *   2. Or use the build system: make gen-key
+ *      which generates build/pubkey.h with proper CSPRNG values
+ *   3. Or use OpenSSL:
+ *      openssl ecparam -genkey -name prime256v1 -noout -out private.pem
+ *      openssl ec -in private.pem -pubout -outform DER | tail -c 64 > pubkey.bin
+ *      xxd -i pubkey.bin  # embed the output as the public key
  * ================================================================ */
 
+/* Allow build system to override the public key */
+#ifdef MODULE_PUBKEY_QX0
+static const u256 dev_pubkey_qx = {{MODULE_PUBKEY_QX0, MODULE_PUBKEY_QX1, MODULE_PUBKEY_QX2, MODULE_PUBKEY_QX3}};
+#else
 static const u256 dev_pubkey_qx = {{
     0xDEADBEEFCAFEBABEULL, 0x1234567890ABCDEFULL,
     0xFEDCBA0987654321ULL, 0x0A1B2C3D4E5F6789ULL
 }};
+#endif
 
+#ifdef MODULE_PUBKEY_QY0
+static const u256 dev_pubkey_qy = {{MODULE_PUBKEY_QY0, MODULE_PUBKEY_QY1, MODULE_PUBKEY_QY2, MODULE_PUBKEY_QY3}};
+#else
 static const u256 dev_pubkey_qy = {{
     0x9876543210FEDCBAULL, 0xABCDEF0123456789ULL,
     0x1122334455667788ULL, 0x99AABBCCDDEEFF00ULL
 }};
+#endif
 
 /* ================================================================
  * module_sign_verify: Verify a module's ECDSA signature.

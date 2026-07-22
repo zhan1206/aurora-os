@@ -301,15 +301,15 @@ static uint64_t split_huge_page(uint64_t *pd, int pd_idx, uint64_t vaddr) {
     pd[pd_idx] = pt_phys | PTE_STRUCT_FLAGS;
 
     /*
-     * Flush the TLB for the entire 2MB region that was just split.
-     * Use the full virtual address (vaddr) aligned to the 2MB boundary,
-     * rather than assuming the huge page is at PDPT=0/PML4=0.
-     * Flush all 512 4KB pages in the 2MB region to ensure no stale
-     * 2MB TLB entries remain.
-     */
+     * FIXED (v4.2.4): Use smp_tlb_shootdown() instead of local invlpg().
+     * On SMP systems, other CPUs may still have stale 2MB TLB entries
+     * for this region.  Without broadcasting the TLB invalidation, a
+     * remote CPU could continue using the 2MB huge page mapping while
+     * this CPU sees the new 4KB page table, leading to data corruption.
+     * (BUG-SPLIT-TLB) */
     uint64_t split_va = vaddr & ~0x1FFFFFULL;  /* 2MB-aligned */
     for (int i = 0; i < 512; i++) {
-        invlpg(split_va + (uint64_t)i * 4096);
+        smp_tlb_shootdown(split_va + (uint64_t)i * 4096);
     }
 
     return pt_phys;
@@ -388,24 +388,25 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
      * elf_load() which overlays COW-shared pages with new mappings.
      * Idempotent re-mapping (same VA→same PA) is safe because the
      * ref_count is decremented then immediately re-incremented below.
-     */
+     *
+     * FIXED (v4.2.4): Move free_page() AFTER the new PTE is written.
+     * Previously, the old page was freed before the new PTE was set
+     * (line 413), creating a window where another CPU could access
+     * the freed page via the old PTE (use-after-free).  Now we save
+     * the old page info, write the new PTE first, then free the old
+     * page.  (BUG-MAP-UAF) */
+    uint64_t old_phys_to_free = 0;
     if (old_pte & PTE_PRESENT) {
         uint64_t old_phys = old_pte & PTE_ADDR_MASK;
         struct page *pg = page_of_phys(old_phys);
         if (pg) {
-            /*
-             * Atomically decrement ref_count and check if the page
-             * should be freed. Using a single __sync_fetch_and_sub
-             * avoids the TOCTOU race between reading and decrementing
-             * (NH2 fix).
-             */
             uint32_t old_ref = __sync_fetch_and_sub(&pg->ref_count, 1);
             if (old_ref == 0) {
                 /* Underflow: restore to 0 */
                 __sync_bool_compare_and_swap(&pg->ref_count, 0xFFFFFFFF, 0);
             } else if (old_ref == 1) {
-                /* Only this process had the page — free it */
-                free_page((void *)(uintptr_t)old_phys);
+                /* Only this process had the page — free it AFTER PTE update */
+                old_phys_to_free = old_phys;
             }
         }
     }
@@ -413,8 +414,15 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
     pt[pt_idx] = (paddr & ~0xFFFULL) | (flags & 0xFFFULL) | PTE_PRESENT;
     if (flags & PTE_NX) pt[pt_idx] |= PTE_NX;
 
-    /* Increment ref_count for the new page */
+    /* Increment ref_count for the new page BEFORE freeing the old page.
+     * This ensures the new page is properly tracked even if the old page
+     * free triggers a slab reclaim that allocates from the same region. */
     page_ref_inc(paddr & PTE_ADDR_MASK);
+
+    /* Now safe to free the old page — the PTE already points to the new page */
+    if (old_phys_to_free) {
+        free_page((void *)(uintptr_t)old_phys_to_free);
+    }
 
     invlpg(vaddr);
 
@@ -516,12 +524,26 @@ int map_huge_page_2mb(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64
 			 * the reference count; only free when it reaches 0.
 			 * Direct free_page() would leak the PT if it is still
 			 * referenced by a COW clone.  (BUG-MEM-H5)
-			 */
+			 *
+			 * FIXED (v4.2.4): Use atomic CAS to resolve the TOCTOU
+			 * race between page_ref_dec() and page_ref_get().
+			 * Previously, between the decrement and the get, another
+			 * CPU could increment ref_count, causing the get to read
+			 * a non-zero value that would prevent the PT from being
+			 * freed.  Or worse, the PT could be freed while another
+			 * CPU still references it.  Now we use a single atomic
+			 * fetch-and-sub and check the result.  (BUG-HUGE-TOCTOU) */
 			uint64_t old_pt_phys = entry & PTE_ADDR_MASK;
-			page_ref_dec(old_pt_phys);
-			uint32_t ref = page_ref_get(old_pt_phys);
-			if (ref == 0) {
+			uint32_t old_ref = __sync_fetch_and_sub(
+				&page_of_phys(old_pt_phys)->ref_count, 1);
+			if (old_ref == 1) {
+				/* We were the last reference — free the page table */
 				free_page((void *)(uintptr_t)old_pt_phys);
+			} else if (old_ref == 0) {
+				/* Underflow: restore */
+				__sync_bool_compare_and_swap(
+					&page_of_phys(old_pt_phys)->ref_count,
+					0xFFFFFFFF, 0);
 			}
 		}
 	}
@@ -535,9 +557,13 @@ int map_huge_page_2mb(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64
 	pd[pd_idx] = (paddr & PTE_ADDR_MASK) | (flags & 0xFFF) | PTE_PRESENT | PTE_PS;
 	if (flags & PTE_NX) pd[pd_idx] |= PTE_NX;
 
-	/* Flush the entire 2MB TLB range */
+	/*
+	 * FIXED (v4.2.4): Use smp_tlb_shootdown() instead of local invlpg().
+	 * On SMP systems, other CPUs may cache the old 4KB page table
+	 * mapping.  Without broadcast invalidation, remote CPUs could
+	 * access the freed page table memory.  (BUG-HUGE-TLB) */
 	for (int i = 0; i < 512; i++) {
-		invlpg(vaddr + (uint64_t)i * 4096);
+		smp_tlb_shootdown(vaddr + (uint64_t)i * 4096);
 	}
 
 	spin_unlock(&pt_lock);
@@ -673,6 +699,17 @@ uint64_t clone_current_pml4(void) {
         uint64_t src_pdpte = src_pdpt0[j];
         if (!(src_pdpte & PTE_PRESENT)) {
             new_pdpt0[j] = 0;
+            continue;
+        }
+
+        /* FIXED (v4.2.4): Check for 1GB huge pages in PDPT.
+         * 1GB pages use the PS bit in PDPT entries (bit 7).
+         * These are uncommon in user space but must be handled
+         * to avoid misinterpreting the physical address as a
+         * page directory pointer.  (BUG-1GB-HUGE) */
+        if (src_pdpte & PTE_PS) {
+            /* 1GB huge page: copy as-is (shared, read-only for COW) */
+            new_pdpt0[j] = src_pdpte;
             continue;
         }
 
@@ -1168,7 +1205,12 @@ void pf_handler_c(uint64_t error_code) {
              */
             uint64_t new_pte = pte | PTE_RW;
             if (__sync_bool_compare_and_swap(&pt[pt_idx], pte, new_pte)) {
-                invlpg(cr2);
+                /* FIXED (v4.2.4): Use smp_tlb_shootdown() instead of
+                 * local invlpg().  On SMP systems, another CPU may have
+                 * a stale read-only TLB entry for this page.  Without
+                 * broadcast invalidation, the remote CPU would continue
+                 * to get #PF on write attempts.  (BUG-COW-TLB) */
+                smp_tlb_shootdown(cr2);
                 log_printf(LOG_LEVEL_DEBUG, "COW: single-ref page at %p, made writable\n",
                            (void *)cr2);
             }
@@ -1298,6 +1340,65 @@ unhandled:
 }
 
 /* ================================================================
+ * free_pagetable_subtree: Free a partial page table hierarchy
+ *
+ * FIXED (v4.2.4): This function was referenced by clone_current_pml4()
+ * at lines 682/706 but was never defined, causing a compilation
+ * failure.  It frees a PDPT subtree starting from the given index,
+ * used to clean up partially-built page tables on allocation failure
+ * during the COW deep-copy process.  (BUG-PG-SUBTREE)
+ *
+ * Parameters:
+ *   pdpt_phys  - Physical address of the PDPT to free
+ *   start_idx  - First PDPT index to free (typically 1, skipping kernel)
+ * ================================================================ */
+static void free_pagetable_subtree(uint64_t pdpt_phys, int start_idx) {
+    if (!pdpt_phys) return;
+
+    uint64_t *pdpt = phys_to_virt(pdpt_phys);
+
+    for (int j = start_idx; j < 512; ++j) {
+        uint64_t pdpte = pdpt[j];
+        if (!(pdpte & PTE_PRESENT)) continue;
+
+        uint64_t pd_phys = pdpte & PTE_ADDR_MASK;
+        uint64_t *pd = phys_to_virt(pd_phys);
+
+        for (int k = 0; k < 512; ++k) {
+            uint64_t pde = pd[k];
+            if (!(pde & PTE_PRESENT)) continue;
+
+            if (pde & PTE_PS) {
+                /* 2MB huge page: skip (kernel mappings) */
+                continue;
+            }
+
+            uint64_t pt_phys = pde & PTE_ADDR_MASK;
+            uint64_t *pt = phys_to_virt(pt_phys);
+
+            for (int l = 0; l < 512; ++l) {
+                uint64_t pte = pt[l];
+                if (!(pte & PTE_PRESENT)) continue;
+
+                uint64_t page_phys = pte & PTE_ADDR_MASK;
+                struct page *pg = page_of_phys(page_phys);
+                if (pg) {
+                    uint32_t old_ref = __sync_sub_and_fetch(&pg->ref_count, 1);
+                    if (old_ref == 0xFFFFFFFF) {
+                        __sync_bool_compare_and_swap(&pg->ref_count, 0xFFFFFFFF, 0);
+                    } else if (old_ref == 0) {
+                        free_page((void *)(uintptr_t)page_phys);
+                    }
+                }
+            }
+            free_page((void *)(uintptr_t)pt_phys);
+        }
+        free_page((void *)(uintptr_t)pd_phys);
+    }
+    free_page((void *)(uintptr_t)pdpt_phys);
+}
+
+/* ================================================================
  * free_pagetable: COW-aware recursive free
  *
  * For each leaf PTE: decrements ref_count. Only frees the physical
@@ -1310,12 +1411,35 @@ void free_pagetable(uint64_t pml4_phys) {
     uint64_t *pml4 = phys_to_virt(pml4_phys);
 
     /*
-     * Start from PML4[1]. PML4[0] points to the kernel's shared
-     * identity mapping (2MB huge pages) and must NOT be freed.
+     * FIXED (v4.2.4): Also free PML4[0]'s deep-copied subtree.
+     * After the COW fix (clone_current_pml4 deep-copy), PML4[0] no
+     * longer points to the kernel's shared PDPT.  Instead, it points
+     * to a process-private PDPT where PDPT[0] is the kernel identity
+     * mapping (shared) and PDPT[1..511] are user-space COW entries.
+     * We must free the user-space subtrees (PDPT[1..511]) using
+     * free_pagetable_subtree(), then free the PDPT page itself.
+     * Skipping PML4[0] would leak all user-space page tables on
+     * process exit, eventually exhausting memory.  (BUG-PML4-LEAK)
+     *
+     * We still skip the kernel-half (PML4[256..511]) which is shared
+     * across all processes.
      */
-    for (int i = 1; i < 256; ++i) {  /* user-half only, skip PML4[0] */
+    for (int i = 0; i < 256; ++i) {  /* user-half only */
         uint64_t pml4e = pml4[i];
         if (!(pml4e & PTE_PRESENT)) continue;
+
+        if (i == 0) {
+            /*
+             * PML4[0]: New deep-copied PDPT.  PDPT[0] is the kernel
+             * identity mapping (shared) — must NOT be freed.  Free
+             * only PDPT[1..511] using free_pagetable_subtree().
+             * Then free the PDPT page itself.
+             */
+            uint64_t pdpt0_phys = pml4e & PTE_ADDR_MASK;
+            free_pagetable_subtree(pdpt0_phys, 1);
+            free_page((void *)(uintptr_t)pdpt0_phys);
+            continue;
+        }
 
         uint64_t pdpt_phys = pml4e & PTE_ADDR_MASK;
         uint64_t *pdpt = phys_to_virt(pdpt_phys);
@@ -1349,8 +1473,17 @@ void free_pagetable(uint64_t pml4_phys) {
                     uint64_t page_phys = pte & PTE_ADDR_MASK;
                     struct page *pg = page_of_phys(page_phys);
                     if (pg) {
+                        /* FIXED (v4.2.4): Handle underflow from
+                         * __sync_sub_and_fetch.  If ref_count is
+                         * already 0, the decrement wraps to
+                         * 0xFFFFFFFF.  We detect this and restore
+                         * to 0 using CAS to prevent freeing a page
+                         * that is still in use.  (BUG-REF-UNDERFLOW) */
                         uint32_t old_ref = __sync_sub_and_fetch(&pg->ref_count, 1);
-                        if (old_ref == 0) {
+                        if (old_ref == 0xFFFFFFFF) {
+                            /* Underflow: restore to 0 */
+                            __sync_bool_compare_and_swap(&pg->ref_count, 0xFFFFFFFF, 0);
+                        } else if (old_ref == 0) {
                             free_page((void *)(uintptr_t)page_phys);
                         }
                     }

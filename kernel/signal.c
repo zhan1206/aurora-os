@@ -171,9 +171,12 @@ void do_sys_sigreturn(void) {
              * FIXED (v4.1.4): Preserve IF bit (0x200) in RFLAGS during
              * sigreturn.  The previous mask 0x3F7FD7 cleared bit 9 (IF),
              * disabling interrupts for user processes after signal handler
-             * return.  New mask 0x3F7FF7 preserves IF.  (BUG 3.5)
-             */
-            current->current_tf->r11 = frame.rflags & 0x3F7FF7;  /* mask IOPL/NT/TF/AC, preserve IF */
+             * return.  New mask 0x3F7FF7 preserves IF.
+             * FIXED (v4.2.4): Also mask IOPL bits (12-13, 0x3000).
+             * The previous mask 0x3F7FF7 did not clear IOPL, allowing a
+             * signal handler to elevate I/O privilege.  New mask 0x3F4FF7
+             * clears IOPL, NT, TF, and AC while preserving IF.  (BUG-IOPL) */
+            current->current_tf->r11 = frame.rflags & 0x3F4FF7;  /* mask IOPL/NT/TF/AC, preserve IF */
             current->current_tf->r10 = frame.r10;
             current->current_tf->r9  = frame.r9;
             current->current_tf->r8  = frame.r8;

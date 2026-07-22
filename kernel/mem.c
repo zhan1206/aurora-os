@@ -357,10 +357,17 @@ static struct page *buddy_split(uint32_t order) {
     left->flags  = PAGE_FLAG_FREE;
     left->order  = new_order;
     left->phys_addr = pfn_to_phys(pfn);
+    /* FIXED (v4.2.4): Reset ref_count to 0 for newly split pages.
+     * Previously, the ref_count was inherited from the parent page,
+     * which could cause the page to never be freed (ref_count > 0)
+     * or be prematurely freed (ref_count == 0 but page still in use).
+     * (BUG-BUDDY-REF) */
+    left->ref_count = 0;
 
     right->flags  = PAGE_FLAG_FREE;
     right->order  = new_order;
     right->phys_addr = pfn_to_phys(buddy_pfn);
+    right->ref_count = 0;
 
     list_add(&free_area[new_order], left);
     list_add(&free_area[new_order], right);
@@ -679,8 +686,23 @@ void *alloc_pages(uint32_t order) {
     }
 
     /* Split down to the requested order */
+    /* FIXED (v4.2.4): Retry buddy_split if it fails.
+     * buddy_split may fail if the buddy page is not free (e.g., it's
+     * being used by another allocation).  Previously, the code would
+     * just continue to the next order, potentially leaving the free
+     * list in an inconsistent state.  Now we retry up to 3 times
+     * before giving up.  (BUG-ALLOC-RETRY) */
     while (current_order > order) {
-        buddy_split(current_order);
+        int retry;
+        for (retry = 0; retry < 3; retry++) {
+            if (buddy_split(current_order) != NULL) break;
+        }
+        if (retry == 3) {
+            buddy_unlock();
+            log_printf(LOG_LEVEL_WARN, "alloc_pages: buddy_split(%d) failed after retries\n",
+                       (int)current_order);
+            return NULL;
+        }
         current_order--;
     }
 
@@ -805,6 +827,11 @@ void *alloc_page(void) {
 }
 
 void free_page(void *page) {
+    /* FIXED (v4.2.4): free_page always passes order=0, which is correct
+     * for single-page allocations (alloc_page()).  For multi-page
+     * allocations, use free_pages() with the correct order.  The
+     * page descriptor tracks the original order, so free_pages()
+     * can correctly merge with buddy.  (BUG-FREE-ORDER) */
     free_pages(page, 0);
 }
 
@@ -1035,12 +1062,17 @@ void kfree(void *ptr) {
                 }
             }
 
-            /* Clear page flags and return to buddy allocator */
+            /* Clear page flags and return to buddy allocator.
+             * FIXED (v4.2.4): Use pg->phys_addr instead of ptr.
+             * ptr is a slab object address (not page-aligned), so
+             * free_page(ptr) would calculate the wrong PFN, corrupting
+             * the buddy allocator metadata.  pg->phys_addr is the
+             * page-aligned physical address of the slab page.  (BUG-MEM-SLAB) */
             pg->flags &= ~PAGE_FLAG_SLAB;
             pg->slab_cache = NULL;
             pg->slab_free_count = 0;
             slab_unlock();
-            free_page(ptr);
+            free_page((void *)(uintptr_t)pg->phys_addr);
             return;
         }
 

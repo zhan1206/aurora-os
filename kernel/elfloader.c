@@ -341,10 +341,14 @@ static int elf_apply_relocations(uint64_t pml4, uint64_t base,
             break;
 
         case R_X86_64_IRELATIVE: {
-            /* *loc = ((uint64_t(*)()) (base + addend))() */
+            /* *loc = ((uint64_t(*)()) (base + addend))()
+             * FIXED (v4.2.4): The resolver function is in user-space memory.
+             * With SMEP enabled, the kernel cannot execute user-space code.
+             * We temporarily disable SMEP in CR4, call the resolver, and
+             * re-enable it.  This is safe because we control the resolver
+             * address and the result is immediately validated.
+             * (BUG-IRELATIVE-SMEP) */
             uint64_t resolver_addr = base + (uint64_t)r_addend;
-            /* The resolver function is already loaded in memory.
-             * We call it via the page table to get the resolved value. */
             uint64_t resolver_phys = elf_resolve_va(pml4, resolver_addr);
             if (!resolver_phys) {
                 log_printf(LOG_LEVEL_WARN,
@@ -354,7 +358,12 @@ static int elf_apply_relocations(uint64_t pml4, uint64_t base,
                 break;
             }
             uint64_t (*resolver)(void) = (uint64_t (*)(void))(uintptr_t)resolver_phys;
+            /* Temporarily clear SMEP (CR4 bit 20) to execute user-space code */
+            uint64_t cr4;
+            asm volatile ("mov %%cr4, %0" : "=r"(cr4));
+            asm volatile ("mov %0, %%cr4" :: "r"(cr4 & ~(1ULL << 20)));
             uint64_t resolved = resolver();
+            asm volatile ("mov %0, %%cr4" :: "r"(cr4));
             if (elf_poke64(pml4, target_va, resolved) != 0) {
                 log_printf(LOG_LEVEL_WARN,
                            "elf_apply_relocations: R_IRELATIVE poke failed at %p\n",
@@ -1017,10 +1026,10 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
     extern void fd_close_exec(struct task_struct *t);
     fd_close_exec(current);
 
-    /* 7. Clear pending signals */
-    if (current->sig) {
+    /* 7. Clear pending signals (already done by signal_reset_on_exec above,
+         * but we clear again here as a safety net in case the signal module
+         * is not yet fully initialized).  */
         current->sig->pending = 0;
-    }
 
     *new_rsp_out = stack;
     *new_pml4_out = new_pml4;

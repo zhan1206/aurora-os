@@ -126,10 +126,17 @@ struct task_struct *find_task_by_pid(int pid) {
      * task state.  Without the lock, the task could be freed between the
      * pid_table read and the state check (TOCTOU race), leading to UAF.
      * (BUG 4.3)
-     */
+     *
+     * FIXED (v4.2.4): Returned pointer is still valid only until the
+     * caller releases the lock.  Callers must increment the task's
+     * reference count if they need to hold the pointer beyond the
+     * lock scope.  (BUG-FIND-UAF) */
     spin_lock(&pid_lock);
     struct task_struct *t = pid_table[pid];
     if (t && t->state != TASK_DEAD && t->state != TASK_ZOMBIE) {
+        /* Increment ref_count so the task won't be freed while
+         * the caller holds the pointer */
+        __sync_fetch_and_add(&t->ref_count, 1);
         spin_unlock(&pid_lock);
         return t;
     }
@@ -906,6 +913,11 @@ retry:
                 node3 = node3->next;
             }
             if (!is_child) {
+                /* FIXED (v4.2.4): Set errno to ECHILD before returning.
+                 * Previously, waitpid returned -1 without setting errno,
+                 * causing the caller to see a stale errno value.
+                 * (BUG-WAITPID-ERRNO) */
+                current->t_errno = ECHILD;
                 return -1;  /* errno ECHILD set by caller */
             }
         }
@@ -960,6 +972,15 @@ void smp_enqueue_task(struct task_struct *t, int cpu_id) {
 
     struct run_queue *rq = &per_cpu_rq[cpu_id];
 
+    /* FIXED (v4.2.4): Acquire the remote CPU's run queue lock.
+     * Without this lock, concurrent modifications to the run queue
+     * (e.g., from the remote CPU's schedule() and this enqueue)
+     * would cause data races on the linked list and RB tree.
+     * We use irq_save/irq_restore to prevent deadlocks with
+     * interrupt handlers on the same CPU.  (BUG-SMP-ENQUEUE) */
+    uint64_t irq = irq_save();
+    spin_lock(&rq->lock);
+
     if (rq->head == NULL) {
         t->next = t;
         rq->head = t;
@@ -971,6 +992,9 @@ void smp_enqueue_task(struct task_struct *t, int cpu_id) {
     /* Also insert into the red-black tree */
     t->rb_node.key = t->vruntime;
     rb_insert(&rq->ready_tree, &t->rb_node);
+
+    spin_unlock(&rq->lock);
+    irq_restore(irq);
 }
 
 /*

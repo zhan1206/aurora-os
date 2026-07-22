@@ -12,9 +12,9 @@
 
 #define AURORAOS_MAJOR      4
 #define AURORAOS_MINOR      2
-#define AURORAOS_PATCH      3
+#define AURORAOS_PATCH      4
 
-#define AURORAOS_VERSION    "AuroraOS v4.2.3"
+#define AURORAOS_VERSION    "AuroraOS v4.2.4"
 
 /* These are set by the Makefile via -D flags */
 #ifndef BUILD_DATE

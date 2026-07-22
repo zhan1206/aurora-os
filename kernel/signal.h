@@ -58,8 +58,13 @@ struct sigframe {
 
 struct signal_state {
     struct sigaction actions[NSIG];
-    uint32_t         pending;
-    uint32_t         blocked;
+    /* FIXED (v4.2.4): Use uint64_t for pending/blocked bitmasks.
+     * With NSIG=32, bit 31 (1<<31) is within uint32_t range, but
+     * the expression (1U << 31) is undefined behavior in C (shifting
+     * into sign bit).  Using uint64_t avoids this UB and allows
+     * future expansion beyond 32 signals.  (BUG-SIG-UB) */
+    uint64_t         pending;
+    uint64_t         blocked;
     uint64_t         saved_rsp;  /* for sigreturn: original user RSP */
     uint64_t         saved_rip;  /* for sigreturn: original user RIP */
 };

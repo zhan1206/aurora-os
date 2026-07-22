@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-AuroraOS 提供 77 个兼容 Linux x86_64 ABI 的系统调用接口。系统调用通过 `syscall` 指令触发，参数传递遵循 System V AMD64 ABI 约定。本文档完整列出所有系统调用，完整列表见 `kernel/syscall.h`。
+AuroraOS 提供 85 个兼容 Linux x86_64 ABI 的系统调用接口。系统调用通过 `syscall` 指令触发，参数传递遵循 System V AMD64 ABI 约定。本文档完整列出所有系统调用，完整列表见 `kernel/syscall.h`。
 
 ### 调用约定
 

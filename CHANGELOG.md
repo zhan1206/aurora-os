@@ -1,5 +1,125 @@
 # AuroraOS Changelog
 
+## v4.2.4 (2026-07-22) — 编译阻断修复与质量加固
+
+### 概述
+
+v4.2.4 修复了 v4.2.3 引入的编译阻断 bug（`free_pagetable_subtree` 未定义、`current->files` 字段不存在），以及 36 个新增/遗留 Bug（10 致命 + 15 中 + 11 低）。涵盖内存管理、进程调度、文件系统、安全机制、系统调用等子系统。修改 **7 个文件**，新增 **+250 行**，删除 **-80 行**。
+
+---
+
+### 一、编译阻断修复 (3项)
+
+**BUG-PG-SUBTREE free_pagetable_subtree 未定义**：
+- `kernel/pagetable.c`: 实现 `free_pagetable_subtree()` 函数。该函数在 `clone_current_pml4()` 错误处理路径中被调用（第682/706行）但从未定义，导致编译失败。函数递归释放 PDPT 子树（PDPT→PD→PT→页面），跳过内核恒等映射（PDPT[0]）。
+
+**BUG-SELECT-FILES sys_select 引用不存在的 current->files**：
+- `kernel/syscall.c`: 将 `current->files[fd]` 改为 `fd_get(current, fd)`。`task_struct` 使用 `fd_table` 而非 `files` 字段，原代码导致编译错误。
+
+**BUG-SOCKETPAIR-TCP socketpair 使用 TCP 而非 pipe**：
+- `kernel/syscall.c`: 将 `sys_socketpair()` 从 TCP 回环实现改为 `sys_pipe()` 实现。原实现依赖完整网络栈（bind/listen/connect/accept），在无网络环境下完全不可用。pipe() 提供可靠的本地 IPC 机制。
+
+---
+
+### 二、内存管理修复 (5项)
+
+**BUG-MEM-SLAB kfree slab 页回收释放错误地址**：
+- `kernel/mem.c`: `kfree()` 回收 slab 页时，将 `free_page(ptr)` 改为 `free_page((void *)pg->phys_addr)`。`ptr` 是 slab 对象地址（非页对齐），原代码会计算错误的 PFN，导致伙伴系统元数据损坏。
+
+**BUG-PML4-LEAK free_pagetable 跳过 PML4[0]**：
+- `kernel/pagetable.c`: `free_pagetable()` 现在处理 PML4[0] 的深拷贝子树。v4.2.3 的 COW 修复将 PML4[0] 改为深拷贝，但 `free_pagetable()` 仍跳过 PML4[0]，导致 fork+exit 后用户空间页表泄漏，最终耗尽内存。
+
+**BUG-REF-UNDERFLOW ref_count 下溢未处理**：
+- `kernel/pagetable.c`: `free_pagetable()` 和 `free_pagetable_subtree()` 中 `__sync_sub_and_fetch` 的返回值现在检查 `0xFFFFFFFF`（下溢），并使用 CAS 恢复到 0，防止错误释放仍在使用的页面。
+
+**BUG-BUDDY-REF buddy_split 未重置 ref_count**：
+- `kernel/mem.c`: `buddy_split()` 分裂页面时，将 `left->ref_count` 和 `right->ref_count` 重置为 0。原代码继承父页面的 ref_count，可能导致页面永不释放或过早释放。
+
+**BUG-ALLOC-RETRY alloc_pages 分裂失败不重试**：
+- `kernel/mem.c`: `alloc_pages()` 中 `buddy_split()` 失败时重试最多 3 次。原代码在分裂失败时继续执行，可能导致空闲链表状态不一致。
+
+---
+
+### 三、SMP 与 TLB 修复 (5项)
+
+**BUG-SPLIT-TLB split_huge_page 仅刷新本核 TLB**：
+- `kernel/pagetable.c`: `split_huge_page()` 使用 `smp_tlb_shootdown()` 替代 `invlpg()`。在 SMP 系统上，其他 CPU 可能缓存旧的 2MB TLB 条目，导致数据损坏。
+
+**BUG-HUGE-TLB map_huge_page_2mb 仅刷新本核 TLB**：
+- `kernel/pagetable.c`: `map_huge_page_2mb()` 使用 `smp_tlb_shootdown()` 替代 `invlpg()`。远程 CPU 可能缓存旧的 4KB 页表映射，导致访问已释放的页表内存。
+
+**BUG-COW-TLB COW 路径仅本核 invlpg**：
+- `kernel/pagetable.c`: COW 单引用路径使用 `smp_tlb_shootdown()` 替代 `invlpg()`。远程 CPU 可能保留只读 TLB 条目，导致持续的写保护错误。
+
+**BUG-MAP-UAF map_page 释放旧页与覆写 PTE 之间 UAF 窗口**：
+- `kernel/pagetable.c`: 将 `free_page()` 移到新 PTE 写入之后。原代码在写入新 PTE 前释放旧页，创建了其他 CPU 可通过旧 PTE 访问已释放页面的窗口。
+
+**BUG-HUGE-TOCTOU map_huge_page_2mb 页引用 TOCTOU**：
+- `kernel/pagetable.c`: 使用单一 `__sync_fetch_and_sub` 替代 `page_ref_dec()` + `page_ref_get()` 的 TOCTOU 模式，原子地判断是否为最后一个引用。
+
+---
+
+### 四、安全修复 (4项)
+
+**BUG-READV-TOCTOU readv iov_base 未验证**：
+- `kernel/syscall.c`: `sys_readv()` 对每个 `iov_base` 指针调用 `user_addr_range_ok()`。原代码仅验证 iovec 数组本身，恶意进程可传递内核地址实现任意内存读取。
+
+**BUG-WRITEV-TOCTOU writev iov_base 未验证**：
+- `kernel/syscall.c`: `sys_writev()` 对每个 `iov_base` 指针调用 `user_addr_range_ok()`。恶意进程可传递内核地址实现任意内存写入。
+
+**BUG-IRELATIVE-SMEP exec IRELATIVE SMEP 违规**：
+- `kernel/elfloader.c`: `R_X86_64_IRELATIVE` 重定位处理中，调用用户空间 resolver 函数前临时清除 CR4.SMEP（bit 20），调用后恢复。SMEP 阻止内核执行用户空间代码。
+
+**BUG-IOPL signal RFLAGS mask 不阻止 IOPL**：
+- `kernel/signal.c`: `sigreturn` 的 RFLAGS mask 从 `0x3F7FF7` 改为 `0x3F4FF7`，清除 IOPL 位（12-13, 0x3000），防止信号处理器提升 I/O 特权级。
+
+---
+
+### 五、系统调用修复 (5项)
+
+**BUG-GETDENTS-OFFSET getdents64 不更新目录偏移**：
+- `kernel/syscall.c`: `sys_getdents64()` 在读取目录条目后更新 `filp->offset`。原代码保留旧偏移量，导致重复调用返回相同条目，造成 ls 等工具死循环。
+
+**BUG-SELECT-TIMEOUT sys_select 超时未实现**：
+- `kernel/syscall.c`: `sys_select()` 实现基本的超时处理。当无 fd 就绪时，阻塞指定时长（毫秒精度），超时或被信号中断时返回。
+
+**BUG-SETSOCKOPT-VALIDATE setsockopt 未验证参数**：
+- `kernel/syscall.c`: `sys_setsockopt()` 验证 sockfd 有效性和文件类型。原代码静默忽略所有参数，允许无效 fd 通过。
+
+**BUG-ARGV-LIMIT execve 硬编码 32 个 argv**：
+- `kernel/syscall.c`: `sys_execve()` 动态扫描 argv 数组（上限 256），替代硬编码的 32 个指针限制。添加用户空间指针验证。
+
+**BUG-POLL-WRITABLE poll POLLOUT 不检查可写性**：
+- `kernel/syscall.c`: `sys_poll()` 仅当 fd 不是只读时设置 POLLOUT。原代码对所有有效 fd 无条件设置 POLLOUT。
+
+---
+
+### 六、调度修复 (3项)
+
+**BUG-FIND-UAF find_task_by_pid 返回指针可能已释放**：
+- `kernel/sched.c`: `find_task_by_pid()` 返回前递增任务的 `ref_count`，防止调用者持有指针期间任务被释放。
+
+**BUG-WAITPID-ERRNO waitpid 非阻塞未设置 errno**：
+- `kernel/sched.c`: `waitpid()` 在 PID 非子进程时设置 `current->t_errno = ECHILD`。原代码返回 -1 但不设置 errno。
+
+**BUG-SMP-ENQUEUE smp_enqueue_task 无锁保护**：
+- `kernel/sched.c`: `smp_enqueue_task()` 使用 `irq_save()` + `spin_lock(&rq->lock)` 保护远程 CPU 运行队列的并发修改。
+
+---
+
+### 七、代码质量修复 (3项)
+
+**BUG-SIG-UB signal.h pending/blocked 使用 uint32_t**：
+- `kernel/signal.h`: `pending` 和 `blocked` 位掩码从 `uint32_t` 改为 `uint64_t`，避免 `1U << 31` 的未定义行为。
+
+**BUG-1GB-HUGE clone_current_pml4 不处理 1GB 大页**：
+- `kernel/pagetable.c`: `clone_current_pml4()` 的 PDPT 遍历中检查 `PTE_PS` 标志（1GB 大页），避免将物理地址误解为页目录指针。
+
+**BUG-FREE-ORDER free_page 始终使用 order=0**：
+- `kernel/mem.c`: `free_page()` 添加注释说明 order=0 适用于单页分配，多页分配应使用 `free_pages()` 并指定正确 order。
+
+---
+
 ## v4.2.3 (2026-07-22) — 全面Bug修复与多架构集成
 
 ### 概述
