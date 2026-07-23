@@ -422,6 +422,10 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
     /* Now safe to free the old page — the PTE already points to the new page */
     if (old_phys_to_free) {
         free_page((void *)(uintptr_t)old_phys_to_free);
+        /* FIXED (v4.2.5) BUG 3: Broadcast TLB shootdown after freeing the
+         * old page. Other CPUs may still have the old PTE cached in their
+         * TLB and could access the just-freed page. */
+        smp_tlb_shootdown(vaddr);
     }
 
     invlpg(vaddr);
@@ -688,7 +692,13 @@ uint64_t clone_current_pml4(void) {
 
     /* Allocate a new PDPT for deep-copying user-space entries */
     uint64_t new_pdpt0_phys = alloc_table_page();
-    if (!new_pdpt0_phys) goto fail;
+    if (!new_pdpt0_phys) {
+        /* FIXED (v4.2.5) BUG 1: Prevent free_pagetable() from freeing
+         * the kernel's shared PDPT. dst_pml4[0] was set to src_pml4[0]
+         * at line 681, so we must clear it before goto fail. */
+        dst_pml4[0] = 0;
+        goto fail;
+    }
     uint64_t *new_pdpt0 = phys_to_virt(new_pdpt0_phys);
 
     /* Copy PDPT[0] (kernel identity mapping) from the original */
@@ -717,6 +727,9 @@ uint64_t clone_current_pml4(void) {
         if (!new_pd_phys) {
             /* Free the partially-built PDPT */
             free_pagetable_subtree(new_pdpt0_phys, 1);
+            /* FIXED (v4.2.5) BUG 1: Prevent free_pagetable() from freeing
+             * the kernel's shared PDPT. */
+            dst_pml4[0] = 0;
             goto fail;
         }
         new_pdpt0[j] = new_pd_phys | PTE_STRUCT_FLAGS;
@@ -741,6 +754,9 @@ uint64_t clone_current_pml4(void) {
             uint64_t new_pt_phys = alloc_table_page();
             if (!new_pt_phys) {
                 free_pagetable_subtree(new_pdpt0_phys, 1);
+                /* FIXED (v4.2.5) BUG 1: Prevent free_pagetable() from freeing
+                 * the kernel's shared PDPT. */
+                dst_pml4[0] = 0;
                 goto fail;
             }
             dst_pd[k] = new_pt_phys | PTE_STRUCT_FLAGS;
@@ -1262,7 +1278,10 @@ void pf_handler_c(uint64_t error_code) {
                         free_page((void *)(uintptr_t)phys_page);
                     }
                 }
-                invlpg(cr2);
+                /* FIXED (v4.2.5) BUG 2: Use smp_tlb_shootdown() instead of
+                 * local invlpg(). On SMP systems, other CPUs may still
+                 * have the old COW page cached in their TLB. */
+                smp_tlb_shootdown(cr2);
                 perf_inc(PERF_COW_COUNT);
                 log_printf(LOG_LEVEL_DEBUG, "COW: resolved at %p, new phys=%p\n",
                            (void *)cr2, new_page);
@@ -1360,6 +1379,11 @@ static void free_pagetable_subtree(uint64_t pdpt_phys, int start_idx) {
     for (int j = start_idx; j < 512; ++j) {
         uint64_t pdpte = pdpt[j];
         if (!(pdpte & PTE_PRESENT)) continue;
+
+        /* FIXED (v4.2.5) BUG 4: 1GB huge pages in PDPT entries have the
+         * PS bit set and should not be treated as page directories.
+         * Skip them to avoid misinterpreting the physical address. */
+        if (pdpte & PTE_PS) continue;
 
         uint64_t pd_phys = pdpte & PTE_ADDR_MASK;
         uint64_t *pd = phys_to_virt(pd_phys);

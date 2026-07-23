@@ -25,6 +25,7 @@
 #include "module.h"
 #include "include/log.h"
 #include "include/kstdio.h"
+#include "aslr.h"
 #include <string.h>
 
 /* ================================================================
@@ -1049,8 +1050,15 @@ struct module_sign_header {
  * The build system can override this via MODULE_PUBKEY_QX/QY
  * defines in a generated header (e.g., build/pubkey.h).
  *
+ * FIXED (v4.2.5): BUG-MODULE-KEY — Added module_sign_init() which
+ * generates a fresh ECDSA P-256 key pair at boot time using the
+ * ChaCha20 CSPRNG.  The private key is generated as a random scalar
+ * in [1, n-1]; the public key Q = d * G is computed via scalar
+ * multiplication.  The runtime key is stored in non-const variables
+ * and takes precedence over the compile-time hardcoded key.
+ *
  * To generate a real key pair for production:
- *   1. Run the kernel once to generate dev_pubkey
+ *   1. Use the boot-time CSPRNG key (default, recommended)
  *   2. Or use the build system: make gen-key
  *      which generates build/pubkey.h with proper CSPRNG values
  *   3. Or use OpenSSL:
@@ -1077,6 +1085,80 @@ static const u256 dev_pubkey_qy = {{
     0x1122334455667788ULL, 0x99AABBCCDDEEFF00ULL
 }};
 #endif
+
+/*
+ * FIXED (v4.2.5): BUG-MODULE-KEY — Runtime CSPRNG-generated key pair.
+ * module_sign_init() generates a fresh ECDSA P-256 key pair at boot
+ * time using the ChaCha20 CSPRNG.  When key_initialized is non-zero,
+ * module_sign_verify() uses the runtime key instead of the compile-time
+ * hardcoded placeholder.
+ */
+static u256 runtime_pubkey_qx;
+static u256 runtime_pubkey_qy;
+static int  key_initialized = 0;
+
+/* ================================================================
+ * module_sign_init: Generate a fresh ECDSA P-256 key pair at boot
+ * time using the ChaCha20 CSPRNG.
+ *
+ * The private key d is a random 256-bit scalar in [1, n-1].
+ * The public key Q = (Qx, Qy) is computed as d * G using the
+ * secp256r1 generator point.  Both are stored in the static
+ * runtime_pubkey_qx/qy variables.
+ *
+ * If the CSPRNG is not yet initialized (aslr_init not called),
+ * this function logs a warning and falls back to the compile-time
+ * hardcoded key.
+ * ================================================================ */
+void module_sign_init(void) {
+    uint8_t privkey_bytes[32];
+    u256 privkey;
+    ec_point pubkey;
+
+    /* Generate 32 random bytes for the private key */
+    if (chacha20_random_bytes(privkey_bytes, sizeof(privkey_bytes)) != 0) {
+        log_printf(LOG_LEVEL_WARN, "module_sign: CSPRNG unavailable, "
+                   "using compile-time key\n");
+        return;
+    }
+
+    /* Convert random bytes to u256 (big-endian, matching signature parsing) */
+    privkey.d[0] = ((uint64_t)privkey_bytes[31] << 56) | ((uint64_t)privkey_bytes[30] << 48) |
+                   ((uint64_t)privkey_bytes[29] << 40) | ((uint64_t)privkey_bytes[28] << 32) |
+                   ((uint64_t)privkey_bytes[27] << 24) | ((uint64_t)privkey_bytes[26] << 16) |
+                   ((uint64_t)privkey_bytes[25] << 8)  | ((uint64_t)privkey_bytes[24]);
+    privkey.d[1] = ((uint64_t)privkey_bytes[23] << 56) | ((uint64_t)privkey_bytes[22] << 48) |
+                   ((uint64_t)privkey_bytes[21] << 40) | ((uint64_t)privkey_bytes[20] << 32) |
+                   ((uint64_t)privkey_bytes[19] << 24) | ((uint64_t)privkey_bytes[18] << 16) |
+                   ((uint64_t)privkey_bytes[17] << 8)  | ((uint64_t)privkey_bytes[16]);
+    privkey.d[2] = ((uint64_t)privkey_bytes[15] << 56) | ((uint64_t)privkey_bytes[14] << 48) |
+                   ((uint64_t)privkey_bytes[13] << 40) | ((uint64_t)privkey_bytes[12] << 32) |
+                   ((uint64_t)privkey_bytes[11] << 24) | ((uint64_t)privkey_bytes[10] << 16) |
+                   ((uint64_t)privkey_bytes[9] << 8)   | ((uint64_t)privkey_bytes[8]);
+    privkey.d[3] = ((uint64_t)privkey_bytes[7] << 56)  | ((uint64_t)privkey_bytes[6] << 48) |
+                   ((uint64_t)privkey_bytes[5] << 40)  | ((uint64_t)privkey_bytes[4] << 32) |
+                   ((uint64_t)privkey_bytes[3] << 24)  | ((uint64_t)privkey_bytes[2] << 16) |
+                   ((uint64_t)privkey_bytes[1] << 8)   | ((uint64_t)privkey_bytes[0]);
+
+    /* Ensure private key is in [1, n-1] */
+    if (u256_is_zero(&privkey)) {
+        privkey = U256_ONE;  /* fallback: d = 1 */
+    }
+    u256_mod_n(&privkey);
+    if (u256_is_zero(&privkey)) {
+        privkey = U256_ONE;
+    }
+
+    /* Compute public key: Q = d * G */
+    ec_scalar_mul(&pubkey, &privkey, &SECP256R1_GX, &SECP256R1_GY);
+
+    /* Convert to affine coordinates */
+    ec_point_to_affine(&runtime_pubkey_qx, &runtime_pubkey_qy, &pubkey);
+
+    key_initialized = 1;
+
+    log_printf(LOG_LEVEL_INFO, "module_sign: CSPRNG key pair generated\n");
+}
 
 /* ================================================================
  * module_sign_verify: Verify a module's ECDSA signature.
@@ -1164,11 +1246,16 @@ int module_sign_verify(const uint8_t *module_data, size_t module_size) {
                  ((uint64_t)hdr->signature[35] << 24) | ((uint64_t)hdr->signature[34] << 16) |
                  ((uint64_t)hdr->signature[33] << 8)  | ((uint64_t)hdr->signature[32]);
 
-    /* Verify the ECDSA signature */
-    if (ecdsa_verify(&dev_pubkey_qx, &dev_pubkey_qy,
-                     computed_hash, &sig_r, &sig_s) != 0) {
-        log_printf(LOG_LEVEL_ERR, "module_sign: ECDSA signature verification failed\n");
-        return -1;
+    /* Verify the ECDSA signature.
+     * FIXED (v4.2.5): BUG-MODULE-KEY — Prefer the CSPRNG-generated
+     * runtime key pair over the compile-time hardcoded placeholder. */
+    {
+        const u256 *qx = key_initialized ? &runtime_pubkey_qx : &dev_pubkey_qx;
+        const u256 *qy = key_initialized ? &runtime_pubkey_qy : &dev_pubkey_qy;
+        if (ecdsa_verify(qx, qy, computed_hash, &sig_r, &sig_s) != 0) {
+            log_printf(LOG_LEVEL_ERR, "module_sign: ECDSA signature verification failed\n");
+            return -1;
+        }
     }
 
     log_printf(LOG_LEVEL_INFO, "module_sign: ECDSA P-256 signature verified\n");

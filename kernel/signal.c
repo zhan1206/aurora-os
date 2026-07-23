@@ -45,6 +45,8 @@ int do_sys_kill(int pid, int sig) {
         /* Protect init: only SIGKILL, SIGSTOP, SIGCHLD allowed */
         if (target->pid == 1) {
             if (sig != SIGKILL && sig != SIGSTOP && sig != SIGCHLD) {
+                /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
+                __sync_fetch_and_sub(&target->ref_count, 1);
                 return -1;
             }
         }
@@ -64,6 +66,8 @@ int do_sys_kill(int pid, int sig) {
         target->sig = signal_alloc();
         if (!target->sig) {
             spin_unlock(&signal_lock);
+            /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
+            __sync_fetch_and_sub(&target->ref_count, 1);
             return -1;
         }
         target->sig->pending |= (1U << sig);
@@ -83,12 +87,16 @@ int do_sys_kill(int pid, int sig) {
                  */
                 spin_unlock(&signal_lock);
                 target->state = TASK_READY;
+                /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
+                __sync_fetch_and_sub(&target->ref_count, 1);
                 return 0;
             }
         }
     }
     spin_unlock(&signal_lock);
 
+    /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
+    __sync_fetch_and_sub(&target->ref_count, 1);
     return 0;
 }
 
@@ -175,8 +183,12 @@ void do_sys_sigreturn(void) {
              * FIXED (v4.2.4): Also mask IOPL bits (12-13, 0x3000).
              * The previous mask 0x3F7FF7 did not clear IOPL, allowing a
              * signal handler to elevate I/O privilege.  New mask 0x3F4FF7
-             * clears IOPL, NT, TF, and AC while preserving IF.  (BUG-IOPL) */
-            current->current_tf->r11 = frame.rflags & 0x3F4FF7;  /* mask IOPL/NT/TF/AC, preserve IF */
+             * clears IOPL, NT, TF, and AC while preserving IF.  (BUG-IOPL)
+             * FIXED (v4.2.5): BUG-SIG-RFLAGS — The mask 0x3F4FF7 incorrectly
+             * preserved TF (bit 8, 0x100), NT (bit 14, 0x4000), and AC
+             * (bit 18, 0x40000).  Corrected mask 0x3F0CF7 clears these bits
+             * while preserving IF (bit 9). */
+            current->current_tf->r11 = frame.rflags & 0x3F0CF7;  /* mask IOPL/NT/TF/AC, preserve IF */
             current->current_tf->r10 = frame.r10;
             current->current_tf->r9  = frame.r9;
             current->current_tf->r8  = frame.r8;

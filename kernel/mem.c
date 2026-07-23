@@ -686,20 +686,16 @@ void *alloc_pages(uint32_t order) {
     }
 
     /* Split down to the requested order */
-    /* FIXED (v4.2.4): Retry buddy_split if it fails.
-     * buddy_split may fail if the buddy page is not free (e.g., it's
-     * being used by another allocation).  Previously, the code would
-     * just continue to the next order, potentially leaving the free
-     * list in an inconsistent state.  Now we retry up to 3 times
-     * before giving up.  (BUG-ALLOC-RETRY) */
+    /* FIXED (v4.2.5): BUG-ALLOC-RETRY — remove useless retry loop.
+     * The retry loop checked buddy_split(current_order) != NULL but
+     * buddy_split is called while holding buddy_lock.  If free_area[order]
+     * is empty, it cannot become non-empty until the lock is released,
+     * so retrying is pointless.  Do a single split attempt and fail
+     * cleanly if it doesn't succeed. */
     while (current_order > order) {
-        int retry;
-        for (retry = 0; retry < 3; retry++) {
-            if (buddy_split(current_order) != NULL) break;
-        }
-        if (retry == 3) {
+        if (buddy_split(current_order) == NULL) {
             buddy_unlock();
-            log_printf(LOG_LEVEL_WARN, "alloc_pages: buddy_split(%d) failed after retries\n",
+            log_printf(LOG_LEVEL_WARN, "alloc_pages: buddy_split(%d) failed\n",
                        (int)current_order);
             return NULL;
         }
@@ -1021,8 +1017,9 @@ void kfree(void *ptr) {
         /* Slab object: return to free list */
         struct slab_cache *cache = (struct slab_cache*)pg->slab_cache;
         if (!cache) {
-            /* Page was allocated but cache pointer lost, free as page */
-            free_page(ptr);
+            /* FIXED (v4.2.5): BUG-KFREE-EARLY — use page-aligned physical
+             * address instead of slab object address */
+            free_page((void *)(uintptr_t)pg->phys_addr);
             return;
         }
 

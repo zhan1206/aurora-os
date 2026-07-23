@@ -1,5 +1,106 @@
 # AuroraOS Changelog
 
+## v4.2.5 (2026-07-22) — 致命Bug修复与安全加固
+
+### 概述
+
+v4.2.5 修复了 v4.2.4 遗留的 5 个部分修复项和 44 个新发现 Bug（12 致命 + 18 中 + 14 低）。重点修复了 clone_current_pml4 失败路径崩溃、TCP 校验和字节序不匹配、ip_send 堆溢出、NVMe/VirtIO 内存屏障缺失等致命问题，以及 VFS/pipe SMAP 违规、seccomp 过滤器替换、信号 RFLAGS 掩码、DNS 查询 ID 可预测等安全漏洞。修改 **20+ 个文件**，新增 **+350 行**，删除 **-60 行**。
+
+---
+
+### 一、P0 致命修复 (12项)
+
+**BUG-CLONE-FAIL clone_current_pml4 失败路径释放内核 PDPT**：
+- `kernel/pagetable.c`: 在三个 `goto fail` 前设置 `dst_pml4[0] = 0`，防止 free_pagetable 释放内核共享 PDPT，避免 fork() 失败时三重故障崩溃。
+
+**BUG-KFREE-EARLY kfree 早期返回路径 free_page(ptr)**：
+- `kernel/mem.c`: 将 `free_page(ptr)` 改为 `free_page((void *)pg->phys_addr)`，使用页对齐物理地址，避免伙伴系统元数据损坏。
+
+**BUG-COW-INVLPG COW 多引用路径仅本核 invlpg**：
+- `kernel/pagetable.c`: 将 COW 多引用路径的 `invlpg(cr2)` 改为 `smp_tlb_shootdown(cr2)`，防止 SMP 下远程 CPU 访问已释放页面。
+
+**BUG-MAP-INVLPG map_page 覆写 PTE 后仅本核 invlpg**：
+- `kernel/pagetable.c`: 在 map_page 释放旧页后添加 `smp_tlb_shootdown(vaddr)`，防止远程 CPU 通过陈旧 TLB 访问已释放物理页。
+
+**BUG-1GB-HUGE-SUBTREE free_pagetable_subtree 不处理 1GB 大页**：
+- `kernel/pagetable.c`: 在 PDPT 遍历中检查 `PTE_PS` 标志，跳过 1GB 大页条目，避免将其当作页目录指针释放。
+
+**BUG-EXEC-NULL exec_elf_replace NULL 解引用 current->sig**：
+- `kernel/elfloader.c`: 用 `if (current->sig)` 包裹 `current->sig->pending = 0`，防止信号模块未初始化时 exec() 内核恐慌。
+
+**BUG-IP-OVERFLOW ip_send 堆缓冲区溢出**：
+- `kernel/net/net.c`: 当 `len > 65515` 时截断 len 为 65515，确保 `sizeof(ipv4_hdr) + len ≤ 65535`，消除 20 字节堆溢出。
+
+**BUG-TCP-CSUM-ENDIAN TCP 校验和字节序不匹配**：
+- `kernel/net/net.c`: 移除 `tcp_handle_packet` 校验和验证中的 `ntohs()` 调用，直接对原始网络字节序值求和，与 `tcp_udp_checksum` 计算方式一致。修复后所有外部 TCP 连接不再被静默丢弃。
+
+**BUG-NVME-BARRIER NVMe 驱动完全缺少内存屏障**：
+- `kernel/nvme.c`: 在 12 处关键位置添加 `__sync_synchronize()`：门铃写入前（3处）、寄存器写入后（5处）、寄存器读取前（4处），防止 MMIO 重排导致设备状态不一致。
+
+**BUG-VIRTIO-BARRIER VirtIO 块驱动缺少内存屏障**：
+- `kernel/virtio_blk.c`: 在 8 处关键位置添加 `__sync_synchronize()`：设备状态读写、特性选择、队列设置、门铃通知前后。
+
+**BUG-FIND-REFCOUNT find_task_by_pid 引用计数永不释放**：
+- `kernel/signal.c`、`kernel/capability.c`、`kernel/syscall.c`: 在所有 find_task_by_pid 调用者的返回路径上添加 `__sync_fetch_and_sub(&target->ref_count, 1)`，防止僵尸进程积累导致内存耗尽。
+
+---
+
+### 二、P1 安全修复 (6项)
+
+**BUG-PIPE-SMAP pipe_read/pipe_write 使用 memcpy 访问用户空间**：
+- `kernel/pipe.c`: 在 pipe_read 和 pipe_write 的 memcpy 调用前后包裹 `stac()`/`clac()`，防止 SMAP 违规导致内核崩溃。
+
+**BUG-SIG-RFLAGS 信号 RFLAGS 未清除 TF/NT/AC**：
+- `kernel/signal.c`: RFLAGS 掩码从 `0x3F4FF7` 改为 `0x3F0CF7`，清除 TF(0x100)、NT(0x4000)、AC(0x40000) 位。
+
+**BUG-SECCOMP-REPLACE seccomp 过滤器可被替换**：
+- `kernel/seccomp.c`: seccomp_set_filter 在已有过滤器时返回 -EACCES，防止恶意进程替换为更宽松过滤器。
+
+**BUG-DNS-ID DNS 查询 ID 可预测**：
+- `kernel/net/dns.c`: 使用 ChaCha20 CSPRNG 生成随机查询 ID，替代可预测的递增计数器。
+
+**BUG-MODULE-KEY 模块签名公钥占位符**：
+- `kernel/module_sign.c`、`kernel/module.c`、`kernel/module.h`: 添加 `module_sign_init()` 函数，使用 ChaCha20 CSPRNG 在启动时生成 ECDSA P-256 密钥对，替代硬编码占位符。
+
+**BUG-SMP-DEQUEUE smp_dequeue_task 无锁保护**：
+- `kernel/sched.c`: 添加 `irq_save()`/`spin_lock(&rq->lock)` 保护远程 CPU 运行队列的并发修改。
+
+---
+
+### 三、中低严重度修复 (7项)
+
+**BUG-FAT32-LOCK fat32_free_cluster_chain 完全无锁**：
+- `kernel/fat32.c`: 添加静态 `fat32_chain_lock` 保护集群链的遍历和修改。
+
+**BUG-EXT2-WRITELOCK ext2 write_lock 未初始化**：
+- `kernel/ext2.c`: 在 `ext2_read_inode_sbi()` 和 `ext2_dir_lookup()` 中初始化 `spin_init(&info->write_lock)`。
+
+**BUG-EXT2-BOUNDS ext2 块/inode 号未验证设备边界**：
+- `kernel/ext2.c`: 在 10 处块/inode 访问前添加 `>= s_blocks_count`/`> s_inodes_count` 边界检查。
+
+**BUG-VFS-REFCOUNT vfs_close 未释放 inode 引用计数**：
+- `kernel/vfs.c`: 在 vfs_close 中最后一个文件引用释放时调用 `vfs_iput()`，平衡 vfs_lookup 的引用计数。
+
+**BUG-ARP-TOCTOU ARP 缓存 TOCTOU 竞态**：
+- `kernel/net/net.c`: `arp_cache_find()` 改为在持有锁期间拷贝 MAC 地址到调用者缓冲区，消除悬空指针窗口。
+
+**BUG-BPF-SHIFT seccomp BPF 移位 >= 32 未定义行为**：
+- `kernel/seccomp.c`: 四个 BPF 移位操作添加 `k < 32` 检查，超过时结果为 0。
+
+**BUG-ALLOC-RETRY alloc_pages 重试循环无效**：
+- `kernel/mem.c`: 移除无效的 buddy_split 重试循环，改为单次尝试。
+
+**BUG-NVME-LEAK NVMe 队列泄漏**：
+- `kernel/nvme.c`: 在 4 处队列初始化失败路径上添加 `nvme_queue_free()` 清理。
+
+**BUG-NVME-CID NVMe CID 计数器非原子**：
+- `kernel/nvme.c`: 添加 `nvme_alloc_cid()` 函数，使用 `__sync_fetch_and_add` 原子递增 CID。
+
+**BUG-VIRTIO-LEAK VirtIO 描述符链泄漏**：
+- `kernel/virtio_blk.c`: 修复 virtq_add_chain 失败时的描述符回收逻辑，使用实际分配索引而非顺序索引。
+
+---
+
 ## v4.2.4 (2026-07-22) — 编译阻断修复与质量加固
 
 ### 概述

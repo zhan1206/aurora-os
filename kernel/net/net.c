@@ -188,20 +188,27 @@ static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 static int arp_age_counter = 0;
 static spinlock_t arp_lock;  /* FIXED (v4.2.1): protect ARP cache (BUG-NET-M6) */
 
-static struct arp_entry *arp_cache_find(const uint8_t ip[4]) {
+/*
+ * FIXED (v4.2.5): BUG-ARP-TOCTOU — arp_cache_find now copies the MAC
+ * address into the caller's buffer while holding arp_lock, instead of
+ * returning a pointer to the internal cache entry after releasing the
+ * lock.  This prevents a TOCTOU race where the entry could be evicted
+ * or modified between the lookup and the caller's use of the pointer.
+ * Returns 0 on success (MAC copied), -1 if not found.
+ */
+static int arp_cache_find(const uint8_t ip[4], uint8_t mac_out[6]) {
     int i;
-    /* FIXED (v4.2.1): ARP cache operations must be protected by arp_lock
-     * to prevent SMP race conditions.  (BUG-NET-M6) */
     spin_lock(&arp_lock);
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && memcmp(arp_cache[i].ip, ip, 4) == 0) {
             arp_cache[i].age = ++arp_age_counter;
+            memcpy(mac_out, arp_cache[i].mac, 6);
             spin_unlock(&arp_lock);
-            return &arp_cache[i];
+            return 0;
         }
     }
     spin_unlock(&arp_lock);
-    return NULL;
+    return -1;
 }
 
 static struct arp_entry *arp_cache_add(const uint8_t ip[4],
@@ -276,9 +283,9 @@ static void arp_send_request(struct net_if *iface, const uint8_t target_ip[4]) {
 }
 
 int arp_lookup(const uint8_t ip[4], uint8_t mac_out[6]) {
-    struct arp_entry *entry = arp_cache_find(ip);
-    if (entry) {
-        memcpy(mac_out, entry->mac, 6);
+    /* FIXED (v4.2.5): BUG-ARP-TOCTOU — arp_cache_find now copies the MAC
+     * atomically while holding arp_lock, eliminating the TOCTOU race. */
+    if (arp_cache_find(ip, mac_out) == 0) {
         return 0;
     }
 
@@ -377,8 +384,16 @@ int ip_send(const uint8_t dst_ip[4], uint8_t protocol,
         return -1;
     }
 
+    /*
+     * FIXED (v4.2.5): BUG-IP-OVERFLOW — When len is near uint16_t max,
+     * total = 20 + len could overflow 65535, causing truncation to
+     * 65535 but then memcpy(packet+20, data, len) writes past the
+     * allocated buffer.  Truncate len first, not total.
+     */
+    if (len > 65535 - sizeof(struct ipv4_hdr)) {
+        len = 65535 - (uint16_t)sizeof(struct ipv4_hdr);
+    }
     int total = (int)(sizeof(struct ipv4_hdr) + len);
-    if (total > 65535) total = 65535;
     uint8_t *packet = (uint8_t *)kmalloc((size_t)total);
     if (!packet) return -1;
 
@@ -1114,20 +1129,27 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
         pseudo.protocol = IP_PROTO_TCP;
         pseudo.tcp_length = htons((uint16_t)len);
 
+        /*
+         * FIXED (v4.2.5): BUG-TCP-CSUM-ENDIAN — tcp_udp_checksum() sums
+         * raw 16-bit values (already in network byte order from htons()).
+         * The verification code must NOT use ntohs() on each word, and
+         * the final result must NOT be wrapped with htons(), or the
+         * computed checksum will not match what tcp_udp_checksum() produced.
+         */
         /* Compute checksum: pseudo-header (12) + raw packet data (len) */
         uint32_t sum = 0;
         uint16_t *ptr = (uint16_t *)&pseudo;
-        for (int i = 0; i < 6; i++) sum += ntohs(ptr[i]);
+        for (int i = 0; i < 6; i++) sum += ptr[i];
         /* Add TCP header + payload, skipping the checksum field */
         uint16_t *data16 = (uint16_t *)data;
         for (int i = 0; i < len / 2; i++) {
             if (i == 8) continue;  /* Skip checksum field (offset 16-17) */
-            sum += ntohs(data16[i]);
+            sum += data16[i];
         }
         if (len & 1) sum += ((uint16_t)data[len - 1]) << 8;
         /* Fold carry */
         while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-        computed_csum = htons((uint16_t)(~sum));
+        computed_csum = (uint16_t)(~sum);
     }
     if (received_csum != 0 && computed_csum != received_csum) {
         /* Checksum mismatch — silently drop */

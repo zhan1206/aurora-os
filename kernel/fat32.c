@@ -177,6 +177,16 @@ static spinlock_t fat32_alloc_lock_ = {0};
 #define fat32_alloc_unlock() spin_unlock(&fat32_alloc_lock_)
 
 /*
+ * FIXED (v4.2.5): Protect cluster chain traversal/modification against
+ * concurrent access.  Without this lock, fat32_free_cluster_chain can
+ * race with another thread also freeing or traversing the same chain,
+ * causing doubled frees or corrupted FAT entries.  (BUG-FAT32-LOCK)
+ */
+static spinlock_t fat32_chain_lock = {0};
+#define fat32_chain_lock_acq()   spin_lock(&fat32_chain_lock)
+#define fat32_chain_lock_rel()   spin_unlock(&fat32_chain_lock)
+
+/*
  * Find a free cluster.
  * Scans the FAT table for a cluster marked as free (0x00000000).
  * Returns the cluster number, or 0 on failure.
@@ -254,6 +264,11 @@ int fat32_free_cluster_chain(struct fat32_sb_info *sbi,
      * (M-12: corrupted FAT table causes infinite loop)
      */
     int max_steps = (int)(sbi->total_clusters + 2);
+
+    /* FIXED (v4.2.5): Protect cluster chain traversal and
+     * modification against concurrent access.  (BUG-FAT32-LOCK) */
+    fat32_chain_lock_acq();
+
     while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && max_steps-- > 0) {
         uint32_t next = fat32_get_cluster(sbi, cluster);
         fat32_set_cluster(sbi, cluster, FAT32_CLUSTER_FREE);
@@ -261,6 +276,8 @@ int fat32_free_cluster_chain(struct fat32_sb_info *sbi,
             break;
         cluster = next;
     }
+
+    fat32_chain_lock_rel();
     return 0;
 }
 

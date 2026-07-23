@@ -122,6 +122,10 @@ static int ext2_read_inode_raw(struct ext2_sb_info *sbi, uint32_t inum,
                                struct ext2_inode *raw) {
     if (inum == 0) return -EINVAL;
 
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate inode number against
+     * total inode count to prevent out-of-bounds bitmap access. */
+    if (inum > sbi->sb_raw->s_inodes_count) return -EINVAL;
+
     /* Validate inode_size: zero or larger than block_size would cause
      * division by zero or incorrect calculation (inodes_per_block = 0) */
     if (sbi->inode_size == 0 || sbi->inode_size > sbi->block_size)
@@ -157,6 +161,10 @@ static int ext2_read_inode_raw(struct ext2_sb_info *sbi, uint32_t inum,
 static int ext2_write_inode_raw(struct ext2_sb_info *sbi, uint32_t inum,
                                 const struct ext2_inode *raw) {
     if (inum == 0) return -EINVAL;
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate inode number against
+     * total inode count. */
+    if (inum > sbi->sb_raw->s_inodes_count) return -EINVAL;
 
     uint32_t group = inode_group(sbi, inum);
     uint32_t index = inode_index(sbi, inum);
@@ -215,6 +223,9 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
             memset(buf, 0, block_size);
             return 0;
         }
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate block number against
+         * total block count to prevent out-of-bounds device access. */
+        if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -229,6 +240,9 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
             memset(buf, 0, block_size);
             return 0;
         }
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate indirect block pointer. */
+        if (ind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
 
         uint32_t *ind_buf = (uint32_t *)kmalloc(block_size);
         if (!ind_buf) return -ENOMEM;
@@ -245,6 +259,8 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
             memset(buf, 0, block_size);
             return 0;
         }
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate resolved block number. */
+        if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -258,6 +274,9 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
             memset(buf, 0, block_size);
             return 0;
         }
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate double-indirect block pointer. */
+        if (dind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
 
         /* Read the double-indirect block (array of single-indirect pointers) */
         uint32_t *dind_buf = (uint32_t *)kmalloc(block_size);
@@ -277,6 +296,12 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
             kfree(dind_buf);
             memset(buf, 0, block_size);
             return 0;
+        }
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate single-indirect block pointer. */
+        if (ind_blk >= sbi->sb_raw->s_blocks_count) {
+            kfree(dind_buf);
+            return -EIO;
         }
 
         /* Read the single-indirect block */
@@ -301,6 +326,8 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
             memset(buf, 0, block_size);
             return 0;
         }
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate resolved block number. */
+        if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -322,6 +349,8 @@ static int ext2_write_data_block(struct ext2_sb_info *sbi,
     if (logical_block < EXT2_NDIR_BLOCKS) {
         uint32_t blk = raw->i_block[logical_block];
         if (blk == 0) return -EIO; /* block not allocated */
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate block number. */
+        if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
         return write_block(sbi->bdev, block_size, blk, buf);
     }
 
@@ -330,6 +359,9 @@ static int ext2_write_data_block(struct ext2_sb_info *sbi,
     if (logical_block < ptrs_per_block) {
         uint32_t ind_blk = raw->i_block[EXT2_IND_BLOCK];
         if (ind_blk == 0) return -EIO;
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate indirect block pointer. */
+        if (ind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
 
         uint32_t *ind_buf = (uint32_t *)kmalloc(block_size);
         if (!ind_buf) return -ENOMEM;
@@ -341,6 +373,12 @@ static int ext2_write_data_block(struct ext2_sb_info *sbi,
 
         uint32_t blk = ind_buf[logical_block];
         if (blk == 0) {
+            kfree(ind_buf);
+            return -EIO;
+        }
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate resolved block number. */
+        if (blk >= sbi->sb_raw->s_blocks_count) {
             kfree(ind_buf);
             return -EIO;
         }
@@ -741,6 +779,8 @@ static int ext2_dir_lookup(struct inode *dir, struct dentry *dentry) {
                 memset(child_info, 0, sizeof(*child_info));
                 child_info->inode_num = de->inode;
                 child_info->sbi = sbi;
+                /* FIXED (v4.2.5): BUG-EXT2-WRITELOCK — initialize per-inode write lock */
+                spin_init(&child_info->write_lock);
 
                 if (ext2_read_inode_raw(sbi, de->inode, &child_info->raw) < 0) {
                     kfree(child_info);
@@ -829,6 +869,8 @@ static struct inode *ext2_read_inode_sbi(struct ext2_sb_info *sbi, uint32_t inum
     memset(info, 0, sizeof(*info));
     info->inode_num = inum;
     info->sbi = sbi;
+    /* FIXED (v4.2.5): BUG-EXT2-WRITELOCK — initialize per-inode write lock */
+    spin_init(&info->write_lock);
 
     if (ext2_read_inode_raw(sbi, inum, &info->raw) < 0) {
         kfree(info);

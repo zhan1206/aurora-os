@@ -175,22 +175,38 @@ int virtq_add_chain(struct virtq *vq, uint64_t *addrs, uint32_t *lens,
     int first = -1;
     int prev = -1;
 
+    /*
+     * FIXED (v4.2.5): BUG-VIRTIO-LEAK — track allocated descriptor indices
+     * so that on failure we can properly return them to the free list.
+     * The previous cleanup code used sequential indices j=0..i-1, but
+     * virtq_add_descriptor pops from vq->free_head, which follows the
+     * free list chain — indices are NOT sequential.  The old code reset
+     * wrong descriptors, leaking the actually-allocated ones.
+     */
+    uint16_t alloc_ids[8];  /* track up to 8 descriptors in a chain */
+    uint32_t alloc_count = 0;
+
     for (uint32_t i = 0; i < num; i++) {
         int idx = virtq_add_descriptor(vq, addrs[i], lens[i], flags[i]);
-        /*
-         * FIXED (v4.2.1): On failure, unlink descriptors already added
-         * to the chain.  Without this, allocated descriptors leak and
-         * the available ring gets corrupted.  (BUG-DRV-M3)
-         */
         if (idx < 0) {
-            /* Unlink the partial chain: reset all descriptors added so far.
-             * Since we only set up the NEXT chain and haven't submitted
-             * to the device yet, simply re-mark them as free. */
-            for (uint32_t j = 0; j < i; j++) {
-                vq->desc[j].flags = 0;
-                vq->desc[j].next = 0;
+            /*
+             * FIXED (v4.2.5): BUG-VIRTIO-LEAK — return allocated
+             * descriptors to the free list.  Prepend the chain of
+             * allocated descriptors (in reverse order) to free_head.
+             * This restores the free list to its state before the
+             * failed chain allocation.
+             */
+            for (uint32_t j = alloc_count; j > 0; j--) {
+                uint16_t desc_id = alloc_ids[j - 1];
+                vq->desc[desc_id].flags = 0;
+                vq->desc[desc_id].next  = (uint16_t)vq->free_head;
+                vq->free_head = desc_id;
             }
             return -1;
+        }
+
+        if (alloc_count < 8) {
+            alloc_ids[alloc_count++] = (uint16_t)idx;
         }
 
         if (first < 0) first = idx;
@@ -255,6 +271,8 @@ static uint8_t virtio_pci_read_device_status(struct virtio_blk_dev *dev) {
         return pci_read_config8(dev->pci->bus, dev->pci->device,
                                 dev->pci->function, 0x14);
     }
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
     return mmio_read8(&((volatile uint8_t *)dev->common_cfg)
                        [VIRTIO_PCI_COMMON_DEVICE_STATUS]);
 }
@@ -268,6 +286,8 @@ static void virtio_pci_write_device_status(struct virtio_blk_dev *dev,
     }
     mmio_write8(&((volatile uint8_t *)dev->common_cfg)
                 [VIRTIO_PCI_COMMON_DEVICE_STATUS], status);
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
 }
 
 static void virtio_pci_add_status(struct virtio_blk_dev *dev, uint8_t bit) {
@@ -285,9 +305,13 @@ static uint64_t virtio_pci_read_device_features(struct virtio_blk_dev *dev) {
     }
     /* Select feature page 0 */
     mmio_write32(&dev->common_cfg[VIRTIO_PCI_COMMON_DFSELECT / 4], 0);
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
     features = mmio_read32(&dev->common_cfg[VIRTIO_PCI_COMMON_DF / 4]);
     /* Select feature page 1 */
     mmio_write32(&dev->common_cfg[VIRTIO_PCI_COMMON_DFSELECT / 4], 1);
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
     features |= ((uint64_t)mmio_read32(&dev->common_cfg[VIRTIO_PCI_COMMON_DF / 4])) << 32;
     return features;
 }
@@ -305,6 +329,8 @@ static void virtio_pci_write_driver_features(struct virtio_blk_dev *dev,
     mmio_write32(&dev->common_cfg[VIRTIO_PCI_COMMON_GUEST_FEATURE_SEL / 4], 1);
     mmio_write32(&dev->common_cfg[VIRTIO_PCI_COMMON_GUEST_FEATURE / 4],
                  (uint32_t)(features >> 32));
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
 }
 
 static void virtio_pci_setup_virtqueue(struct virtio_blk_dev *dev,
@@ -317,6 +343,8 @@ static void virtio_pci_setup_virtqueue(struct virtio_blk_dev *dev,
     /* Select the queue */
     mmio_write16((volatile uint16_t *)&dev->common_cfg[VIRTIO_PCI_COMMON_QUEUE_SELECT / 4],
                  queue_idx);
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
 
     uint16_t queue_size = mmio_read16((volatile uint16_t *)&dev->common_cfg[VIRTIO_PCI_COMMON_QUEUE_SIZE / 4]);
     if (queue_size > VIRTIO_VQ_MAX_SIZE) queue_size = VIRTIO_VQ_MAX_SIZE;
@@ -336,6 +364,8 @@ static void virtio_pci_setup_virtqueue(struct virtio_blk_dev *dev,
 
     /* Enable the queue */
     mmio_write16((volatile uint16_t *)&dev->common_cfg[VIRTIO_PCI_COMMON_QUEUE_ENABLE / 4], 1);
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
 
     dev->vq_ready = 1;
 }
@@ -347,6 +377,8 @@ static void virtio_pci_notify_queue(struct virtio_blk_dev *dev,
         return;
     }
     uint32_t off = dev->notify_off_multiplier * queue_idx;
+    /* FIXED (v4.2.5): BUG-VIRTIO-BARRIER */
+    __sync_synchronize();
     mmio_write16((volatile uint16_t *)((uintptr_t)dev->notify_cfg + off), queue_idx);
 }
 

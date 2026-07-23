@@ -1007,11 +1007,22 @@ void smp_dequeue_task(struct task_struct *t, int cpu_id) {
     struct run_queue *rq = &per_cpu_rq[cpu_id];
     if (rq->head == NULL || rq->count == 0) return;
 
+    /* FIXED (v4.2.5): Acquire the remote CPU's run queue lock.
+     * Without this lock, concurrent modifications to the run queue
+     * (e.g., from the remote CPU's schedule() and this dequeue)
+     * would cause data races on the linked list and RB tree.
+     * We use irq_save/irq_restore to prevent deadlocks with
+     * interrupt handlers on the same CPU.  (BUG-SMP-DEQUEUE) */
+    uint64_t irq = irq_save();
+    spin_lock(&rq->lock);
+
     /* Handle single-task queue */
     if (rq->head == t && t->next == t) {
         rq->head = NULL;
         rq->count = 0;
         rb_erase(&rq->ready_tree, &t->rb_node);
+        spin_unlock(&rq->lock);
+        irq_restore(irq);
         return;
     }
 
@@ -1021,6 +1032,8 @@ void smp_dequeue_task(struct task_struct *t, int cpu_id) {
         prev = prev->next;
         if (prev == rq->head) {
             /* Task not found in this queue */
+            spin_unlock(&rq->lock);
+            irq_restore(irq);
             return;
         }
     }
@@ -1033,6 +1046,9 @@ void smp_dequeue_task(struct task_struct *t, int cpu_id) {
     rq->count--;
     /* Also remove from the red-black tree */
     rb_erase(&rq->ready_tree, &t->rb_node);
+
+    spin_unlock(&rq->lock);
+    irq_restore(irq);
 }
 
 /*

@@ -163,10 +163,20 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
      */
     size_t first_chunk = PIPE_BUF_SIZE - ring->head;
     if (first_chunk > toread) first_chunk = toread;
+
+    /*
+     * FIXED (v4.2.5): BUG-PIPE-SMAP
+     * Wrap user-space access with stac()/clac() to allow SMAP-
+     * protected kernels to copy data to the user buffer.  Without
+     * this, memcpy to a user-space address would cause a page fault
+     * when SMAP is enabled.
+     */
+    stac();
     memcpy((char *)buf, ring->buf + ring->head, first_chunk);
     if (toread > first_chunk) {
         memcpy((char *)buf + first_chunk, ring->buf, toread - first_chunk);
     }
+    clac();
     ring->head = (ring->head + toread) % PIPE_BUF_SIZE;
     ring->count -= (uint32_t)toread;
 
@@ -262,10 +272,20 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
          */
         size_t first_chunk = PIPE_BUF_SIZE - ring->tail;
         if (first_chunk > towrite) first_chunk = towrite;
+
+        /*
+         * FIXED (v4.2.5): BUG-PIPE-SMAP
+         * Wrap user-space access with stac()/clac() to allow SMAP-
+         * protected kernels to read from the user buffer.  Without
+         * this, memcpy from a user-space address would cause a page
+         * fault when SMAP is enabled.
+         */
+        stac();
         memcpy(ring->buf + ring->tail, src + total, first_chunk);
         if (towrite > first_chunk) {
             memcpy(ring->buf, src + total + first_chunk, towrite - first_chunk);
         }
+        clac();
         ring->tail = (ring->tail + towrite) % PIPE_BUF_SIZE;
         ring->count += (uint32_t)towrite;
 

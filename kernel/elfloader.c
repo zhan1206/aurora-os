@@ -1029,7 +1029,10 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
     /* 7. Clear pending signals (already done by signal_reset_on_exec above,
          * but we clear again here as a safety net in case the signal module
          * is not yet fully initialized).  */
+        /* FIXED (v4.2.5): BUG-EXEC-NULL — check sig before deref */
+    if (current->sig) {
         current->sig->pending = 0;
+    }
 
     *new_rsp_out = stack;
     *new_pml4_out = new_pml4;

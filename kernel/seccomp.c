@@ -61,6 +61,20 @@ int seccomp_set_filter(struct task_struct *task, struct seccomp_filter *filter) 
     }
 
     /*
+     * FIXED (v4.2.5): BUG-SECCOMP-REPLACE — Reject filter replacement
+     * once a filter is already installed.  seccomp is a one-way door:
+     * after the first filter is installed, it cannot be replaced with
+     * a more permissive one.  This prevents an attacker from replacing
+     * a strict filter with a weaker one.
+     */
+    if (task->seccomp) {
+        spin_unlock((spinlock_t*)&task->seccomp_lock);
+        log_printf(LOG_LEVEL_WARN, "seccomp: pid=%d attempted to replace filter\n",
+                   task->pid);
+        return -EACCES;
+    }
+
+    /*
      * FIXED (v4.1.9): Validate BPF program length.
      * Reject filters with excessively long BPF programs to prevent
      * memory exhaustion.  (H-29: seccomp BPF validation)
@@ -267,8 +281,14 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
             break;
         case BPF_ALU | BPF_OR  | BPF_K:  A |= k; break;
         case BPF_ALU | BPF_AND | BPF_K:  A &= k; break;
-        case BPF_ALU | BPF_LSH | BPF_K:  A <<= k; break;
-        case BPF_ALU | BPF_RSH | BPF_K:  A >>= k; break;
+        case BPF_ALU | BPF_LSH | BPF_K:
+            /* FIXED (v4.2.5): BUG-BPF-SHIFT — shift >= 32 is UB in C */
+            A = (k < 32) ? (A << k) : 0;
+            break;
+        case BPF_ALU | BPF_RSH | BPF_K:
+            /* FIXED (v4.2.5): BUG-BPF-SHIFT */
+            A = (k < 32) ? (A >> k) : 0;
+            break;
         case BPF_ALU | BPF_MOD | BPF_K:
             if (k != 0) A %= k; else A = 0;
             break;
@@ -283,8 +303,14 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
             break;
         case BPF_ALU | BPF_OR  | BPF_X:  A |= X; break;
         case BPF_ALU | BPF_AND | BPF_X:  A &= X; break;
-        case BPF_ALU | BPF_LSH | BPF_X:  A <<= X; break;
-        case BPF_ALU | BPF_RSH | BPF_X:  A >>= X; break;
+        case BPF_ALU | BPF_LSH | BPF_X:
+            /* FIXED (v4.2.5): BUG-BPF-SHIFT — shift >= 32 is UB in C */
+            A = (X < 32) ? (A << X) : 0;
+            break;
+        case BPF_ALU | BPF_RSH | BPF_X:
+            /* FIXED (v4.2.5): BUG-BPF-SHIFT */
+            A = (X < 32) ? (A >> X) : 0;
+            break;
         case BPF_ALU | BPF_MOD | BPF_X:
             if (X != 0) A %= X; else A = 0;
             break;

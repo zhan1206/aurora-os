@@ -803,6 +803,10 @@ int module_unload(const char *name) {
  * module_init: Register core kernel symbols
  * ================================================================ */
 void module_init(void) {
+    /* FIXED (v4.2.5): BUG-MODULE-KEY — Initialize the module signing
+     * key pair using the CSPRNG before registering symbols. */
+    module_sign_init();
+
     module_register_symbol("kmalloc",        (void *)kmalloc);
     module_register_symbol("kfree",          (void *)kfree);
     module_register_symbol("alloc_page",     (void *)alloc_page);

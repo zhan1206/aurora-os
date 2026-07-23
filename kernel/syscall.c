@@ -117,6 +117,14 @@ static long sys_read(int fd, void *buf, size_t count) {
     /* Other fds: use fd_table */
     struct file *filp = (struct file *)fd_get(current, fd);
     if (!filp) { current->t_errno = EBADF; return -1; }
+    /*
+     * FIXME (v4.2.5): BUG-PIPE-SMAP note
+     * vfs_read() passes the raw user pointer `buf` to file operations.
+     * The VFS layer should handle stac()/clac() or copy_to_user().
+     * Currently, pipe_read() has been fixed (see pipe.c), but other
+     * file backends (ramfs, ext2, devfs) may still have SMAP violations.
+     * A proper fix would add stac()/clac() in the generic VFS read path.
+     */
     return vfs_read(filp, buf, count);
 }
 
@@ -264,6 +272,13 @@ static long sys_getdents(int fd, void *dirp, size_t count) {
     }
 
     /* For now, use read to get directory listing */
+    /*
+     * FIXME (v4.2.5): BUG-PIPE-SMAP note
+     * vfs_read() passes the raw user pointer `dirp` to file operations
+     * without SMAP protection.  Same issue as sys_read — the VFS layer
+     * or individual file backends should handle stac()/clac() or use
+     * copy_to_user() for user-space buffers.
+     */
     return vfs_read(filp, dirp, count);
 }
 
@@ -1601,6 +1616,8 @@ static long sys_getpgid(int pid) {
     }
     if (!t) { current->t_errno = ESRCH; return -1; }
     /* Simplified: pgid = pid for now */
+    /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
+    if (pid != 0) __sync_fetch_and_sub(&t->ref_count, 1);
     return t->pid;
 }
 

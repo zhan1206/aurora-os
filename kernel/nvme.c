@@ -113,6 +113,8 @@ static int nvme_submit_cmd(struct nvme_controller *ctrl,
     volatile uint32_t *doorbell =
         (volatile uint32_t *)((uintptr_t)ctrl->bar_addr +
                               NVME_SQ_TDBL(sq->qid, stride));
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
     nvme_write32(doorbell, sq->sq_tail);
 
     return 0;
@@ -146,6 +148,8 @@ static int nvme_wait_completion(struct nvme_controller *ctrl,
             volatile uint32_t *doorbell =
                 (volatile uint32_t *)((uintptr_t)ctrl->bar_addr +
                                       NVME_CQ_HDBL(cq->qid, stride));
+            /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+            __sync_synchronize();
             nvme_write32(doorbell, cq->cq_head);
 
             return 0;
@@ -181,8 +185,12 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
     uint32_t cc = nvme_read32(&bar[NVME_REG_CC / 4]);
     cc &= ~NVME_CC_ENABLE;
     nvme_write32(&bar[NVME_REG_CC / 4], cc);
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
 
     /* Wait for CSTS.RDY to clear */
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
     int timeout = 500000;
     while (timeout > 0) {
         uint32_t csts = nvme_read32(&bar[NVME_REG_CSTS / 4]);
@@ -198,6 +206,8 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
     /* Wait for CSTS.CFS (Controller Fatal Status) to be clear.
      * FIXED (v4.2.1): If CFS is set after timeout, the controller is in
      * a fatal state.  Return error instead of proceeding.  (BUG-DRV-M2) */
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
     timeout = 500000;
     while (timeout > 0) {
         uint32_t csts = nvme_read32(&bar[NVME_REG_CSTS / 4]);
@@ -211,6 +221,8 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
     }
 
     /* Step 2: Read controller capabilities */
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
     uint64_t cap = nvme_read64((volatile uint64_t *)&bar[NVME_REG_CAP / 4]);
     uint16_t mqes = (uint16_t)(cap & NVME_CAP_MQES_MASK);
     uint32_t dstrd = (uint32_t)((cap & NVME_CAP_DSTRD_MASK) >> NVME_CAP_DSTRD_SHIFT);
@@ -225,21 +237,30 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
     uint32_t aqa = ((uint32_t)(admin_size - 1) << NVME_AQA_ASQS_SHIFT) |
                    ((uint32_t)(admin_size - 1) << NVME_AQA_ACQS_SHIFT);
     nvme_write32(&bar[NVME_REG_AQA / 4], aqa);
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
 
     /* Initialize admin queues */
     nvme_queue_init(&ctrl->admin_sq, NVME_QUEUE_ID, admin_size);
     nvme_queue_init(&ctrl->admin_cq, NVME_QUEUE_ID, admin_size);
 
     if (!ctrl->admin_sq.sq || !ctrl->admin_cq.cq) {
+        /* FIXED (v4.2.5): BUG-NVME-LEAK — free partially allocated queues */
         log_printf(LOG_LEVEL_WARN, "nvme: failed to allocate admin queues\n");
+        nvme_queue_free(&ctrl->admin_sq);
+        nvme_queue_free(&ctrl->admin_cq);
         return -1;
     }
 
     /* Set Admin SQ Base Address */
     nvme_write64((volatile uint64_t *)&bar[NVME_REG_ASQ / 4], ctrl->admin_sq.sq_phys);
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
 
     /* Set Admin CQ Base Address */
     nvme_write64((volatile uint64_t *)&bar[NVME_REG_ACQ / 4], ctrl->admin_cq.cq_phys);
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
 
     /* Step 4: Configure Controller */
     uint32_t cc_new = NVME_CC_ENABLE;
@@ -251,8 +272,12 @@ static int nvme_controller_init(struct nvme_controller *ctrl) {
     cc_new |= NVME_CC_AMS_RR;
 
     nvme_write32(&bar[NVME_REG_CC / 4], cc_new);
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
 
     /* Step 5: Wait for CSTS.RDY to become 1 */
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
     timeout = 500000;
     while (timeout > 0) {
         uint32_t csts = nvme_read32(&bar[NVME_REG_CSTS / 4]);
@@ -387,15 +412,19 @@ static int nvme_create_io_queues(struct nvme_controller *ctrl) {
     struct nvme_cqe result;
     int ret = nvme_admin_cmd(ctrl, &cmd, &result);
     if (ret < 0 || (result.status & NVME_STATUS_SC_MASK) != NVME_STATUS_SC_SUCCESS) {
+        /* FIXED (v4.2.5): BUG-NVME-LEAK — free I/O CQ on create failure */
         log_printf(LOG_LEVEL_WARN, "nvme: create I/O CQ failed (status=0x%04x)\n",
                    result.status);
+        nvme_queue_free(&ctrl->io_cq);
         return -1;
     }
 
     /* Initialize I/O Submission Queue */
     nvme_queue_init(&ctrl->io_sq, io_qid, io_qsize);
     if (!ctrl->io_sq.sq) {
+        /* FIXED (v4.2.5): BUG-NVME-LEAK — free I/O CQ if SQ allocation fails */
         log_printf(LOG_LEVEL_WARN, "nvme: failed to allocate I/O SQ\n");
+        nvme_queue_free(&ctrl->io_cq);
         return -1;
     }
 
@@ -409,8 +438,11 @@ static int nvme_create_io_queues(struct nvme_controller *ctrl) {
 
     ret = nvme_admin_cmd(ctrl, &cmd, &result);
     if (ret < 0 || (result.status & NVME_STATUS_SC_MASK) != NVME_STATUS_SC_SUCCESS) {
+        /* FIXED (v4.2.5): BUG-NVME-LEAK — free both I/O queues on create failure */
         log_printf(LOG_LEVEL_WARN, "nvme: create I/O SQ failed (status=0x%04x)\n",
                    result.status);
+        nvme_queue_free(&ctrl->io_sq);
+        nvme_queue_free(&ctrl->io_cq);
         return -1;
     }
 
@@ -424,7 +456,29 @@ static int nvme_create_io_queues(struct nvme_controller *ctrl) {
  * I/O Command Submission (using PRP lists)
  * ================================================================ */
 
-static uint16_t nvme_cid_counter = 1;  /* FIXED (v4.1.8): unique CID per command */
+static uint16_t nvme_cid_counter = 1;  /* FIXED (v4.2.5): BUG-NVME-CID — use atomic ops below */
+
+static uint16_t nvme_alloc_cid(void) {
+    /* FIXED (v4.2.5): BUG-NVME-CID — atomic CID allocation.
+     * On SMP systems, nvme_cid_counter++ is not atomic (read-modify-write
+     * race).  Use __sync_fetch_and_add to guarantee unique CIDs. */
+    uint16_t cid = (uint16_t)__sync_fetch_and_add(&nvme_cid_counter, 1);
+    /* Skip CID 0 (reserved) on wrap */
+    if (cid == 0) {
+        /* cid == 0 means the counter was already 0 before the increment,
+         * or it wrapped to 0 after increment.  Allocate CID 1 instead
+         * and atomically advance the counter past 0 if needed. */
+        uint16_t expected = 1;
+        if (__sync_bool_compare_and_swap(&nvme_cid_counter, 0, 1)) {
+            /* Counter was 0, now set to 1 — use CID 1 */
+            cid = 1;
+        } else {
+            /* Another thread already moved past 0, retry */
+            cid = (uint16_t)__sync_fetch_and_add(&nvme_cid_counter, 1);
+        }
+    }
+    return cid;
+}
 
 static int nvme_io_submit(struct nvme_controller *ctrl,
                            uint8_t opcode, uint32_t nsid,
@@ -455,13 +509,7 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
     struct nvme_sqe cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = opcode;
-    cmd.cid = nvme_cid_counter++;
-    /*
-     * FIXED (v4.2.1): Prevent CID counter overflow.  When CID wraps
-     * from 65535 to 0, it could collide with an in-flight command.
-     * Skip CID 0 (reserved) and wrap around.  (BUG-DRV-M1)
-     */
-    if (nvme_cid_counter == 0) nvme_cid_counter = 1;
+    cmd.cid = nvme_alloc_cid();
     cmd.nsid = nsid;
     cmd.prp1 = buf_phys;
     cmd.prp2 = 0;
@@ -536,6 +584,8 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
     volatile uint32_t *doorbell =
         (volatile uint32_t *)((uintptr_t)ctrl->bar_addr +
                               NVME_SQ_TDBL(sq->qid, stride));
+    /* FIXED (v4.2.5): BUG-NVME-BARRIER */
+    __sync_synchronize();
     nvme_write32(doorbell, sq->sq_tail);
 
     /* Wait for completion */

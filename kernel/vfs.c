@@ -794,6 +794,12 @@ int vfs_close(struct file *filp) {
         if (filp->inode->dentry->refcount > 0)
             filp->inode->dentry->refcount--;
     }
+    /* FIXED (v4.2.5): BUG-VFS-REFCOUNT — release the inode cache reference
+     * that was acquired by vfs_iget() in vfs_lookup(). Without this, the
+     * inode refcount never drops to zero and the inode is never evicted. */
+    if (filp->inode) {
+        vfs_iput(filp->inode);
+    }
     vfs_unlock();
 
     kfree(filp);

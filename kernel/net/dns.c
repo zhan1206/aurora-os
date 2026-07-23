@@ -6,6 +6,7 @@
 #include "log.h"
 #include "string.h"
 #include "../mem.h"
+#include "../aslr.h"
 #include <stdint.h>
 
 /* Byte order conversion */
@@ -39,7 +40,6 @@ struct dns_cache_entry {
 };
 
 static struct dns_cache_entry dns_cache[DNS_CACHE_SIZE];
-static uint16_t dns_query_id = 0;  /* FIXED (v4.1.8): randomized DNS query ID */
 static int dns_age_counter = 0;    /* FIXED (v4.2.2): LRU age counter */
 static spinlock_t dns_cache_lock;  /* FIXED (v4.2.2): protect DNS cache from SMP races */
 
@@ -146,17 +146,17 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
     /* DNS header */
     struct dns_header *hdr = (struct dns_header *)pkt;
     /*
-     * FIXED (v4.1.8): Use randomized query ID instead of fixed 0x0001.
-     * Randomize on first use with TSC. (L-13: DNS query ID fixed)
+     * FIXED (v4.2.5): BUG-DNS-ID — DNS query IDs are now generated using
+     * the ChaCha20 CSPRNG instead of a predictable incrementing counter.
+     * Each query gets a fresh 16-bit random ID, preventing DNS cache
+     * poisoning and query correlation attacks.
      */
-    if (dns_query_id == 0) {
-        uint32_t tsc_low, tsc_high;
-        asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
-        dns_query_id = (uint16_t)(tsc_low & 0xFFFF);
-        if (dns_query_id == 0) dns_query_id = 1;
+    {
+        uint16_t qid;
+        chacha20_random_bytes((uint8_t *)&qid, sizeof(qid));
+        if (qid == 0) qid = 1;
+        hdr->id = htons(qid);
     }
-    hdr->id = htons(dns_query_id++);
-    if (dns_query_id == 0) dns_query_id = 1;
     hdr->flags = htons(DNS_QRY_STANDARD);
     hdr->qdcount = htons(1);
     hdr->ancount = 0;
@@ -206,8 +206,8 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
 
         struct dns_header *rx_hdr = (struct dns_header *)rx_buf;
         /*
-         * FIXED (v4.1.8): Match against the sent query ID, not
-         * a fixed value. (L-13)
+         * FIXED (v4.2.5): BUG-DNS-ID — Match against the CSPRNG-generated
+         * sent query ID. (L-13)
          */
         if (ntohs(rx_hdr->id) != sent_id) continue;
         if (ntohs(rx_hdr->qdcount) != 1) continue;

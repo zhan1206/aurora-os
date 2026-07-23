@@ -180,4 +180,8 @@ int module_sign_verify(const uint8_t *module_data, size_t module_size);
 /* Check if module signature verification is enabled at compile time. */
 int module_sign_is_enabled(void);
 
+/* Initialize the module signing key pair using the CSPRNG.
+ * Generates a fresh ECDSA P-256 key pair at boot time. */
+void module_sign_init(void);
+
 #endif /* MODULE_H */
