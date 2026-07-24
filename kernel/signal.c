@@ -29,7 +29,7 @@ int do_sys_kill(int pid, int sig) {
     if (sig < 1 || sig >= NSIG) return -1;
     if (pid < 0) return -1;
 
-    struct task_struct *target = find_task_by_pid(pid);
+    struct task_struct *target = task_get_by_pid(pid);
     if (!target) return -1;
 
     /*
@@ -45,8 +45,8 @@ int do_sys_kill(int pid, int sig) {
         /* Protect init: only SIGKILL, SIGSTOP, SIGCHLD allowed */
         if (target->pid == 1) {
             if (sig != SIGKILL && sig != SIGSTOP && sig != SIGCHLD) {
-                /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-                __sync_fetch_and_sub(&target->ref_count, 1);
+                /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+                task_put(target);
                 return -1;
             }
         }
@@ -66,8 +66,8 @@ int do_sys_kill(int pid, int sig) {
         target->sig = signal_alloc();
         if (!target->sig) {
             spin_unlock(&signal_lock);
-            /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-            __sync_fetch_and_sub(&target->ref_count, 1);
+            /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+            task_put(target);
             return -1;
         }
         target->sig->pending |= (1U << sig);
@@ -87,16 +87,16 @@ int do_sys_kill(int pid, int sig) {
                  */
                 spin_unlock(&signal_lock);
                 target->state = TASK_READY;
-                /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-                __sync_fetch_and_sub(&target->ref_count, 1);
+                /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+                task_put(target);
                 return 0;
             }
         }
     }
     spin_unlock(&signal_lock);
 
-    /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-    __sync_fetch_and_sub(&target->ref_count, 1);
+    /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+    task_put(target);
     return 0;
 }
 

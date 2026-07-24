@@ -152,4 +152,96 @@ static inline void arch_cache_flush(void) {
 }
 #endif
 
+/* ================================================================
+ * TLB flush
+ * /* MULTIARCH (v4.2.6) */
+ * ================================================================ */
+#if defined(ARCH_X86_64)
+static inline void arch_tlb_flush(uint64_t va) {
+    asm volatile ("invlpg (%0)" : : "r"(va) : "memory");
+}
+static inline void arch_tlb_flush_all(void) {
+    uint64_t tmp;
+    asm volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(tmp) : : "memory");
+}
+#elif defined(ARCH_RISCV64)
+static inline void arch_tlb_flush(uint64_t va) {
+    asm volatile ("sfence.vma %0, zero" : : "r"(va) : "memory");
+}
+static inline void arch_tlb_flush_all(void) {
+    asm volatile ("sfence.vma zero, zero" ::: "memory");
+}
+#elif defined(ARCH_AARCH64)
+static inline void arch_tlb_flush(uint64_t va) {
+    asm volatile ("tlbi vae1, %0; dsb ish; isb" : : "r"(va >> 12) : "memory");
+}
+static inline void arch_tlb_flush_all(void) {
+    asm volatile ("tlbi vmalle1; dsb ish; isb" ::: "memory");
+}
+#elif defined(ARCH_LOONGARCH64)
+static inline void arch_tlb_flush(uint64_t va) {
+    (void)va;
+    asm volatile ("invtlb 0x6, $zero, %0" : : "r"(va) : "memory");
+}
+static inline void arch_tlb_flush_all(void) {
+    asm volatile ("invtlb 0x7, $zero, $zero" ::: "memory");
+}
+#endif
+
+/* ================================================================
+ * CPU ID
+ * ================================================================ */
+#if defined(ARCH_X86_64)
+static inline uint32_t arch_get_cpu_id(void) {
+    uint32_t id;
+    asm volatile ("movl %%gs:0, %0" : "=r"(id));
+    return id;
+}
+#elif defined(ARCH_RISCV64)
+static inline uint64_t arch_get_cpu_id(void) {
+    uint64_t id;
+    asm volatile ("csrr %0, mhartid" : "=r"(id));
+    return id;
+}
+#elif defined(ARCH_AARCH64)
+static inline uint64_t arch_get_cpu_id(void) {
+    uint64_t id;
+    asm volatile ("mrs %0, mpidr_el1" : "=r"(id));
+    return id & 0xFF;
+}
+#elif defined(ARCH_LOONGARCH64)
+static inline uint64_t arch_get_cpu_id(void) {
+    return 0; /* Stub: single-core for now */
+}
+#endif
+
+/* ================================================================
+ * Arch-specific function declarations (implemented in arch/xxx/arch_init.c)
+ * ================================================================ */
+
+/* Called once during early boot, before kmain().
+ * Sets up console, MMU, and interrupt controller. */
+void arch_early_init(void);
+
+/* Enable the MMU for the current address space. */
+void arch_setup_mmu(void);
+
+/* Create a new page table root. Returns physical address of the root. */
+uint64_t arch_page_table_create(void);
+
+/* Map a virtual address to a physical address in the given page table.
+ * Returns 0 on success, negative on error. */
+int arch_page_table_map(uint64_t root_phys, uint64_t vaddr, uint64_t paddr,
+                        uint64_t size, uint64_t flags);
+
+/* Unmap a virtual address range. */
+void arch_page_table_unmap(uint64_t root_phys, uint64_t vaddr, uint64_t size);
+
+/* ================================================================
+ * Convenience wrappers matching the naming convention
+ * ================================================================ */
+#define arch_irq_enable()    arch_enable_irq()
+#define arch_irq_disable()   arch_disable_irq()
+#define arch_memory_barrier() arch_mfence()
+
 #endif /* KERNEL_ARCH_H */

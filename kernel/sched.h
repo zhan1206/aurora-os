@@ -185,6 +185,18 @@ struct task_struct {
     /* --- Resource limits --- */
     uint64_t  rlimit_cur[16];  /* soft resource limits (RLIMIT_*) */
     uint64_t  rlimit_max[16];  /* hard resource limits (RLIMIT_*) */
+
+    /* POSIX (v4.2.6): Thread / CPU affinity */
+    uint64_t  cpu_affinity;    /* CPU affinity mask (sched_setaffinity) */
+    uintptr_t clear_child_tid; /* set_tid_address: address to clear on exit */
+
+    /* REFCOUNT (v4.2.6): Process reference counting system.
+     * ref_count tracks the number of live references to this task.
+     * When it drops to 0 and the task is in TASK_ZOMBIE state,
+     * task_free() is called to actually free all resources.
+     * state_lock protects task state transitions (e.g., RUNNING→ZOMBIE). */
+    int       ref_count;       /* reference count for task lifecycle */
+    int       state_lock;      /* spinlock for state transitions */
 };
 
 #include "signal.h"
@@ -255,10 +267,65 @@ void do_exit_current(int code);
  */
 int waitpid(int pid, int *status, int options);
 
+/* REFCOUNT (v4.2.6): Process reference counting API */
+
+/*
+ * task_get: Atomically increment a task's reference count.
+ * Returns the task pointer.  Must be paired with task_put().
+ */
+static inline struct task_struct *task_get(struct task_struct *t) {
+    if (t) __sync_fetch_and_add(&t->ref_count, 1);
+    return t;
+}
+
+/*
+ * task_put: Atomically decrement a task's reference count.
+ * If ref_count reaches 0 and the task is in TASK_ZOMBIE state,
+ * task_free() is called to actually free all resources.
+ */
+static inline void task_put(struct task_struct *t) {
+    if (!t) return;
+    if (__sync_sub_and_fetch(&t->ref_count, 1) == 0) {
+        if (t->state == TASK_ZOMBIE || t->state == TASK_DEAD) {
+            extern void task_free(struct task_struct *t);
+            task_free(t);
+        }
+    }
+}
+
+/* Aliases for task_get / task_put */
+static inline struct task_struct *task_hold(struct task_struct *t) {
+    return task_get(t);
+}
+static inline void task_release(struct task_struct *t) {
+    task_put(t);
+}
+
 /* ============ Process tree ============ */
 
 void reparent_children_to_init(struct task_struct *task);
+
+/*
+ * DEPRECATED (v4.2.6): Use task_get_by_pid() instead.
+ * Kept for backward compatibility; returns a task with ref_count
+ * incremented.  Caller must release with task_put().
+ */
 struct task_struct *find_task_by_pid(int pid);
+
+/*
+ * task_get_by_pid: Look up a task by PID and return it with ref_count
+ * incremented.  Returns NULL if not found.  Caller MUST call
+ * task_put() (or task_release()) when done with the pointer.
+ */
+struct task_struct *task_get_by_pid(int pid);
+
+/*
+ * task_free: Actually free a task's resources (kernel stack, page
+ * tables, file descriptors, signal state, VMAs, PID).  Called
+ * automatically by task_put() when ref_count reaches 0 and the
+ * task is in ZOMBIE or DEAD state.
+ */
+void task_free(struct task_struct *t);
 
 /* ============ File descriptor API ============ */
 

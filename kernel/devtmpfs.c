@@ -26,6 +26,9 @@
 #define DEV_TYPE_TTY     3
 #define DEV_TYPE_RANDOM  4
 #define DEV_TYPE_URANDOM 5
+#define DEV_TYPE_STDIN   6   /* POSIX (v4.2.6) */
+#define DEV_TYPE_STDOUT  7   /* POSIX (v4.2.6) */
+#define DEV_TYPE_STDERR  8   /* POSIX (v4.2.6) */
 
 struct dev_entry {
     const char *name;
@@ -49,6 +52,10 @@ static struct dev_entry dev_entries[] = {
     { "tty",     DEV_TYPE_TTY     },
     { "random",  DEV_TYPE_RANDOM  },
     { "urandom", DEV_TYPE_URANDOM },
+    /* POSIX (v4.2.6): stdio symbolic devices */
+    { "stdin",   DEV_TYPE_STDIN   },
+    { "stdout",  DEV_TYPE_STDOUT  },
+    { "stderr",  DEV_TYPE_STDERR  },
     { NULL,      0                },  /* sentinel */
 };
 
@@ -223,6 +230,11 @@ static ssize_t devtmpfs_read(struct file *filp, void *buf, size_t count,
         case DEV_TYPE_TTY:     return dev_console_read(filp, buf, count, offset);
         case DEV_TYPE_RANDOM:  return dev_random_read(filp, buf, count, offset, 1);
         case DEV_TYPE_URANDOM: return dev_random_read(filp, buf, count, offset, 0);
+        /* POSIX (v4.2.6): stdin maps to fd 0 (console input) */
+        case DEV_TYPE_STDIN:   return dev_console_read(filp, buf, count, offset);
+        /* POSIX (v4.2.6): stdout/stderr return EOF on read (output-only) */
+        case DEV_TYPE_STDOUT:
+        case DEV_TYPE_STDERR:  return 0;  /* EOF on read */
         default:               return -1;
     }
 }
@@ -242,6 +254,11 @@ static ssize_t devtmpfs_write(struct file *filp, const void *buf, size_t count,
         case DEV_TYPE_TTY:     return dev_console_write(filp, buf, count, offset);
         case DEV_TYPE_RANDOM:  return dev_random_write(filp, buf, count, offset);
         case DEV_TYPE_URANDOM: return dev_random_write(filp, buf, count, offset);
+        /* POSIX (v4.2.6): stdin discards writes (input-only) */
+        case DEV_TYPE_STDIN:   return dev_null_write(filp, buf, count, offset);
+        /* POSIX (v4.2.6): stdout/stderr write to console */
+        case DEV_TYPE_STDOUT:
+        case DEV_TYPE_STDERR:  return dev_console_write(filp, buf, count, offset);
         default:               return -1;
     }
 }

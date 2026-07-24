@@ -11,6 +11,9 @@
  *   /dev/tty     - Current terminal
  *   /dev/random  - Hardware random number generator (RDRAND, blocking)
  *   /dev/urandom - Hardware random number generator (RDRAND, non-blocking)
+ *   /dev/stdin   - Standard input (fd 0 mapping)    (v4.2.6)
+ *   /dev/stdout  - Standard output (fd 1 mapping)   (v4.2.6)
+ *   /dev/stderr  - Standard error (fd 2 mapping)    (v4.2.6)
  */
 
 #ifndef DEVTMPFS_H

@@ -498,3 +498,600 @@ void drm_clear_screen(uint32_t color) {
         drm_fb_present(1);
     }
 }
+
+/* ================================================================
+ * GUI (v4.2.6) — Color palette (Catppuccin Mocha inspired)
+ * ================================================================ */
+#define GUI_COLOR_BG              0x00241E1E  /* base (dark background) */
+#define GUI_COLOR_SURFACE         0x003E2E2E  /* mantle (window bg) */
+#define GUI_COLOR_TITLE_ACTIVE    0x00FAB489  /* blue (active title bar) */
+#define GUI_COLOR_TITLE_INACTIVE  0x005A5745  /* surface1 (inactive title) */
+#define GUI_COLOR_BORDER          0x00705B58  /* surface2 (border) */
+#define GUI_COLOR_TEXT_ACTIVE     0x00241E1E  /* base (text on active) */
+#define GUI_COLOR_TEXT_INACTIVE   0x00F4D6CD  /* text (text on inactive) */
+#define GUI_COLOR_TEXT_DEFAULT    0x00F4D6CD  /* text (default text) */
+#define GUI_COLOR_CURSOR          0x00FFFFFF  /* white cursor */
+#define GUI_COLOR_CURSOR_OUTLINE  0x00000000  /* black cursor outline */
+#define GUI_COLOR_ACCENT          0x00F5E0DC  /* rosewater (accent) */
+
+/* ================================================================
+ * GUI (v4.2.6) — Cursor bitmap (12x19 arrow)
+ * ================================================================ */
+static const unsigned char cursor_bitmap[19][2] = {
+    {0x80, 0x00}, {0xC0, 0x00}, {0xE0, 0x00}, {0xF0, 0x00},
+    {0xF8, 0x00}, {0xFC, 0x00}, {0xFE, 0x00}, {0xFF, 0x00},
+    {0xFF, 0x80}, {0xF8, 0x00}, {0xDC, 0x00}, {0xCE, 0x00},
+    {0x87, 0x00}, {0x03, 0x80}, {0x01, 0xC0}, {0x00, 0xE0},
+    {0x00, 0x70}, {0x00, 0x38}, {0x00, 0x1C}
+};
+
+/* ================================================================
+ * GUI (v4.2.6) — Static compositor instance
+ * ================================================================ */
+static struct drm_compositor g_compositor;
+static int g_compositor_initialized = 0;
+static int g_input_initialized = 0;
+
+/* ================================================================
+ * GUI (v4.2.6) — Internal helpers
+ * ================================================================ */
+
+/* Set a pixel on a raw 32bpp framebuffer */
+static void gui_set_pixel(void *fb, int pitch, int x, int y, uint32_t color) {
+    if (!fb || x < 0 || y < 0) return;
+    uint32_t *dst = (uint32_t *)((uint8_t *)fb + (uint32_t)y * (uint32_t)pitch + (uint32_t)x * 4);
+    *dst = color;
+}
+
+/* Get the total window width including frame */
+static int win_total_width(struct drm_window *w) {
+    return w->width + 2 * DRM_WIN_BORDER;
+}
+
+/* Get the total window height including frame */
+static int win_total_height(struct drm_window *w) {
+    return w->height + DRM_WIN_TITLE_HEIGHT + DRM_WIN_BORDER;
+}
+
+/* Check if a point is inside a window's frame rect */
+static int win_contains_point(struct drm_window *w, int px, int py) {
+    int tw = win_total_width(w);
+    int th = win_total_height(w);
+    return (px >= w->x && px < w->x + tw && py >= w->y && py < w->y + th);
+}
+
+/* Check if a point is in the window's title bar */
+static int win_title_bar_hit(struct drm_window *w, int px, int py) {
+    int tw = win_total_width(w);
+    return (px >= w->x && px < w->x + tw &&
+            py >= w->y && py < w->y + DRM_WIN_TITLE_HEIGHT);
+}
+
+/* Check if a point is in the window's client area */
+static int win_client_hit(struct drm_window *w, int px, int py) {
+    return (px >= w->x + DRM_WIN_BORDER &&
+            px < w->x + DRM_WIN_BORDER + w->width &&
+            py >= w->y + DRM_WIN_TITLE_HEIGHT &&
+            py < w->y + DRM_WIN_TITLE_HEIGHT + w->height);
+}
+
+/* Blit a 32bpp client framebuffer to the screen framebuffer */
+static void gui_blit_fb(struct drm_window *w, void *screen_fb, int screen_pitch) {
+    if (!w->framebuffer || !screen_fb) return;
+    int src_pitch = w->width * 4;
+    int dst_x = w->x + DRM_WIN_BORDER;
+    int dst_y = w->y + DRM_WIN_TITLE_HEIGHT;
+
+    for (int row = 0; row < w->height; row++) {
+        uint32_t *src = (uint32_t *)((uint8_t *)w->framebuffer + (uint32_t)row * (uint32_t)src_pitch);
+        uint32_t *dst = (uint32_t *)((uint8_t *)screen_fb +
+                         (uint32_t)(dst_y + row) * (uint32_t)screen_pitch +
+                         (uint32_t)dst_x * 4);
+        for (int col = 0; col < w->width; col++) {
+            dst[col] = src[col];
+        }
+    }
+}
+
+/* Draw a single character on the screen framebuffer */
+static void gui_draw_char(void *fb, int pitch, int x, int y, char c, uint32_t fg) {
+    if (!fb) return;
+    int glyph_index = (unsigned char)c;
+    if (glyph_index < 32 || glyph_index > 126) glyph_index = 32;
+    glyph_index -= 32;
+
+    const unsigned char *glyph = font_data[glyph_index];
+    for (int row = 0; row < DRM_FONT_HEIGHT; row++) {
+        for (int col = 0; col < DRM_FONT_WIDTH; col++) {
+            if ((glyph[row] >> (7 - col)) & 1) {
+                gui_set_pixel(fb, pitch, x + col, y + row, fg);
+            }
+        }
+    }
+}
+
+/* Remove a window from the compositor's linked list */
+static void compositor_remove_window(struct drm_compositor *comp, struct drm_window *w) {
+    if (!comp->windows) return;
+    if (comp->windows == w) {
+        comp->windows = w->next;
+        w->next = NULL;
+        return;
+    }
+    struct drm_window *prev = comp->windows;
+    while (prev->next && prev->next != w) prev = prev->next;
+    if (prev->next == w) {
+        prev->next = w->next;
+        w->next = NULL;
+    }
+}
+
+/* Insert a window into the compositor list sorted by z_order ascending */
+static void compositor_insert_sorted(struct drm_compositor *comp, struct drm_window *w) {
+    w->next = NULL;
+    if (!comp->windows || comp->windows->z_order > w->z_order) {
+        w->next = comp->windows;
+        comp->windows = w;
+        return;
+    }
+    struct drm_window *cur = comp->windows;
+    while (cur->next && cur->next->z_order <= w->z_order) cur = cur->next;
+    w->next = cur->next;
+    cur->next = w;
+}
+
+/* ================================================================
+ * GUI (v4.2.6) — Compositor
+ * ================================================================ */
+
+void drm_compositor_init(void) {
+    if (g_compositor_initialized) return;
+
+    struct drm_device *dev = drm_get_device();
+    if (!dev || !dev->gop_available) {
+        log_printf(LOG_LEVEL_WARN, "drm: compositor requires GOP framebuffer\n");
+        return;
+    }
+
+    memset(&g_compositor, 0, sizeof(g_compositor));
+    g_compositor.screen_width = (int)dev->gop_width;
+    g_compositor.screen_height = (int)dev->gop_height;
+    g_compositor.screen_pitch = (int)dev->gop_pitch;
+
+    size_t fb_size = (size_t)dev->gop_pitch * dev->gop_height;
+    g_compositor.screen_fb = kmalloc(fb_size);
+    if (!g_compositor.screen_fb) {
+        log_printf(LOG_LEVEL_ERROR, "drm: failed to allocate compositor back buffer\n");
+        return;
+    }
+    memset(g_compositor.screen_fb, 0, fb_size);
+
+    g_compositor.cursor_x = g_compositor.screen_width / 2;
+    g_compositor.cursor_y = g_compositor.screen_height / 2;
+    g_compositor.cursor_visible = 1;
+    g_compositor.next_z_order = 1;
+    g_compositor.initialized = 1;
+    g_compositor_initialized = 1;
+
+    log_printf(LOG_LEVEL_INFO, "drm: compositor initialized (%dx%d)\n",
+               g_compositor.screen_width, g_compositor.screen_height);
+}
+
+void drm_compositor_render(void) {
+    if (!g_compositor.initialized || !g_compositor.screen_fb) return;
+
+    /* Clear screen to background color */
+    drm_fill_rect(g_compositor.screen_fb, g_compositor.screen_pitch,
+                  0, 0, g_compositor.screen_width, g_compositor.screen_height,
+                  GUI_COLOR_BG);
+
+    /* Render each window from bottom to top */
+    struct drm_window *w = g_compositor.windows;
+    while (w) {
+        if (w->visible) {
+            drm_draw_window_frame(w);
+            gui_blit_fb(w, g_compositor.screen_fb, g_compositor.screen_pitch);
+        }
+        w = w->next;
+    }
+
+    /* Draw cursor on top */
+    if (g_compositor.cursor_visible) {
+        int cx = g_compositor.cursor_x;
+        int cy = g_compositor.cursor_y;
+        for (int row = 0; row < 19; row++) {
+            for (int col = 0; col < 12; col++) {
+                int byte_idx = col / 8;
+                int bit_idx = 7 - (col % 8);
+                if (cursor_bitmap[row][byte_idx] & (1 << bit_idx)) {
+                    /* Draw outline first */
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            if (dx == 0 && dy == 0) continue;
+                            gui_set_pixel(g_compositor.screen_fb, g_compositor.screen_pitch,
+                                          cx + col + dx, cy + row + dy, GUI_COLOR_CURSOR_OUTLINE);
+                        }
+                    }
+                    /* Draw cursor pixel */
+                    gui_set_pixel(g_compositor.screen_fb, g_compositor.screen_pitch,
+                                  cx + col, cy + row, GUI_COLOR_CURSOR);
+                }
+            }
+        }
+    }
+}
+
+void drm_compositor_swap(void) {
+    if (!g_compositor.initialized || !g_compositor.screen_fb) return;
+
+    struct drm_device *dev = drm_get_device();
+    if (!dev || !dev->gop_available || !dev->gop_fb) return;
+
+    size_t copy_size = (size_t)dev->gop_pitch * dev->gop_height;
+    memcpy(dev->gop_fb, g_compositor.screen_fb, copy_size);
+}
+
+/* ================================================================
+ * GUI (v4.2.6) — Window Management
+ * ================================================================ */
+
+struct drm_window *drm_window_create(int x, int y, int w, int h, const char *title) {
+    if (!g_compositor.initialized) return NULL;
+    if (w <= 0 || h <= 0) return NULL;
+
+    struct drm_window *win = (struct drm_window *)kmalloc(sizeof(struct drm_window));
+    if (!win) return NULL;
+    memset(win, 0, sizeof(struct drm_window));
+
+    win->x = x;
+    win->y = y;
+    win->width = w;
+    win->height = h;
+    win->visible = 1;
+    win->dirty = 1;
+
+    /* Set title */
+    if (title) {
+        int i;
+        for (i = 0; i < 63 && title[i]; i++) win->title[i] = title[i];
+        win->title[i] = '\0';
+    }
+
+    /* Allocate client framebuffer (32bpp) */
+    size_t fb_size = (size_t)w * h * 4;
+    win->framebuffer = kmalloc(fb_size);
+    if (!win->framebuffer) {
+        kfree(win);
+        return NULL;
+    }
+    memset(win->framebuffer, 0, fb_size);
+
+    /* Fill with default background */
+    drm_fill_rect(win->framebuffer, w * 4, 0, 0, w, h, GUI_COLOR_SURFACE);
+
+    /* Assign z_order and insert into compositor list */
+    win->z_order = g_compositor.next_z_order++;
+    compositor_insert_sorted(&g_compositor, win);
+
+    /* If this is the first window, focus it */
+    if (!g_compositor.active_window) {
+        g_compositor.active_window = win;
+    }
+
+    log_printf(LOG_LEVEL_INFO, "drm: window \"%s\" created (%dx%d) at (%d,%d)\n",
+               win->title, w, h, x, y);
+    return win;
+}
+
+void drm_window_destroy(struct drm_window *window) {
+    if (!window) return;
+
+    /* Remove from compositor list */
+    compositor_remove_window(&g_compositor, window);
+
+    /* Update active window if needed */
+    if (g_compositor.active_window == window) {
+        g_compositor.active_window = g_compositor.windows;
+    }
+
+    /* Free framebuffer */
+    if (window->framebuffer) {
+        kfree(window->framebuffer);
+        window->framebuffer = NULL;
+    }
+
+    log_printf(LOG_LEVEL_INFO, "drm: window \"%s\" destroyed\n", window->title);
+    kfree(window);
+}
+
+void drm_window_move(struct drm_window *window, int x, int y) {
+    if (!window) return;
+    window->x = x;
+    window->y = y;
+    window->dirty = 1;
+}
+
+void drm_window_resize(struct drm_window *window, int w, int h) {
+    if (!window || w <= 0 || h <= 0) return;
+
+    void *new_fb = kmalloc((size_t)w * h * 4);
+    if (!new_fb) return;
+    memset(new_fb, 0, (size_t)w * h * 4);
+
+    /* Copy old content (clamped) */
+    int copy_w = (w < window->width) ? w : window->width;
+    int copy_h = (h < window->height) ? h : window->height;
+    int old_pitch = window->width * 4;
+    int new_pitch = w * 4;
+    for (int row = 0; row < copy_h; row++) {
+        uint32_t *src = (uint32_t *)((uint8_t *)window->framebuffer + (uint32_t)row * (uint32_t)old_pitch);
+        uint32_t *dst = (uint32_t *)((uint8_t *)new_fb + (uint32_t)row * (uint32_t)new_pitch);
+        for (int col = 0; col < copy_w; col++) {
+            dst[col] = src[col];
+        }
+    }
+
+    /* Fill new area with background */
+    if (w > window->width) {
+        drm_fill_rect(new_fb, new_pitch, window->width, 0, w - window->width, h, GUI_COLOR_SURFACE);
+    }
+    if (h > window->height) {
+        drm_fill_rect(new_fb, new_pitch, 0, window->height, w, h - window->height, GUI_COLOR_SURFACE);
+    }
+
+    kfree(window->framebuffer);
+    window->framebuffer = new_fb;
+    window->width = w;
+    window->height = h;
+    window->dirty = 1;
+
+    log_printf(LOG_LEVEL_INFO, "drm: window \"%s\" resized to %dx%d\n", window->title, w, h);
+}
+
+void drm_window_raise(struct drm_window *window) {
+    if (!window) return;
+
+    /* Remove from current position and reinsert at top */
+    compositor_remove_window(&g_compositor, window);
+    window->z_order = g_compositor.next_z_order++;
+    compositor_insert_sorted(&g_compositor, window);
+    window->dirty = 1;
+}
+
+void drm_window_set_title(struct drm_window *window, const char *title) {
+    if (!window || !title) return;
+    int i;
+    for (i = 0; i < 63 && title[i]; i++) window->title[i] = title[i];
+    window->title[i] = '\0';
+    window->dirty = 1;
+}
+
+void *drm_window_get_fb(struct drm_window *window) {
+    return window ? window->framebuffer : NULL;
+}
+
+void drm_window_mark_dirty(struct drm_window *window) {
+    if (window) window->dirty = 1;
+}
+
+/* ================================================================
+ * GUI (v4.2.6) — Input Event System
+ * ================================================================ */
+
+void drm_input_init(void) {
+    if (g_input_initialized) return;
+    g_input_initialized = 1;
+    log_printf(LOG_LEVEL_INFO, "drm: input subsystem initialized\n");
+}
+
+void drm_input_handle_key(int key_code, int pressed) {
+    if (!g_compositor.initialized) return;
+    if (!pressed) return;  /* Only handle key press, not release */
+
+    /* Alt+Tab: cycle through windows */
+    /* Tab scancode = 0x0F, Alt modifier */
+    (void)key_code;
+    /* Actual Alt+Tab handling is done in keyboard.c which calls drm_input_cycle_focus */
+}
+
+void drm_input_handle_mouse_move(int dx, int dy) {
+    if (!g_compositor.initialized) return;
+    g_compositor.cursor_x += dx;
+    g_compositor.cursor_y += dy;
+    if (g_compositor.cursor_x < 0) g_compositor.cursor_x = 0;
+    if (g_compositor.cursor_y < 0) g_compositor.cursor_y = 0;
+    if (g_compositor.cursor_x >= g_compositor.screen_width)
+        g_compositor.cursor_x = g_compositor.screen_width - 1;
+    if (g_compositor.cursor_y >= g_compositor.screen_height)
+        g_compositor.cursor_y = g_compositor.screen_height - 1;
+}
+
+void drm_input_handle_mouse_button(int button, int pressed) {
+    if (!g_compositor.initialized) return;
+    if (!pressed) return;
+
+    struct drm_window *w = drm_find_window_at(g_compositor.cursor_x, g_compositor.cursor_y);
+    if (w) {
+        drm_window_raise(w);
+        drm_input_focus_window(w);
+    }
+}
+
+struct drm_window *drm_find_window_at(int x, int y) {
+    if (!g_compositor.initialized) return NULL;
+
+    /* Search from top to bottom (highest z_order first) */
+    struct drm_window *w = g_compositor.windows;
+    struct drm_window *found = NULL;
+    while (w) {
+        if (w->visible && win_contains_point(w, x, y)) {
+            found = w;  /* Keep going — last match is topmost */
+        }
+        w = w->next;
+    }
+    return found;
+}
+
+void drm_input_focus_window(struct drm_window *window) {
+    if (!g_compositor.initialized) return;
+    if (g_compositor.active_window == window) return;
+
+    struct drm_window *old = g_compositor.active_window;
+    g_compositor.active_window = window;
+
+    if (old) old->dirty = 1;
+    if (window) window->dirty = 1;
+
+    log_printf(LOG_LEVEL_INFO, "drm: focus changed to \"%s\"\n",
+               window ? window->title : "(none)");
+}
+
+void drm_input_dispatch_event(struct drm_input_event *event) {
+    if (!event || !g_compositor.initialized) return;
+
+    struct drm_window *target = g_compositor.active_window;
+    if (!target) return;
+
+    /* For now, just log the event */
+    switch (event->type) {
+        case DRM_EV_KEY:
+            log_printf(LOG_LEVEL_DEBUG, "drm: key event code=%d mod=%d -> \"%s\"\n",
+                       event->key_code, event->key_modifiers, target->title);
+            break;
+        case DRM_EV_MOUSE_MOVE:
+            break;
+        case DRM_EV_MOUSE_BUTTON:
+            break;
+        case DRM_EV_MOUSE_SCROLL:
+            break;
+    }
+}
+
+/* Cycle focus to the next visible window (for Alt+Tab) */
+void drm_input_cycle_focus(void) {
+    if (!g_compositor.initialized || !g_compositor.windows) return;
+
+    struct drm_window *cur = g_compositor.active_window;
+    struct drm_window *next = NULL;
+
+    if (cur && cur->next) {
+        next = cur->next;
+    } else {
+        /* Wrap around to the first window */
+        next = g_compositor.windows;
+    }
+
+    if (next && next != cur) {
+        drm_window_raise(next);
+        drm_input_focus_window(next);
+        /* Render and present immediately so the change is visible */
+        drm_compositor_render();
+        drm_compositor_swap();
+    }
+}
+
+/* ================================================================
+ * GUI (v4.2.6) — Drawing Primitives
+ * ================================================================ */
+
+void drm_draw_rect(int x, int y, int w, int h, uint32_t color) {
+    if (!g_compositor.initialized || !g_compositor.screen_fb) return;
+    drm_fill_rect(g_compositor.screen_fb, g_compositor.screen_pitch, x, y, w, h, color);
+}
+
+void drm_draw_line(int x1, int y1, int x2, int y2, uint32_t color) {
+    if (!g_compositor.initialized || !g_compositor.screen_fb) return;
+
+    int dx = x2 - x1;
+    int dy = y2 - y1;
+    int abs_dx = (dx < 0) ? -dx : dx;
+    int abs_dy = (dy < 0) ? -dy : dy;
+    int sx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+    int sy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+
+    if (abs_dx >= abs_dy) {
+        int err = abs_dx / 2;
+        int y = y1;
+        for (int x = x1; ; x += sx) {
+            gui_set_pixel(g_compositor.screen_fb, g_compositor.screen_pitch, x, y, color);
+            if (x == x2) break;
+            err -= abs_dy;
+            if (err < 0) { y += sy; err += abs_dx; }
+        }
+    } else {
+        int err = abs_dy / 2;
+        int x = x1;
+        for (int y = y1; ; y += sy) {
+            gui_set_pixel(g_compositor.screen_fb, g_compositor.screen_pitch, x, y, color);
+            if (y == y2) break;
+            err -= abs_dx;
+            if (err < 0) { x += sx; err += abs_dy; }
+        }
+    }
+}
+
+void drm_draw_text(int x, int y, const char *text, uint32_t color) {
+    if (!g_compositor.initialized || !g_compositor.screen_fb || !text) return;
+    int cx = x;
+    for (int i = 0; text[i]; i++) {
+        if (text[i] == '\n') {
+            cx = x;
+            y += DRM_FONT_HEIGHT;
+            continue;
+        }
+        gui_draw_char(g_compositor.screen_fb, g_compositor.screen_pitch, cx, y, text[i], color);
+        cx += DRM_FONT_WIDTH;
+    }
+}
+
+void drm_draw_window_frame(struct drm_window *window) {
+    if (!window || !g_compositor.initialized || !g_compositor.screen_fb) return;
+
+    int is_active = (window == g_compositor.active_window);
+    uint32_t title_color = is_active ? GUI_COLOR_TITLE_ACTIVE : GUI_COLOR_TITLE_INACTIVE;
+    uint32_t text_color = is_active ? GUI_COLOR_TEXT_ACTIVE : GUI_COLOR_TEXT_INACTIVE;
+    uint32_t border_color = GUI_COLOR_BORDER;
+
+    int total_w = win_total_width(window);
+    int total_h = win_total_height(window);
+
+    /* Draw border (outer rectangle) */
+    drm_fill_rect(g_compositor.screen_fb, g_compositor.screen_pitch,
+                  window->x, window->y, total_w, total_h, border_color);
+
+    /* Draw title bar */
+    drm_fill_rect(g_compositor.screen_fb, g_compositor.screen_pitch,
+                  window->x + DRM_WIN_BORDER,
+                  window->y + DRM_WIN_BORDER,
+                  total_w - 2 * DRM_WIN_BORDER,
+                  DRM_WIN_TITLE_HEIGHT - DRM_WIN_BORDER,
+                  title_color);
+
+    /* Draw client area background */
+    drm_fill_rect(g_compositor.screen_fb, g_compositor.screen_pitch,
+                  window->x + DRM_WIN_BORDER,
+                  window->y + DRM_WIN_TITLE_HEIGHT,
+                  total_w - 2 * DRM_WIN_BORDER,
+                  total_h - DRM_WIN_TITLE_HEIGHT - DRM_WIN_BORDER,
+                  GUI_COLOR_BG);
+
+    /* Draw title text (centered vertically in title bar) */
+    int title_y = window->y + (DRM_WIN_TITLE_HEIGHT - DRM_FONT_HEIGHT) / 2;
+    int title_x = window->x + DRM_WIN_BORDER + 8;
+    drm_draw_text(title_x, title_y, window->title, text_color);
+}
+
+void drm_fill_rect(void *fb, int pitch, int x, int y, int w, int h, uint32_t color) {
+    if (!fb || w <= 0 || h <= 0) return;
+
+    for (int row = 0; row < h; row++) {
+        uint32_t *dst = (uint32_t *)((uint8_t *)fb + (uint32_t)(y + row) * (uint32_t)pitch + (uint32_t)x * 4);
+        for (int col = 0; col < w; col++) {
+            dst[col] = color;
+        }
+    }
+}
+
+struct drm_compositor *drm_get_compositor(void) {
+    return g_compositor.initialized ? &g_compositor : NULL;
+}

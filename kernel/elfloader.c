@@ -16,6 +16,16 @@
 #define USER_STACK_PAGES    16
 #define USER_STACK_SIZE     (USER_STACK_PAGES * PAGE_SIZE)
 
+/* LDSO (v4.2.6) */
+/* Interpreter (ld.so) fixed load address */
+#define INTERP_BASE         0x7F000000ULL
+#define INTERP_MAX_SIZE     0x00800000ULL  /* 8 MB max for interpreter */
+#define INTERP_PATH_MAX     256
+
+/* Default interpreter paths */
+#define INTERP_DEFAULT_1    "/lib/ld.so"
+#define INTERP_DEFAULT_2    "/lib/ld-linux-x86-64.so.2"
+
 /* Internal structure for .dynamic parsing results */
 struct elf_dyn_info {
     uint64_t rela_addr;
@@ -81,6 +91,47 @@ static int elf_poke32(uint64_t pml4_phys, uint64_t va, uint32_t val) {
     if (!phys) return -1;
     *(uint32_t *)(uintptr_t)phys = val;
     return 0;
+}
+
+/* LDSO (v4.2.6) */
+/*
+ * elf_read_interp: Read the PT_INTERP segment from an ELF file.
+ * Finds the PT_INTERP program header, reads the interpreter path
+ * string from the file, and copies it to the output buffer.
+ *
+ * @f:       open file handle (must be positioned at file offset 0)
+ * @phdrs:   array of program headers
+ * @phnum:   number of program headers
+ * @interp:  output buffer for the interpreter path
+ * @maxlen:  size of the output buffer
+ * Returns:  0 on success, -1 if no PT_INTERP found or read error.
+ */
+static int elf_read_interp(struct file *f, Elf64_Phdr *phdrs, int phnum,
+                            char *interp, int maxlen) {
+    for (int i = 0; i < phnum; ++i) {
+        if (phdrs[i].p_type != PT_INTERP) continue;
+
+        /* Validate the interpreter path segment */
+        uint64_t filesz = phdrs[i].p_filesz;
+        if (filesz == 0 || filesz > (uint64_t)maxlen) {
+            log_printf(LOG_LEVEL_WARN,
+                       "elf_read_interp: bad PT_INTERP size %lu\n",
+                       (unsigned long)filesz);
+            return -1;
+        }
+
+        f->offset = phdrs[i].p_offset;
+        ssize_t r = vfs_read(f, interp, (size_t)filesz);
+        if (r != (ssize_t)filesz) {
+            log_printf(LOG_LEVEL_ERR, "elf_read_interp: read failed\n");
+            return -1;
+        }
+        interp[filesz] = '\0';
+        log_printf(LOG_LEVEL_INFO, "elf_read_interp: interpreter path = %s\n",
+                   interp);
+        return 0;
+    }
+    return -1; /* no PT_INTERP */
 }
 
 /*
@@ -412,7 +463,8 @@ static uint64_t elf_setup_user_stack(uint64_t pml4, int argc,
                                       uint64_t entry,
                                       uint64_t phdr_addr,
                                       uint16_t phnum,
-                                      uint16_t phentsize) {
+                                      uint16_t phentsize,
+                                      uint64_t interp_base) {
     /* Count envp entries */
     int envc = 0;
     if (envp) {
@@ -429,12 +481,12 @@ static uint64_t elf_setup_user_stack(uint64_t pml4, int argc,
     }
 
     /* Calculate metadata size:
-     *   auxv:  6 entries × 16 bytes = 96
+     *   auxv:  7 entries × 16 bytes = 112 (with AT_BASE)
      *   envp:  (envc + 1) × 8 bytes
      *   argv:  (argc + 1) × 8 bytes
      *   argc:  8 bytes
      */
-    size_t metadata_size = 96 + (size_t)(envc + 1) * 8 +
+    size_t metadata_size = 112 + (size_t)(envc + 1) * 8 +
                            (size_t)(argc + 1) * 8 + 8;
     size_t total_needed = strings_size + metadata_size + 16; /* +16 for alignment slack */
 
@@ -563,6 +615,15 @@ static uint64_t elf_setup_user_stack(uint64_t pml4, int argc,
         goto free_stack_and_data;
     }
 
+    /* LDSO (v4.2.6): AT_BASE — interpreter base address */
+    if (interp_base != 0) {
+        write_pos -= 16;
+        if (elf_poke64(pml4, write_pos, AT_BASE) != 0 ||
+            elf_poke64(pml4, write_pos + 8, interp_base) != 0) {
+            goto free_stack_and_data;
+        }
+    }
+
     /* --- Step 4: Write envp pointer array (NULL-terminated) --- */
     write_pos -= 8;
     if (elf_poke64(pml4, write_pos, 0) != 0) { goto free_stack_and_data; }
@@ -631,7 +692,8 @@ free_stack:
  */
 static void *elf_load_core(const char *path, uint64_t *pml4_out,
                             uint64_t *stack_out,
-                            char *const argv[], char *const envp[]) {
+                            char *const argv[], char *const envp[],
+                            uint64_t interp_base) {
     struct file *f = vfs_open(path, 0);
     if (!f) { log_printf(LOG_LEVEL_ERR, "elf_load: open failed %s\n", path); return NULL; }
 
@@ -902,7 +964,8 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
         if (argv) { while (argv[argc]) ++argc; }
         uint64_t rsp = elf_setup_user_stack(new_pml4, argc, argv, envp,
                                              entry, at_phdr,
-                                             ehdr.e_phnum, ehdr.e_phentsize);
+                                             ehdr.e_phnum, ehdr.e_phentsize,
+                                             interp_base);
         if (rsp == 0) {
             kfree(phdrs); vfs_close(f);
             free_pagetable(new_pml4);
@@ -935,7 +998,7 @@ static void *elf_load_core(const char *path, uint64_t *pml4_out,
  */
 void *elf_load(const char *path, uint64_t *pml4_out) {
     uint64_t stack_unused;
-    return elf_load_core(path, pml4_out, &stack_unused, NULL, NULL);
+    return elf_load_core(path, pml4_out, &stack_unused, NULL, NULL, 0);
 }
 
 /*
@@ -966,6 +1029,186 @@ void *elf_load(const char *path, uint64_t *pml4_out) {
  *
  * (Top 10 #1 / BUG-PROC-H1)
  */
+/* LDSO (v4.2.6) */
+/*
+ * exec_elf_interp: Load a dynamically linked ELF with an interpreter.
+ *
+ * When the main binary has a PT_INTERP segment, the kernel loads the
+ * interpreter (ld.so) at a fixed address, then loads the main binary's
+ * segments. The interpreter handles loading shared libraries, symbol
+ * resolution, and relocations before jumping to the main binary's entry.
+ *
+ * Steps:
+ *   1. Read the interpreter path from the main binary's PT_INTERP
+ *   2. Try to open the interpreter file; if not found, fall back to
+ *      static linking (load the binary directly)
+ *   3. Load the interpreter ELF at INTERP_BASE (0x7F000000)
+ *   4. Load the main binary's segments into the same address space
+ *   5. Set up the user stack with AT_BASE pointing to the interpreter
+ *   6. Return the interpreter's entry point
+ *
+ * Returns: interpreter entry point on success, NULL on failure.
+ * On success: *new_rsp_out and *new_pml4_out are set.
+ */
+static void *exec_elf_interp(const char *path, const char *interp_path,
+                              uint64_t *new_rsp_out, uint64_t *new_pml4_out) {
+    if (!path || !interp_path || !new_rsp_out || !new_pml4_out) return NULL;
+
+    log_printf(LOG_LEVEL_INFO, "exec_elf_interp: main=%s interp=%s\n",
+               path, interp_path);
+
+    /* 1. Try to open the interpreter file */
+    struct file *interp_f = vfs_open(interp_path, 0);
+    if (!interp_f) {
+        log_printf(LOG_LEVEL_WARN,
+                   "exec_elf_interp: cannot open interpreter %s, "
+                   "falling back to static\n", interp_path);
+        /* Fall back: load the main binary directly (static linking) */
+        return elf_load_pie(path, NULL, NULL, new_pml4_out, new_rsp_out);
+    }
+
+    /* 2. Read the interpreter's ELF header */
+    Elf64_Ehdr interp_ehdr;
+    interp_f->offset = 0;
+    ssize_t r = vfs_read(interp_f, &interp_ehdr, sizeof(interp_ehdr));
+    if (r != (ssize_t)sizeof(interp_ehdr) ||
+        interp_ehdr.e_ident[0] != 0x7f || interp_ehdr.e_ident[1] != 'E' ||
+        interp_ehdr.e_ident[2] != 'L' || interp_ehdr.e_ident[3] != 'F' ||
+        interp_ehdr.e_machine != 0x3E) {
+        log_printf(LOG_LEVEL_ERR, "exec_elf_interp: invalid interpreter ELF\n");
+        vfs_close(interp_f);
+        return NULL;
+    }
+
+    if (interp_ehdr.e_phnum == 0 || interp_ehdr.e_phnum > 128) {
+        vfs_close(interp_f);
+        return NULL;
+    }
+
+    /* 3. Read interpreter program headers */
+    int interp_phnum = (int)interp_ehdr.e_phnum;
+    Elf64_Phdr *interp_phdrs = (Elf64_Phdr *)kmalloc(
+        (size_t)interp_phnum * sizeof(Elf64_Phdr));
+    if (!interp_phdrs) { vfs_close(interp_f); return NULL; }
+
+    interp_f->offset = interp_ehdr.e_phoff;
+    r = vfs_read(interp_f, interp_phdrs,
+                 (size_t)interp_phnum * sizeof(Elf64_Phdr));
+    if (r != (ssize_t)(interp_phnum * sizeof(Elf64_Phdr))) {
+        kfree(interp_phdrs); vfs_close(interp_f);
+        return NULL;
+    }
+
+    /* 4. Find interpreter loadable segment bounds */
+    uint64_t interp_min_vaddr = UINT64_MAX;
+    for (int i = 0; i < interp_phnum; ++i) {
+        if (interp_phdrs[i].p_type != PT_LOAD) continue;
+        uint64_t s = interp_phdrs[i].p_vaddr;
+        if (s < interp_min_vaddr) interp_min_vaddr = s;
+    }
+    if (interp_min_vaddr == UINT64_MAX) {
+        kfree(interp_phdrs); vfs_close(interp_f);
+        return NULL;
+    }
+
+    /* 5. Create a new address space */
+    uint64_t new_pml4 = clone_kernel_pml4();
+    if (!new_pml4) {
+        kfree(interp_phdrs); vfs_close(interp_f);
+        return NULL;
+    }
+
+    /* 6. Load interpreter segments at INTERP_BASE + vaddr */
+    uint64_t interp_base = INTERP_BASE;
+    for (int i = 0; i < interp_phnum; ++i) {
+        if (interp_phdrs[i].p_type != PT_LOAD) continue;
+
+        uint64_t seg_vstart = interp_base + interp_phdrs[i].p_vaddr;
+        uint64_t seg_filesz = interp_phdrs[i].p_filesz;
+        uint64_t seg_memsz  = interp_phdrs[i].p_memsz;
+        uint64_t file_offset = interp_phdrs[i].p_offset;
+
+        uint64_t page_base   = seg_vstart & ~0xFFFULL;
+        uint64_t page_offset = seg_vstart & 0xFFFULL;
+        uint64_t to_alloc = (page_offset + seg_memsz + 4095) & ~0xFFFULL;
+        uint64_t pages = to_alloc / 4096;
+
+        uint64_t flags = PTE_USER;
+        if (interp_phdrs[i].p_flags & PF_W) flags |= PTE_RW;
+        if (!(interp_phdrs[i].p_flags & 1)) flags |= PTE_NX;
+
+        for (uint64_t p = 0; p < pages; ++p) {
+            uint64_t va = page_base + p * 4096;
+            void *phys = alloc_page();
+            if (!phys) {
+                kfree(interp_phdrs); vfs_close(interp_f);
+                free_pagetable(new_pml4);
+                return NULL;
+            }
+            memset(phys, 0, 4096);
+            if (map_page(new_pml4, va, (uint64_t)(uintptr_t)phys, flags) != 0) {
+                free_page(phys);
+                kfree(interp_phdrs); vfs_close(interp_f);
+                free_pagetable(new_pml4);
+                return NULL;
+            }
+        }
+
+        /* Read file contents */
+        uint64_t remaining = seg_filesz;
+        uint64_t read_off = 0;
+        while (remaining > 0) {
+            uint64_t va = seg_vstart + read_off;
+            uint64_t phys = elf_resolve_va(new_pml4, va);
+            if (!phys) break;
+            uint64_t page_inner = va & 0xFFFULL;
+            uint64_t toread = 4096 - page_inner;
+            if (toread > remaining) toread = remaining;
+
+            interp_f->offset = file_offset + read_off;
+            ssize_t got = vfs_read(interp_f, (void *)(uintptr_t)phys, toread);
+            if (got <= 0) break;
+            read_off += (uint64_t)got;
+            remaining -= (uint64_t)got;
+        }
+    }
+
+    /* 7. Apply relocations for the interpreter */
+    {
+        struct elf_dyn_info interp_dyn;
+        if (elf_load_dynamic(interp_f, interp_phdrs, interp_phnum,
+                              interp_base, &interp_dyn) == 0) {
+            elf_apply_relocations(new_pml4, interp_base, &interp_dyn,
+                                   interp_phdrs, interp_phnum, interp_f);
+        }
+    }
+
+    kfree(interp_phdrs);
+    vfs_close(interp_f);
+
+    /* 8. Load the main binary into the same address space.
+     *    Use elf_load_core directly with interp_base set. */
+    uint64_t stack = 0;
+    void *entry = (void *)elf_load_core(path, &new_pml4, &stack, NULL, NULL,
+                                         interp_base);
+    if (!entry) {
+        log_printf(LOG_LEVEL_ERR, "exec_elf_interp: failed to load main binary\n");
+        free_pagetable(new_pml4);
+        return NULL;
+    }
+
+    /* 9. The interpreter's entry point is what we return */
+    uint64_t interp_entry = interp_base + interp_ehdr.e_entry;
+
+    *new_rsp_out = stack;
+    *new_pml4_out = new_pml4;
+
+    log_printf(LOG_LEVEL_INFO,
+               "exec_elf_interp: interp_entry=%p main_entry=%p\n",
+               (void *)(uintptr_t)interp_entry, entry);
+    return (void *)(uintptr_t)interp_entry;
+}
+
 /* Forward declaration */
 void *elf_load_pie(const char *path, char *const argv[], char *const envp[],
                    uint64_t *pml4_out, uint64_t *stack_out);
@@ -974,20 +1217,74 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
                        uint64_t *new_pml4_out) {
     if (!path || !new_rsp_out || !new_pml4_out) return NULL;
 
-    /* 1. Create a fresh address space (kernel mappings only) */
-    uint64_t new_pml4 = clone_kernel_pml4();
-    if (!new_pml4) {
-        log_printf(LOG_LEVEL_ERR, "exec: clone_kernel_pml4 failed\n");
+    /* LDSO (v4.2.6): Check if the ELF has a PT_INTERP segment.
+     * If so, load the interpreter (ld.so). */
+    struct file *f = vfs_open(path, 0);
+    if (!f) {
+        log_printf(LOG_LEVEL_ERR, "exec: open failed %s\n", path);
         return NULL;
     }
 
-    /* 2. Load the ELF into the new address space */
-    uint64_t stack = 0;
-    void *entry = elf_load_pie(path, NULL, NULL, &new_pml4, &stack);
-    if (!entry) {
-        log_printf(LOG_LEVEL_ERR, "exec: elf_load_pie failed for %s\n", path);
-        free_pagetable(new_pml4);
+    Elf64_Ehdr ehdr;
+    f->offset = 0;
+    ssize_t r = vfs_read(f, &ehdr, sizeof(ehdr));
+    if (r != (ssize_t)sizeof(ehdr) ||
+        ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
+        ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F' ||
+        ehdr.e_machine != 0x3E) {
+        vfs_close(f);
+        log_printf(LOG_LEVEL_ERR, "exec: invalid ELF header\n");
         return NULL;
+    }
+
+    if (ehdr.e_phnum == 0 || ehdr.e_phnum > 128) {
+        vfs_close(f);
+        return NULL;
+    }
+
+    int phnum = (int)ehdr.e_phnum;
+    Elf64_Phdr *phdrs = (Elf64_Phdr *)kmalloc((size_t)phnum * sizeof(Elf64_Phdr));
+    if (!phdrs) { vfs_close(f); return NULL; }
+
+    f->offset = ehdr.e_phoff;
+    r = vfs_read(f, phdrs, (size_t)phnum * sizeof(Elf64_Phdr));
+    if (r != (ssize_t)(phnum * sizeof(Elf64_Phdr))) {
+        kfree(phdrs); vfs_close(f);
+        return NULL;
+    }
+
+    char interp_path[INTERP_PATH_MAX];
+    int has_interp = (elf_read_interp(f, phdrs, phnum, interp_path,
+                                       INTERP_PATH_MAX) == 0);
+
+    kfree(phdrs);
+    vfs_close(f);
+
+    /* 1. Create a fresh address space (kernel mappings only) */
+    uint64_t new_pml4;
+    uint64_t stack = 0;
+    void *entry;
+
+    if (has_interp) {
+        /* Dynamically linked: exec_elf_interp creates its own pml4 */
+        entry = exec_elf_interp(path, interp_path, &stack, &new_pml4);
+        if (!entry) {
+            log_printf(LOG_LEVEL_ERR, "exec: exec_elf_interp failed for %s\n", path);
+            return NULL;
+        }
+    } else {
+        /* Statically linked: create pml4 and load directly */
+        new_pml4 = clone_kernel_pml4();
+        if (!new_pml4) {
+            log_printf(LOG_LEVEL_ERR, "exec: clone_kernel_pml4 failed\n");
+            return NULL;
+        }
+        entry = elf_load_pie(path, NULL, NULL, &new_pml4, &stack);
+        if (!entry) {
+            log_printf(LOG_LEVEL_ERR, "exec: elf_load_pie failed for %s\n", path);
+            free_pagetable(new_pml4);
+            return NULL;
+        }
     }
 
     /* 3. Replace the current address space.
@@ -1052,5 +1349,5 @@ int exec_elf(const char *path) {
 void *elf_load_pie(const char *path, char *const argv[], char *const envp[],
                    uint64_t *pml4_out, uint64_t *stack_out) {
     if (!stack_out) return NULL;
-    return elf_load_core(path, pml4_out, stack_out, argv, envp);
+    return elf_load_core(path, pml4_out, stack_out, argv, envp, 0);
 }

@@ -31,12 +31,16 @@ _start:
     j 1b
 2:
 
-    /* Jump to kernel_main */
+    /* Call arch_early_init() for SBI console, Sv39 page tables, MMU */
+    /* MULTIARCH (v4.2.6) */
+    call arch_early_init
+
+    /* Jump to kmain */
     /* On RISC-V, a0 holds the hart ID (from SBI) */
     /* a1 holds a pointer to the device tree blob (DTB) */
-    call kernel_main
+    call kmain
 
-    /* If kernel_main returns, halt */
+    /* If kmain returns, halt */
 halt:
     wfi
     j halt

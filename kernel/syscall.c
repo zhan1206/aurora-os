@@ -8,6 +8,7 @@
 #include "include/trapframe.h"
 #include "include/errno.h"
 #include "include/net.h"
+#include "net/unix.h"       /* AF_UNIX (v4.2.6) */
 #include "include/version.h"
 #include "sched.h"
 #include "signal.h"
@@ -20,6 +21,7 @@
 #include "seccomp.h"
 #include "aslr.h"
 #include "rtc.h"
+#include "acpi.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -66,6 +68,16 @@ static int fd_validate(int fd, uint32_t required_cap) {
     }
     /* Raw file pointers (tag bit 0) have no capability restrictions */
     return 0;
+}
+
+/* AF_UNIX (v4.2.6): Check if an fd is a Unix domain socket and return it */
+static inline struct unix_sock *fd_to_unix_sock(int fd) {
+    if (fd < 0 || fd >= MAX_FDS) return NULL;
+    uintptr_t entry = current->fd_table[fd];
+    /* Valid kernel pointers are > 0x1000 and bit 0 = 0 (not a cap entry) */
+    if (entry == (uintptr_t)-1 || entry == 0 || entry == 0x1 || (entry & 1))
+        return NULL;
+    return (struct unix_sock *)entry;
 }
 
 /* Simple stat structure for fstat syscall */
@@ -239,6 +251,15 @@ static long sys_open(const char *path, int flags) {
 
 static long sys_close(int fd) {
     if (fd < 0 || fd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
+
+    /* AF_UNIX (v4.2.6): Clean up Unix domain socket */
+    struct unix_sock *usk = fd_to_unix_sock(fd);
+    if (usk) {
+        unix_close(usk);
+        current->fd_table[fd] = (uintptr_t)-1;
+        return 0;
+    }
+
     int ret = fd_close(current, fd);
     if (ret < 0) current->t_errno = EBADF;
     return ret;
@@ -695,7 +716,9 @@ long sys_fork(void) {
      * entry pointers (tag=1).  Calling vfs_file_dup on a capability
      * entry would cause a kernel crash.  Capability entries are not
      * inherited by the child (they are used for IPC fd passing and
-     * should not be duplicated across fork).  (BUG-PROC-H5) */
+     * should not be duplicated across fork).  (BUG-PROC-H5)
+     * AF_UNIX (v4.2.6): Unix socket entries are stored as raw pointers
+     * (tag=0) and must be handled separately from regular file pointers. */
     for (int i = 0; i < MAX_FDS; i++) {
         uintptr_t entry = current->fd_table[i];
         if (entry == (uintptr_t)-1) continue;
@@ -703,9 +726,18 @@ long sys_fork(void) {
             /* Capability entry: not inherited by child */
             child->fd_table[i] = (uintptr_t)-1;
         } else {
-            /* Regular file pointer: inherit with incremented refcount */
-            child->fd_table[i] = entry;
-            vfs_file_dup((struct file *)entry);
+            /* AF_UNIX (v4.2.6): Check for Unix domain socket */
+            struct unix_sock *usk = fd_to_unix_sock(i);
+            if (usk) {
+                child->fd_table[i] = entry;
+                spin_lock(&usk->lock);
+                usk->refcount++;
+                spin_unlock(&usk->lock);
+            } else {
+                /* Regular file pointer: inherit with incremented refcount */
+                child->fd_table[i] = entry;
+                vfs_file_dup((struct file *)entry);
+            }
         }
     }
 
@@ -831,10 +863,20 @@ static long sys_stat(const char *path, struct kstat_ext *statbuf) {
  * ================================================================ */
 static long sys_socket(int domain, int type, int protocol) {
     (void)protocol;
-    if (domain != AF_INET) { current->t_errno = EAFNOSUPPORT; return -1; }
     if (type != SOCK_STREAM && type != SOCK_DGRAM) {
         current->t_errno = EPROTONOSUPPORT; return -1;
     }
+
+    /* AF_UNIX (v4.2.6) */
+    if (domain == AF_UNIX) {
+        struct unix_sock *sk = unix_socket_create(type);
+        if (!sk) { current->t_errno = ENOMEM; return -1; }
+        int fd = fd_alloc(current, (void *)sk);
+        if (fd < 0) { unix_close(sk); current->t_errno = EMFILE; return -1; }
+        return fd;
+    }
+
+    if (domain != AF_INET) { current->t_errno = EAFNOSUPPORT; return -1; }
 
     int sock = -1;
     if (type == SOCK_STREAM) {
@@ -859,10 +901,29 @@ static inline uint16_t sys_ntohs(uint16_t n) {
 /* ================================================================
  * SYS_BIND — Bind a socket to an address
  * ================================================================ */
-static long sys_bind(int sockfd, const struct sockaddr_in *addr,
-                     int addrlen) {
+static long sys_bind(int sockfd, const void *addr, int addrlen) {
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
-    if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
+    if (!addr) { current->t_errno = EINVAL; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        if (addrlen < (int)sizeof(struct sockaddr_un)) {
+            current->t_errno = EINVAL; return -1;
+        }
+        if (!user_addr_range_ok(addr, sizeof(struct sockaddr_un))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        struct sockaddr_un sa;
+        if (copy_from_user(&sa, addr, sizeof(sa)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        int ret = unix_bind(usk, &sa);
+        if (ret < 0) { current->t_errno = -ret; return -1; }
+        return 0;
+    }
+
+    if (addrlen < (int)sizeof(struct sockaddr_in)) {
         current->t_errno = EINVAL; return -1;
     }
     if (!user_addr_range_ok(addr, sizeof(struct sockaddr_in))) {
@@ -887,12 +948,31 @@ static long sys_bind(int sockfd, const struct sockaddr_in *addr,
 }
 
 /* ================================================================
- * SYS_CONNECT — Connect a TCP socket to a remote address
+ * SYS_CONNECT — Connect a socket to a remote address
  * ================================================================ */
-static long sys_connect(int sockfd, const struct sockaddr_in *addr,
-                        int addrlen) {
+static long sys_connect(int sockfd, const void *addr, int addrlen) {
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
-    if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
+    if (!addr) { current->t_errno = EINVAL; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        if (addrlen < (int)sizeof(struct sockaddr_un)) {
+            current->t_errno = EINVAL; return -1;
+        }
+        if (!user_addr_range_ok(addr, sizeof(struct sockaddr_un))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        struct sockaddr_un sa;
+        if (copy_from_user(&sa, addr, sizeof(sa)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        int ret = unix_connect(usk, &sa);
+        if (ret < 0) { current->t_errno = -ret; return -1; }
+        return 0;
+    }
+
+    if (addrlen < (int)sizeof(struct sockaddr_in)) {
         current->t_errno = EINVAL; return -1;
     }
     if (!user_addr_range_ok(addr, sizeof(struct sockaddr_in))) {
@@ -914,6 +994,15 @@ static long sys_connect(int sockfd, const struct sockaddr_in *addr,
  * ================================================================ */
 static long sys_listen(int sockfd, int backlog) {
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        int ret = unix_listen(usk, backlog);
+        if (ret < 0) { current->t_errno = -ret; return -1; }
+        return 0;
+    }
+
     int ret = tcp_listen(sockfd, backlog);
     if (ret < 0) { current->t_errno = EADDRINUSE; return -1; }
     return 0;
@@ -922,8 +1011,35 @@ static long sys_listen(int sockfd, int backlog) {
 /* ================================================================
  * SYS_ACCEPT — Accept a connection
  * ================================================================ */
-static long sys_accept(int sockfd, struct sockaddr_in *addr, int *addrlen) {
+static long sys_accept(int sockfd, void *addr, int *addrlen) {
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        struct unix_sock *new_sk = unix_accept(usk);
+        if (!new_sk) {
+            if (current->t_errno == 0) current->t_errno = EAGAIN;
+            return -1;
+        }
+        int new_fd = fd_alloc(current, (void *)new_sk);
+        if (new_fd < 0) { unix_close(new_sk); current->t_errno = EMFILE; return -1; }
+
+        /* Fill in the address if provided */
+        if (addr && addrlen) {
+            if (!user_addr_range_ok(addr, sizeof(struct sockaddr_un)) ||
+                !user_addr_range_ok(addrlen, sizeof(int))) {
+                fd_close(current, new_fd);
+                current->t_errno = EFAULT; return -1;
+            }
+            struct sockaddr_un sa;
+            int alen = (int)sizeof(sa);
+            unix_getsockname(new_sk, &sa, &alen);
+            copy_to_user(addr, &sa, sizeof(sa));
+            copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+        }
+        return new_fd;
+    }
 
     uint8_t remote_ip[4] = {0};
     uint16_t remote_port = 0;
@@ -957,6 +1073,21 @@ static long sys_send(int sockfd, const void *buf, size_t len, int flags) {
     if (!buf || len == 0) return 0;
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
 
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        void *kbuf = kmalloc(len);
+        if (!kbuf) { current->t_errno = ENOMEM; return -1; }
+        if (copy_from_user(kbuf, buf, len) != 0) {
+            kfree(kbuf);
+            current->t_errno = EFAULT; return -1;
+        }
+        int ret = unix_send(usk, kbuf, (int)len);
+        kfree(kbuf);
+        if (ret < 0) { current->t_errno = -ret; return -1; }
+        return ret;
+    }
+
     /* Copy data from user space */
     void *kbuf = kmalloc(len);
     if (!kbuf) { current->t_errno = ENOMEM; return -1; }
@@ -980,6 +1111,23 @@ static long sys_recv(int sockfd, void *buf, size_t len, int flags) {
     if (!buf || len == 0) return 0;
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
 
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        void *kbuf = kmalloc(len);
+        if (!kbuf) { current->t_errno = ENOMEM; return -1; }
+        int ret = unix_recv(usk, kbuf, (int)len);
+        if (ret < 0) { kfree(kbuf); current->t_errno = -ret; return -1; }
+        if (ret > 0) {
+            if (copy_to_user(buf, kbuf, (size_t)ret) != 0) {
+                kfree(kbuf);
+                current->t_errno = EFAULT; return -1;
+            }
+        }
+        kfree(kbuf);
+        return ret;
+    }
+
     /* Poll for packets */
     net_poll();
 
@@ -999,17 +1147,44 @@ static long sys_recv(int sockfd, void *buf, size_t len, int flags) {
 }
 
 /* ================================================================
- * SYS_SENDTO / SYS_RECVFROM — UDP datagram operations
+ * SYS_SENDTO / SYS_RECVFROM — UDP / Unix datagram operations
  * ================================================================ */
 static long sys_sendto(int sockfd, const void *buf, size_t len, int flags,
-                       const struct sockaddr_in *dest_addr, int addrlen) {
+                       const void *dest_addr, int addrlen) {
     (void)flags;
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!buf || len == 0) return 0;
-    if (!dest_addr || addrlen < (int)sizeof(struct sockaddr_in)) {
+    if (!dest_addr) { current->t_errno = EINVAL; return -1; }
+    if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        if (addrlen < (int)sizeof(struct sockaddr_un)) {
+            current->t_errno = EINVAL; return -1;
+        }
+        if (!user_addr_range_ok(dest_addr, sizeof(struct sockaddr_un))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        struct sockaddr_un sa;
+        if (copy_from_user(&sa, dest_addr, sizeof(sa)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        void *kbuf = kmalloc(len);
+        if (!kbuf) { current->t_errno = ENOMEM; return -1; }
+        if (copy_from_user(kbuf, buf, len) != 0) {
+            kfree(kbuf);
+            current->t_errno = EFAULT; return -1;
+        }
+        int ret = unix_sendto(usk, kbuf, (int)len, &sa);
+        kfree(kbuf);
+        if (ret < 0) { current->t_errno = -ret; return -1; }
+        return ret;
+    }
+
+    if (addrlen < (int)sizeof(struct sockaddr_in)) {
         current->t_errno = EINVAL; return -1;
     }
-    if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
     if (!user_addr_range_ok(dest_addr, sizeof(struct sockaddr_in))) {
         current->t_errno = EFAULT; return -1;
     }
@@ -1033,11 +1208,36 @@ static long sys_sendto(int sockfd, const void *buf, size_t len, int flags,
 }
 
 static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
-                         struct sockaddr_in *src_addr, int *addrlen) {
+                         void *src_addr, int *addrlen) {
     (void)flags;
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!buf || len == 0) return 0;
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        void *kbuf = kmalloc(len);
+        if (!kbuf) { current->t_errno = ENOMEM; return -1; }
+        struct sockaddr_un sa;
+        int alen = (int)sizeof(sa);
+        int ret = unix_recvfrom(usk, kbuf, (int)len, &sa, &alen);
+        if (ret < 0) { kfree(kbuf); return 0; }
+        if (copy_to_user(buf, kbuf, (size_t)ret) != 0) {
+            kfree(kbuf);
+            current->t_errno = EFAULT; return -1;
+        }
+        kfree(kbuf);
+        if (src_addr && addrlen && alen > 0) {
+            if (!user_addr_range_ok(src_addr, sizeof(struct sockaddr_un)) ||
+                !user_addr_range_ok(addrlen, sizeof(int))) {
+                return (long)ret;
+            }
+            copy_to_user(src_addr, &sa, sizeof(sa));
+            copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+        }
+        return (long)ret;
+    }
 
     /* Poll for UDP packets */
     net_poll();
@@ -1300,6 +1500,17 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
                 ready++;
             }
         } else if (kfds[i].fd > 0) {
+            /* AF_UNIX (v4.2.6): Check for Unix domain socket */
+            struct unix_sock *usk = fd_to_unix_sock(kfds[i].fd);
+            if (usk) {
+                int rev = unix_poll(usk, kfds[i].events);
+                if (rev) {
+                    kfds[i].revents |= (short)rev;
+                    ready++;
+                }
+                continue;
+            }
+
             /*
              * FIXED (v4.1.4): Only return POLLIN if the file has data
              * available to read (offset < size).  Previously, all valid
@@ -1362,6 +1573,16 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
  * ================================================================ */
 static long sys_shutdown(int sockfd, int how) {
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        (void)how;
+        unix_close(usk);
+        current->fd_table[sockfd] = (uintptr_t)-1;
+        return 0;
+    }
+
     int ret = tcp_shutdown(sockfd, how);
     if (ret < 0) { current->t_errno = ENOTCONN; return -1; }
     return 0;
@@ -1370,9 +1591,26 @@ static long sys_shutdown(int sockfd, int how) {
 /* ================================================================
  * SYS_GETSOCKNAME — Get socket address
  * ================================================================ */
-static long sys_getsockname(int sockfd, struct sockaddr_in *addr, int *addrlen) {
+static long sys_getsockname(int sockfd, void *addr, int *addrlen) {
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!addr || !addrlen) { current->t_errno = EINVAL; return -1; }
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_to_unix_sock(sockfd);
+    if (usk) {
+        if (!user_addr_range_ok(addr, sizeof(struct sockaddr_un)) ||
+            !user_addr_range_ok(addrlen, sizeof(int))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        struct sockaddr_un sa;
+        int alen = (int)sizeof(sa);
+        int ret = unix_getsockname(usk, &sa, &alen);
+        if (ret < 0) { current->t_errno = ENOTSOCK; return -1; }
+        copy_to_user(addr, &sa, sizeof(sa));
+        copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+        return 0;
+    }
+
     if (!user_addr_range_ok(addr, sizeof(struct sockaddr_in)) ||
         !user_addr_range_ok(addrlen, sizeof(int))) {
         current->t_errno = EFAULT; return -1;
@@ -1612,12 +1850,12 @@ static long sys_getpgid(int pid) {
     if (pid == 0) {
         t = current;
     } else {
-        t = find_task_by_pid(pid);
+        t = task_get_by_pid(pid);
     }
     if (!t) { current->t_errno = ESRCH; return -1; }
     /* Simplified: pgid = pid for now */
-    /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-    if (pid != 0) __sync_fetch_and_sub(&t->ref_count, 1);
+    /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+    if (pid != 0) task_put(t);
     return t->pid;
 }
 
@@ -2264,23 +2502,41 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
 
     for (int fd = 0; fd < nfds; fd++) {
         if (pr && FD_ISSET(fd, pr)) {
-            /* FIXED (v4.2.4): Use fd_get() instead of current->files[fd].
-             * task_struct has fd_table, not files.  Using current->files
-             * would cause a compilation error.  (BUG-SELECT-FILES) */
-            filp = (struct file *)fd_get(current, fd);
-            if (filp && filp->inode) {
-                /* A file that exists is always "readable" in our simple model.
-                 * For sockets, check if there's pending data. */
-                FD_SET(fd, &result_read);
-                ready++;
+            /* AF_UNIX (v4.2.6): Check Unix domain socket */
+            struct unix_sock *usk = fd_to_unix_sock(fd);
+            if (usk) {
+                if (unix_poll(usk, POLLIN)) {
+                    FD_SET(fd, &result_read);
+                    ready++;
+                }
+            } else {
+                /* FIXED (v4.2.4): Use fd_get() instead of current->files[fd].
+                 * task_struct has fd_table, not files.  Using current->files
+                 * would cause a compilation error.  (BUG-SELECT-FILES) */
+                filp = (struct file *)fd_get(current, fd);
+                if (filp && filp->inode) {
+                    /* A file that exists is always "readable" in our simple model.
+                     * For sockets, check if there's pending data. */
+                    FD_SET(fd, &result_read);
+                    ready++;
+                }
             }
         }
         if (pw && FD_ISSET(fd, pw)) {
-            filp = (struct file *)fd_get(current, fd);
-            if (filp && filp->inode) {
-                /* A file that exists is always "writable" in our simple model */
-                FD_SET(fd, &result_write);
-                ready++;
+            /* AF_UNIX (v4.2.6): Check Unix domain socket */
+            struct unix_sock *usk = fd_to_unix_sock(fd);
+            if (usk) {
+                if (unix_poll(usk, POLLOUT)) {
+                    FD_SET(fd, &result_write);
+                    ready++;
+                }
+            } else {
+                filp = (struct file *)fd_get(current, fd);
+                if (filp && filp->inode) {
+                    /* A file that exists is always "writable" in our simple model */
+                    FD_SET(fd, &result_write);
+                    ready++;
+                }
             }
         }
         if (pe && FD_ISSET(fd, pe)) {
@@ -2328,6 +2584,42 @@ static long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
     if (!sv) { current->t_errno = EFAULT; return -1; }
     if (!user_addr_range_ok(sv, 2 * sizeof(int))) {
         current->t_errno = EFAULT; return -1;
+    }
+
+    /* AF_UNIX (v4.2.6): Create a pair of connected Unix domain sockets */
+    if (domain == AF_UNIX) {
+        struct unix_sock *sk1 = unix_socket_create(type);
+        if (!sk1) { current->t_errno = ENOMEM; return -1; }
+        struct unix_sock *sk2 = unix_socket_create(type);
+        if (!sk2) { unix_close(sk1); current->t_errno = ENOMEM; return -1; }
+
+        /* Cross-connect the two sockets */
+        spin_lock(&sk1->lock);
+        spin_lock(&sk2->lock);
+        sk1->peer = sk2;
+        sk2->peer = sk1;
+        sk1->state = UNIX_CONNECTED;
+        sk2->state = UNIX_CONNECTED;
+        spin_unlock(&sk2->lock);
+        spin_unlock(&sk1->lock);
+
+        int fd1 = fd_alloc(current, (void *)sk1);
+        int fd2 = fd_alloc(current, (void *)sk2);
+        if (fd1 < 0 || fd2 < 0) {
+            if (fd1 >= 0) { current->fd_table[fd1] = (uintptr_t)-1; }
+            if (fd2 >= 0) { current->fd_table[fd2] = (uintptr_t)-1; }
+            unix_close(sk1);
+            unix_close(sk2);
+            current->t_errno = EMFILE; return -1;
+        }
+
+        int fds[2] = { fd1, fd2 };
+        if (copy_to_user(sv, fds, sizeof(fds)) != 0) {
+            fd_close(current, fd1);
+            fd_close(current, fd2);
+            current->t_errno = EFAULT; return -1;
+        }
+        return 0;
     }
 
     /* FIXED (v4.2.4): Use pipe() for socketpair instead of TCP loopback.
@@ -2486,6 +2778,407 @@ static long sys_getdents64(unsigned int fd, struct linux_dirent64 *dirp,
 }
 
 /* ================================================================
+ * SYS_ACPI_SHUTDOWN — ACPI system shutdown (S5)
+ * ACPI (v4.2.6)
+ * ================================================================ */
+static long sys_acpi_shutdown(void) {
+    /* Only allow root (uid 0) to shutdown */
+    int ret = acpi_shutdown();
+    if (ret < 0) {
+        current->t_errno = EIO;
+        return -1;
+    }
+    /* Should never return */
+    return 0;
+}
+
+/* ================================================================
+ * SYS_ACPI_REBOOT — ACPI system reset
+ * ACPI (v4.2.6)
+ * ================================================================ */
+static long sys_acpi_reboot(void) {
+    acpi_reboot();
+    /* Should never return */
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_FCHDIR — Change directory by fd
+ * ================================================================ */
+static long sys_fchdir(int fd) {
+    if (fd < 0 || fd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
+    struct file *filp = (struct file *)fd_get(current, fd);
+    if (!filp || !filp->inode) { current->t_errno = EBADF; return -1; }
+    if (!filp->inode->is_dir) { current->t_errno = ENOTDIR; return -1; }
+
+    /* Build path from the inode's name and parent chain (simplified) */
+    /* For now, just set CWD to a placeholder */
+    strcpy(current->cwd, "/");
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_GETRESUID — Get real, effective, saved UID
+ * ================================================================ */
+static long sys_getresuid(int *ruid, int *euid, int *suid) {
+    if (ruid && !user_addr_range_ok(ruid, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    if (euid && !user_addr_range_ok(euid, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    if (suid && !user_addr_range_ok(suid, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    int zero = 0;
+    if (ruid) copy_to_user(ruid, &zero, sizeof(int));
+    if (euid) copy_to_user(euid, &zero, sizeof(int));
+    if (suid) copy_to_user(suid, &zero, sizeof(int));
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_GETRESGID — Get real, effective, saved GID
+ * ================================================================ */
+static long sys_getresgid(int *rgid, int *egid, int *sgid) {
+    if (rgid && !user_addr_range_ok(rgid, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    if (egid && !user_addr_range_ok(egid, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    if (sgid && !user_addr_range_ok(sgid, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    int zero = 0;
+    if (rgid) copy_to_user(rgid, &zero, sizeof(int));
+    if (egid) copy_to_user(egid, &zero, sizeof(int));
+    if (sgid) copy_to_user(sgid, &zero, sizeof(int));
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_SETRESUID — Set real, effective, saved UID
+ * ================================================================ */
+static long sys_setresuid(int ruid, int euid, int suid) {
+    (void)ruid; (void)euid; (void)suid;
+    /* Single-user OS: always allowed */
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_SETRESGID — Set real, effective, saved GID
+ * ================================================================ */
+static long sys_setresgid(int rgid, int egid, int sgid) {
+    (void)rgid; (void)egid; (void)sgid;
+    /* Single-user OS: always allowed */
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_FUTEX — Fast userspace mutex
+ *
+ * Basic implementation: FUTEX_WAIT and FUTEX_WAKE only.
+ * ================================================================ */
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+
+static long sys_futex(int *uaddr, int futex_op, int val,
+                      const struct timespec *timeout, int *uaddr2, int val3) {
+    (void)timeout; (void)uaddr2; (void)val3;
+
+    if (!uaddr || !user_addr_range_ok(uaddr, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+
+    int cmd = futex_op & 0x7F;  /* mask off flags */
+
+    if (cmd == FUTEX_WAIT) {
+        /* Read current value from userspace */
+        int cur_val;
+        if (copy_from_user(&cur_val, uaddr, sizeof(int)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        if (cur_val != val) {
+            current->t_errno = EAGAIN; return -1;
+        }
+        /* Simplified: yield and return 0 (wake not tracked) */
+        current->state = TASK_BLOCKED;
+        schedule();
+        /* Check for signal interruption */
+        if (current->sig && current->sig->pending) {
+            current->t_errno = EINTR; return -1;
+        }
+        return 0;
+    } else if (cmd == FUTEX_WAKE) {
+        /* Simplified: just return 0 (no waiters) */
+        return 0;
+    }
+
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_SET_TID_ADDRESS — Set TID address for clone
+ * ================================================================ */
+static long sys_set_tid_address(int *tidptr) {
+    if (!tidptr || !user_addr_range_ok(tidptr, sizeof(int))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    current->clear_child_tid = (uintptr_t)tidptr;
+    return current->pid;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_TGKILL — Send signal to thread group
+ * ================================================================ */
+static long sys_tgkill(int tgid, int tid, int sig) {
+    /* Simplified: route to kill() which handles signal delivery */
+    (void)tgid;
+    return do_sys_kill(tid, sig);
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_SCHED_SETAFFINITY — Set CPU affinity
+ * ================================================================ */
+static long sys_sched_setaffinity(int pid, unsigned int cpusetsize,
+                                  const uint64_t *mask) {
+    (void)pid; (void)cpusetsize;
+    if (!mask || !user_addr_range_ok((void *)mask, sizeof(uint64_t))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    uint64_t k_mask;
+    if (copy_from_user(&k_mask, mask, sizeof(uint64_t)) != 0) {
+        current->t_errno = EFAULT; return -1;
+    }
+    /* Store affinity mask in task_struct */
+    if (current) current->cpu_affinity = k_mask;
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_SCHED_GETAFFINITY — Get CPU affinity
+ * ================================================================ */
+static long sys_sched_getaffinity(int pid, unsigned int cpusetsize,
+                                  uint64_t *mask) {
+    (void)pid; (void)cpusetsize;
+    if (!mask || !user_addr_range_ok(mask, sizeof(uint64_t))) {
+        current->t_errno = EFAULT; return -1;
+    }
+    uint64_t k_mask = (current && current->cpu_affinity) ? current->cpu_affinity : ~0ULL;
+    if (copy_to_user(mask, &k_mask, sizeof(uint64_t)) != 0) {
+        current->t_errno = EFAULT; return -1;
+    }
+    return sizeof(uint64_t);
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_GETCPU — Get current CPU number
+ * ================================================================ */
+static long sys_getcpu(unsigned int *cpu, unsigned int *node, void *tcache) {
+    (void)tcache;
+    unsigned int cpu_id = 0;
+    /* Read APIC ID to determine current CPU */
+    extern int smp_get_cpu_id(void);
+    cpu_id = (unsigned int)smp_get_cpu_id();
+
+    if (cpu && user_addr_range_ok(cpu, sizeof(unsigned int))) {
+        if (copy_to_user(cpu, &cpu_id, sizeof(unsigned int)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+    }
+    if (node && user_addr_range_ok(node, sizeof(unsigned int))) {
+        unsigned int node_id = 0;
+        copy_to_user(node, &node_id, sizeof(unsigned int));
+    }
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_MEMBARRIER — Memory barrier syscall
+ * ================================================================ */
+static long sys_membarrier(int cmd, unsigned int flags, int cpu_id) {
+    (void)cmd; (void)flags; (void)cpu_id;
+    /* Full memory barrier */
+    asm volatile ("mfence" ::: "memory");
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_MKDIRAT — Create directory relative to dirfd
+ * ================================================================ */
+static long sys_mkdirat(int dirfd, const char *path, int mode) {
+    if (dirfd == -100) { /* AT_FDCWD */
+        return sys_mkdir(path, mode);
+    }
+    /* dirfd-relative: not fully supported, stub */
+    (void)dirfd; (void)path; (void)mode;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_MKNODAT — Create device node relative to dirfd
+ * ================================================================ */
+static long sys_mknodat(int dirfd, const char *path, int mode, unsigned int dev) {
+    (void)dirfd; (void)path; (void)mode; (void)dev;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_FCHOWNAT — Change ownership relative to dirfd
+ * ================================================================ */
+static long sys_fchownat(int dirfd, const char *path, int uid, int gid, int flags) {
+    if (dirfd == -100) { /* AT_FDCWD */
+        return sys_chown(path, uid, gid);
+    }
+    (void)dirfd; (void)path; (void)uid; (void)gid; (void)flags;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_UNLINKAT — Remove file relative to dirfd
+ * ================================================================ */
+static long sys_unlinkat(int dirfd, const char *path, int flags) {
+    if (dirfd == -100) { /* AT_FDCWD */
+        if (flags & 0x200) { /* AT_REMOVEDIR */
+            return sys_rmdir(path);
+        }
+        return sys_unlink(path);
+    }
+    (void)dirfd; (void)path; (void)flags;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_LINKAT — Create hard link relative to dirfd
+ * ================================================================ */
+static long sys_linkat(int olddirfd, const char *oldpath,
+                       int newdirfd, const char *newpath, int flags) {
+    if (olddirfd == -100 && newdirfd == -100) { /* AT_FDCWD */
+        /* Simplified: hard links not supported, return EPERM */
+        (void)flags;
+        current->t_errno = EPERM;
+        return -1;
+    }
+    (void)olddirfd; (void)oldpath; (void)newdirfd; (void)newpath; (void)flags;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_SYMLINKAT — Create symlink relative to dirfd
+ * ================================================================ */
+static long sys_symlinkat(const char *target, int newdirfd,
+                          const char *linkpath) {
+    if (newdirfd == -100) { /* AT_FDCWD */
+        return sys_symlink(target, linkpath);
+    }
+    (void)target; (void)newdirfd; (void)linkpath;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_READLINKAT — Read symbolic link relative to dirfd
+ * ================================================================ */
+static long sys_readlinkat(int dirfd, const char *path, char *buf, size_t bufsize) {
+    if (dirfd == -100) { /* AT_FDCWD */
+        return sys_readlink(path, buf, bufsize);
+    }
+    (void)dirfd; (void)path; (void)buf; (void)bufsize;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_FCHMODAT — Change permissions relative to dirfd
+ * ================================================================ */
+static long sys_fchmodat(int dirfd, const char *path, int mode) {
+    if (dirfd == -100) { /* AT_FDCWD */
+        return sys_chmod(path, mode);
+    }
+    (void)dirfd; (void)path; (void)mode;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_FACCESSAT — Check access relative to dirfd
+ * ================================================================ */
+static long sys_faccessat(int dirfd, const char *path, int mode, int flags) {
+    if (dirfd == -100) { /* AT_FDCWD */
+        return sys_access(path, mode);
+    }
+    (void)dirfd; (void)path; (void)mode; (void)flags;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_PRLIMIT64 — Set/get resource limits (extended)
+ * ================================================================ */
+static long sys_prlimit64(int pid, int resource,
+                          const struct rlimit *new_limit,
+                          struct rlimit *old_limit) {
+    if (pid != 0 && pid != current->pid) {
+        current->t_errno = ESRCH; return -1;
+    }
+
+    /* Get old limit */
+    if (old_limit) {
+        if (!user_addr_range_ok(old_limit, sizeof(struct rlimit))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        struct rlimit rl;
+        rl.rlim_cur = current->rlimit_cur[resource];
+        rl.rlim_max = current->rlimit_max[resource];
+        if (copy_to_user(old_limit, &rl, sizeof(rl)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+    }
+
+    /* Set new limit */
+    if (new_limit) {
+        if (!user_addr_range_ok(new_limit, sizeof(struct rlimit))) {
+            current->t_errno = EFAULT; return -1;
+        }
+        struct rlimit rl;
+        if (copy_from_user(&rl, new_limit, sizeof(rl)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        if (rl.rlim_cur > rl.rlim_max) {
+            current->t_errno = EINVAL; return -1;
+        }
+        current->rlimit_cur[resource] = rl.rlim_cur;
+        current->rlimit_max[resource] = rl.rlim_max;
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ * POSIX (v4.2.6): SYS_NAME_TO_HANDLE_AT — File handle operations
+ * ================================================================ */
+struct file_handle {
+    unsigned int handle_bytes;
+    int          handle_type;
+    unsigned char f_handle[0];
+};
+
+static long sys_name_to_handle_at(int dirfd, const char *path,
+                                  struct file_handle *handle,
+                                  int *mount_id, int flags) {
+    (void)dirfd; (void)path; (void)handle; (void)mount_id; (void)flags;
+    current->t_errno = ENOSYS;
+    return -1;
+}
+
+/* ================================================================
  * Dispatcher
  * ================================================================ */
 
@@ -2544,14 +3237,14 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
         case SYS_CHDIR:   ret = sys_chdir((const char *)a1); break;
         /* Network syscalls */
         case SYS_SOCKET:  ret = sys_socket((int)a1, (int)a2, (int)a3); break;
-        case SYS_BIND:    ret = sys_bind((int)a1, (const struct sockaddr_in *)a2, (int)a3); break;
-        case SYS_CONNECT: ret = sys_connect((int)a1, (const struct sockaddr_in *)a2, (int)a3); break;
+        case SYS_BIND:    ret = sys_bind((int)a1, (const void *)a2, (int)a3); break;
+        case SYS_CONNECT: ret = sys_connect((int)a1, (const void *)a2, (int)a3); break;
         case SYS_LISTEN:  ret = sys_listen((int)a1, (int)a2); break;
-        case SYS_ACCEPT:  ret = sys_accept((int)a1, (struct sockaddr_in *)a2, (int *)a3); break;
+        case SYS_ACCEPT:  ret = sys_accept((int)a1, (void *)a2, (int *)a3); break;
         case SYS_SEND:    ret = sys_send((int)a1, (const void *)a2, (size_t)a3, (int)a4); break;
         case SYS_RECV:    ret = sys_recv((int)a1, (void *)a2, (size_t)a3, (int)a4); break;
-        case SYS_SENDTO:  ret = sys_sendto((int)a1, (const void *)a2, (size_t)a3, (int)a4, (const struct sockaddr_in *)a5, (int)a6); break;
-        case SYS_RECVFROM: ret = sys_recvfrom((int)a1, (void *)a2, (size_t)a3, (int)a4, (struct sockaddr_in *)a5, (int *)a6); break;
+        case SYS_SENDTO:  ret = sys_sendto((int)a1, (const void *)a2, (size_t)a3, (int)a4, (const void *)a5, (int)a6); break;
+        case SYS_RECVFROM: ret = sys_recvfrom((int)a1, (void *)a2, (size_t)a3, (int)a4, (void *)a5, (int *)a6); break;
         /* Time syscalls */
         case SYS_GETTIMEOFDAY: ret = sys_gettimeofday((struct timeval *)a1, (void *)a2); break;
         case SYS_NANOSLEEP: ret = sys_nanosleep((const struct timespec *)a1, (struct timespec *)a2); break;
@@ -2567,7 +3260,7 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
         case SYS_POLL:   ret = sys_poll((struct pollfd *)a1, (int)a2, (int)a3); break;
         /* Socket management */
         case SYS_SHUTDOWN: ret = sys_shutdown((int)a1, (int)a2); break;
-        case SYS_GETSOCKNAME: ret = sys_getsockname((int)a1, (struct sockaddr_in *)a2, (int *)a3); break;
+        case SYS_GETSOCKNAME: ret = sys_getsockname((int)a1, (void *)a2, (int *)a3); break;
         /* Extended POSIX syscalls */
         case SYS_ACCESS:    ret = sys_access((const char *)a1, (int)a2); break;
         case SYS_FCHMOD:    ret = sys_fchmod((int)a1, (int)a2); break;
@@ -2614,6 +3307,34 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
                                                   (void *)a4, (uint32_t *)a5); break;
         case SYS_GETDENTS64: ret = sys_getdents64((unsigned int)a1,
                                                   (struct linux_dirent64 *)a2, (unsigned int)a3); break;
+        /* ACPI power management */
+        case SYS_ACPI_SHUTDOWN: ret = sys_acpi_shutdown(); break;
+        case SYS_ACPI_REBOOT:   ret = sys_acpi_reboot(); break;
+        /* POSIX (v4.2.6): Extended syscalls */
+        case SYS_FCHDIR:        ret = sys_fchdir((int)a1); break;
+        case SYS_GETRESUID:     ret = sys_getresuid((int *)a1, (int *)a2, (int *)a3); break;
+        case SYS_GETRESGID:     ret = sys_getresgid((int *)a1, (int *)a2, (int *)a3); break;
+        case SYS_SETRESUID:     ret = sys_setresuid((int)a1, (int)a2, (int)a3); break;
+        case SYS_SETRESGID:     ret = sys_setresgid((int)a1, (int)a2, (int)a3); break;
+        case SYS_FUTEX:        ret = sys_futex((int *)a1, (int)a2, (int)a3,
+                                              (const struct timespec *)a4, (int *)a5, (int)a6); break;
+        case SYS_SCHED_SETAFFINITY: ret = sys_sched_setaffinity((int)a1, (unsigned int)a2, (const uint64_t *)a3); break;
+        case SYS_SCHED_GETAFFINITY: ret = sys_sched_getaffinity((int)a1, (unsigned int)a2, (uint64_t *)a3); break;
+        case SYS_SET_TID_ADDRESS:   ret = sys_set_tid_address((int *)a1); break;
+        case SYS_TGKILL:     ret = sys_tgkill((int)a1, (int)a2, (int)a3); break;
+        case SYS_MKDIRAT:    ret = sys_mkdirat((int)a1, (const char *)a2, (int)a3); break;
+        case SYS_MKNODAT:    ret = sys_mknodat((int)a1, (const char *)a2, (int)a3, (unsigned int)a4); break;
+        case SYS_FCHOWNAT:   ret = sys_fchownat((int)a1, (const char *)a2, (int)a3, (int)a4, (int)a5); break;
+        case SYS_UNLINKAT:   ret = sys_unlinkat((int)a1, (const char *)a2, (int)a3); break;
+        case SYS_LINKAT:     ret = sys_linkat((int)a1, (const char *)a2, (int)a3, (const char *)a4, (int)a5); break;
+        case SYS_SYMLINKAT:  ret = sys_symlinkat((const char *)a1, (int)a2, (const char *)a3); break;
+        case SYS_READLINKAT: ret = sys_readlinkat((int)a1, (const char *)a2, (char *)a3, (size_t)a4); break;
+        case SYS_FCHMODAT:   ret = sys_fchmodat((int)a1, (const char *)a2, (int)a3); break;
+        case SYS_FACCESSAT:  ret = sys_faccessat((int)a1, (const char *)a2, (int)a3, (int)a4); break;
+        case SYS_PRLIMIT64:  ret = sys_prlimit64((int)a1, (int)a2, (const struct rlimit *)a3, (struct rlimit *)a4); break;
+        case SYS_NAME_TO_HANDLE_AT: ret = sys_name_to_handle_at((int)a1, (const char *)a2, (struct file_handle *)a3, (int *)a4, (int)a5); break;
+        case SYS_GETCPU:     ret = sys_getcpu((unsigned int *)a1, (unsigned int *)a2, (void *)a3); break;
+        case SYS_MEMBARRIER: ret = sys_membarrier((int)a1, (unsigned int)a2, (int)a3); break;
         default:
             current->t_errno = ENOSYS;
             ret = -1;

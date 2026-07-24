@@ -168,18 +168,65 @@ static int read_ostype(char *buf, size_t size) {
     return (int)len;
 }
 
+/* POSIX (v4.2.6): Hostname reader */
+static int read_hostname(char *buf, size_t size) {
+    (void)size;
+    const char *s = "aurora\n";
+    size_t len = 0;
+    for (const char *p = s; *p; p++) len++;
+    if (len >= size) len = size - 1;
+    memcpy(buf, s, len);
+    return (int)len;
+}
+
+/* POSIX (v4.2.6): CPU online reader */
+static int read_cpu_online(char *buf, size_t size) {
+    (void)size;
+    const char *s = "0\n";
+    size_t len = 0;
+    for (const char *p = s; *p; p++) len++;
+    if (len >= size) len = size - 1;
+    memcpy(buf, s, len);
+    return (int)len;
+}
+
+/* POSIX (v4.2.6): CPU possible reader */
+static int read_cpu_possible(char *buf, size_t size) {
+    (void)size;
+    const char *s = "0-3\n";
+    size_t len = 0;
+    for (const char *p = s; *p; p++) len++;
+    if (len >= size) len = size - 1;
+    memcpy(buf, s, len);
+    return (int)len;
+}
+
 /* ================================================================
  * sysfs entry tree definition
  * ================================================================ */
 
+/* POSIX (v4.2.6): CPU devices children */
+static struct sysfs_entry cpu_children[] = {
+    { "online",   0, read_cpu_online,   NULL, NULL },
+    { "possible", 0, read_cpu_possible, NULL, NULL },
+    { NULL, 0, NULL, NULL, NULL }
+};
+
 static struct sysfs_entry kernel_children[] = {
-    { "version", 0, read_version, NULL, NULL },
-    { "ostype",  0, read_ostype,  NULL, NULL },
-    { NULL, 0, NULL, NULL, NULL }  /* sentinel */
+    { "version",  0, read_version,  NULL, NULL },
+    { "ostype",   0, read_ostype,   NULL, NULL },
+    { "hostname", 0, read_hostname, NULL, NULL },  /* POSIX (v4.2.6) */
+    { NULL, 0, NULL, NULL, NULL }
+};
+
+static struct sysfs_entry devices_children[] = {
+    { "cpu", 1, NULL, cpu_children, NULL },  /* POSIX (v4.2.6) */
+    { NULL, 0, NULL, NULL, NULL }
 };
 
 static struct sysfs_entry root_children[] = {
-    { "kernel", 1, NULL, kernel_children, NULL },
+    { "kernel",  1, NULL, kernel_children,   NULL },
+    { "devices", 1, NULL, devices_children,  NULL },  /* POSIX (v4.2.6) */
     { NULL, 0, NULL, NULL, NULL }
 };
 
@@ -198,6 +245,17 @@ static void sysfs_link_children(void) {
         if (j + 1 < (int)(sizeof(kernel_children) / sizeof(kernel_children[0])) &&
             kernel_children[j + 1].name)
             kernel_children[j].next = &kernel_children[j + 1];
+    }
+    /* POSIX (v4.2.6): Link new children arrays */
+    for (int j = 0; devices_children[j].name; j++) {
+        if (j + 1 < (int)(sizeof(devices_children) / sizeof(devices_children[0])) &&
+            devices_children[j + 1].name)
+            devices_children[j].next = &devices_children[j + 1];
+    }
+    for (int j = 0; cpu_children[j].name; j++) {
+        if (j + 1 < (int)(sizeof(cpu_children) / sizeof(cpu_children[0])) &&
+            cpu_children[j + 1].name)
+            cpu_children[j].next = &cpu_children[j + 1];
     }
 }
 

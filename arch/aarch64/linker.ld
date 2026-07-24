@@ -30,10 +30,10 @@ SECTIONS
 
     . = ALIGN(16);
     .bss : {
-        __bss_start = .;
+        _bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
-        __bss_end = .;
+        _bss_end = .;
     }
 
     . = ALIGN(16);

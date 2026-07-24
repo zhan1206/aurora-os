@@ -17,6 +17,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "perf.h"
+#include "drm.h"
 #include <stdint.h>
 
 /* ================================================================
@@ -243,6 +244,12 @@ void keyboard_c_handler(void *stack) {
                 }
             }
         }
+    }
+
+    /* GUI (v4.2.6) — Alt+Tab: cycle window focus */
+    if ((modifiers & (MOD_LALT | MOD_RALT)) && make_code == 0x0F) {
+        drm_input_cycle_focus();
+        goto done;
     }
 
     /* --- Feed character to console --- */

@@ -55,6 +55,10 @@ extern void exc_handler_0(void);
 extern void exc_handler_1(void);
 extern void exc_handler_2(void);
 extern void exc_handler_3(void);
+
+/* KGDB (v4.2.6) - KGDB-specific exception handlers */
+extern void kgdb_exc_handler_1(void);
+extern void kgdb_exc_handler_3(void);
 extern void exc_handler_4(void);
 extern void exc_handler_5(void);
 extern void exc_handler_6(void);
@@ -133,9 +137,11 @@ extern void keyboard_init(void);
 void irq_init(void) {
     /* Fill IDT gates at runtime (avoids assembler relocation issues) */
     idt_set_gate(0,  (uint64_t)(uintptr_t)exc_handler_0,  0x08, 0, 0x8E);
-    idt_set_gate(1,  (uint64_t)(uintptr_t)exc_handler_1,  0x08, 0, 0x8E);
+    /* KGDB (v4.2.6) - #DB (vector 1) handled by kgdb for single-step */
+    idt_set_gate(1,  (uint64_t)(uintptr_t)kgdb_exc_handler_1, 0x08, 0, 0x8E);
     idt_set_gate(2,  (uint64_t)(uintptr_t)exc_handler_2,  0x08, 0, 0x8E);
-    idt_set_gate(3,  (uint64_t)(uintptr_t)exc_handler_3,  0x08, 3, 0xEE); /* #BP DPL=3 */
+    /* KGDB (v4.2.6) - #BP (vector 3) handled by kgdb for breakpoints */
+    idt_set_gate(3,  (uint64_t)(uintptr_t)kgdb_exc_handler_3, 0x08, 3, 0xEE); /* #BP DPL=3 */
     idt_set_gate(4,  (uint64_t)(uintptr_t)exc_handler_4,  0x08, 0, 0x8E);
     idt_set_gate(5,  (uint64_t)(uintptr_t)exc_handler_5,  0x08, 0, 0x8E);
     idt_set_gate(6,  (uint64_t)(uintptr_t)exc_handler_6,  0x08, 0, 0x8E);

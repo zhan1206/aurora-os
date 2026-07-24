@@ -40,11 +40,15 @@ _start:
     and $t0, $t0, $t1
     csrwr $t0, 0x0
 
-    /* Jump to kernel_main */
-    /* a0 = firmware argument, a1 = boot argument */
-    bl kernel_main
+    /* Call arch_early_init() for CSR setup, MMU */
+    /* MULTIARCH (v4.2.6) */
+    bl arch_early_init
 
-    /* If kernel_main returns, halt */
+    /* Jump to kmain */
+    /* a0 = firmware argument, a1 = boot argument */
+    bl kmain
+
+    /* If kmain returns, halt */
 halt:
     idle 0
     b halt

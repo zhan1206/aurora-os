@@ -10,6 +10,7 @@
 #include "vfs.h"
 #include "sched.h"
 #include "include/log.h"
+#include "net/unix.h"     /* AF_UNIX (v4.2.6) */
 #include <string.h>
 
 void fd_table_init(struct task_struct *t) {
@@ -35,10 +36,28 @@ void *fd_get(struct task_struct *t, int fd) {
     return (void *)t->fd_table[fd];
 }
 
+/* AF_UNIX (v4.2.6): Check if an fd_table entry is a Unix domain socket */
+static inline struct unix_sock *fd_is_unix(uintptr_t entry) {
+    if (entry == (uintptr_t)-1 || entry == 0 || entry == 0x1 || (entry & 1))
+        return NULL;
+    return (struct unix_sock *)entry;
+}
+
 int fd_close(struct task_struct *t, int fd) {
-    void *f = fd_get(t, fd);
-    if (!f) return -1;
-    vfs_close((struct file *)f);
+    if (!t) return -1;
+    if (fd < 0 || fd >= MAX_FDS) return -1;
+    uintptr_t entry = t->fd_table[fd];
+    if (entry == (uintptr_t)-1) return -1;
+
+    /* AF_UNIX (v4.2.6) */
+    struct unix_sock *usk = fd_is_unix(entry);
+    if (usk) {
+        unix_close(usk);
+        t->fd_table[fd] = (uintptr_t)-1;
+        return 0;
+    }
+
+    vfs_close((struct file *)entry);
     t->fd_table[fd] = (uintptr_t)-1;
     return 0;
 }
@@ -66,10 +85,19 @@ ssize_t fd_write_fd(struct task_struct *t, int fd, const void *buf, size_t count
 void fd_close_all(struct task_struct *t) {
     if (!t) return;
     for (int i = 0; i < MAX_FDS; ++i) {
-        if (t->fd_table[i] != (uintptr_t)-1) {
-            vfs_close((struct file *)t->fd_table[i]);
+        uintptr_t entry = t->fd_table[i];
+        if (entry == (uintptr_t)-1) continue;
+
+        /* AF_UNIX (v4.2.6) */
+        struct unix_sock *usk = fd_is_unix(entry);
+        if (usk) {
+            unix_close(usk);
             t->fd_table[i] = (uintptr_t)-1;
+            continue;
         }
+
+        vfs_close((struct file *)entry);
+        t->fd_table[i] = (uintptr_t)-1;
     }
 }
 
@@ -98,6 +126,22 @@ int fd_dup(struct task_struct *t, int oldfd) {
     if (!t) return -1;
     void *f = fd_get(t, oldfd);
     if (!f) return -1;
+
+    /* AF_UNIX (v4.2.6): For Unix sockets, just share the socket pointer */
+    struct unix_sock *usk = fd_is_unix((uintptr_t)f);
+    if (usk) {
+        spin_lock(&usk->lock);
+        usk->refcount++;
+        spin_unlock(&usk->lock);
+        int newfd = fd_alloc(t, f);
+        if (newfd < 0) {
+            spin_lock(&usk->lock);
+            usk->refcount--;
+            spin_unlock(&usk->lock);
+        }
+        return newfd;
+    }
+
     /* Increment file refcount since both fds share the same file */
     vfs_file_dup((struct file *)f);
     int newfd = fd_alloc(t, f);
@@ -125,6 +169,16 @@ int fd_dup2(struct task_struct *t, int oldfd, int newfd) {
     /* Close newfd if already open */
     if (t->fd_table[newfd] != (uintptr_t)-1) {
         fd_close(t, newfd);
+    }
+
+    /* AF_UNIX (v4.2.6): For Unix sockets, just share the socket pointer */
+    struct unix_sock *usk = fd_is_unix((uintptr_t)f);
+    if (usk) {
+        spin_lock(&usk->lock);
+        usk->refcount++;
+        spin_unlock(&usk->lock);
+        t->fd_table[newfd] = (uintptr_t)f;
+        return newfd;
     }
 
     /* Increment file refcount and assign */

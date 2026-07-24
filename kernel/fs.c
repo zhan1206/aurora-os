@@ -129,6 +129,19 @@ void fs_init(void) {
             /* Mount sysfs at /sys */
             sysfs_init();
 
+            /* POSIX (v4.2.6): Mount tmpfs at /tmp */
+            {
+                struct super_block *tmpfs_sb = ramfs_create();
+                if (tmpfs_sb) {
+                    if (vfs_mount("/tmp", tmpfs_sb) == 0) {
+                        log_printf(LOG_LEVEL_INFO, "fs: tmpfs mounted at /tmp\n");
+                    } else {
+                        kfree(tmpfs_sb);
+                        log_printf(LOG_LEVEL_WARN, "fs: tmpfs mount at /tmp failed\n");
+                    }
+                }
+            }
+
             embed_init();
 
             if (vfs_lookup("/hello")) {
@@ -169,6 +182,19 @@ void fs_init(void) {
 
         /* Mount sysfs at /sys */
         sysfs_init();
+
+        /* POSIX (v4.2.6): Mount tmpfs at /tmp */
+        {
+            struct super_block *tmpfs_sb = ramfs_create();
+            if (tmpfs_sb) {
+                if (vfs_mount("/tmp", tmpfs_sb) == 0) {
+                    log_printf(LOG_LEVEL_INFO, "fs: tmpfs mounted at /tmp\n");
+                } else {
+                    kfree(tmpfs_sb);
+                    log_printf(LOG_LEVEL_WARN, "fs: tmpfs mount at /tmp failed\n");
+                }
+            }
+        }
 
         embed_init();
 

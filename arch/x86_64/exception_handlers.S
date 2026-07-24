@@ -166,5 +166,115 @@ exc_common:
 /* Vector 31: Reserved */
     EXC_HANDLER_NOERR 31
 
+/* ================================================================
+ * KGDB (v4.2.6) - Separate INT3 / #DB handlers
+ *
+ * These handlers save ALL registers (including RBX, RBP) so the
+ * debugger can do a full register dump and stack backtrace.
+ * They call kgdb_handle_exception / kgdb_handle_debug with the
+ * stack frame pointer, then restore and iretq.
+ * ================================================================ */
+
+    .extern kgdb_handle_exception
+    .extern kgdb_handle_debug
+
+/*
+ * KGDB (v4.2.6) - Common entry for kgdb INT3 (#BP) and #DB handlers.
+ * Saves all registers including RBX, RBP, then calls the C handler
+ * whose address is passed in %r12 (set before jumping here).
+ *
+ * Stack layout after all pushes:
+ *   [RSP + 0]  = rax
+ *   [RSP + 8]  = rcx
+ *   [RSP + 16] = rdx
+ *   [RSP + 24] = rsi
+ *   [RSP + 32] = rdi
+ *   [RSP + 40] = r8
+ *   [RSP + 48] = r9
+ *   [RSP + 56] = r10
+ *   [RSP + 64] = r11
+ *   [RSP + 72] = r12
+ *   [RSP + 80] = r13
+ *   [RSP + 88] = r14
+ *   [RSP + 96] = r15
+ *   [RSP + 104] = rbx
+ *   [RSP + 112] = rbp
+ *   [RSP + 120] = vector
+ *   [RSP + 128] = error_code
+ *   [RSP + 136] = rip
+ *   [RSP + 144] = cs
+ *   [RSP + 152] = rflags
+ *   [RSP + 160] = rsp (if ring change)
+ *   [RSP + 168] = ss  (if ring change)
+ * ================================================================ */
+kgdb_exc_common:
+    push %rbp
+    push %rbx
+    push %r15
+    push %r14
+    push %r13
+    push %r12
+    push %r11
+    push %r10
+    push %r9
+    push %r8
+    push %rdi
+    push %rsi
+    push %rdx
+    push %rcx
+    push %rax
+
+    /* Pass stack frame pointer in %rdi */
+    mov %rsp, %rdi
+
+    /* Call the handler stored in %r12 (set by caller) */
+    call *%r12
+
+    /* Restore all registers */
+    pop %rax
+    pop %rcx
+    pop %rdx
+    pop %rsi
+    pop %rdi
+    pop %r8
+    pop %r9
+    pop %r10
+    pop %r11
+    pop %r12
+    pop %r13
+    pop %r14
+    pop %r15
+    pop %rbx
+    pop %rbp
+
+    /* Skip vector + error code (16 bytes) */
+    add $16, %rsp
+
+    iretq
+
+/*
+ * KGDB (v4.2.6) - INT3 handler (vector 3, no error code).
+ * Replaces the original exc_handler_3 for breakpoint support.
+ */
+    .global kgdb_exc_handler_3
+    .type kgdb_exc_handler_3, @function
+kgdb_exc_handler_3:
+    pushq $0                        /* dummy error code */
+    pushq $3                        /* vector number */
+    movabs $kgdb_handle_exception, %r12
+    jmp kgdb_exc_common
+
+/*
+ * KGDB (v4.2.6) - #DB handler (vector 1, no error code).
+ * Used for single-step (TF) after stepping over breakpoints.
+ */
+    .global kgdb_exc_handler_1
+    .type kgdb_exc_handler_1, @function
+kgdb_exc_handler_1:
+    pushq $0                        /* dummy error code */
+    pushq $1                        /* vector number */
+    movabs $kgdb_handle_debug, %r12
+    jmp kgdb_exc_common
+
     /* Mark stack as non-executable */
     .section .note.GNU-stack,"",@progbits

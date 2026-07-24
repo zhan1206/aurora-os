@@ -130,7 +130,11 @@ struct task_struct *find_task_by_pid(int pid) {
      * FIXED (v4.2.4): Returned pointer is still valid only until the
      * caller releases the lock.  Callers must increment the task's
      * reference count if they need to hold the pointer beyond the
-     * lock scope.  (BUG-FIND-UAF) */
+     * lock scope.  (BUG-FIND-UAF)
+     *
+     * DEPRECATED (v4.2.6): Use task_get_by_pid() instead.  This function
+     * is kept for backward compatibility but all new callers should use
+     * the task_get_by_pid() / task_put() API. */
     spin_lock(&pid_lock);
     struct task_struct *t = pid_table[pid];
     if (t && t->state != TASK_DEAD && t->state != TASK_ZOMBIE) {
@@ -142,6 +146,76 @@ struct task_struct *find_task_by_pid(int pid) {
     }
     spin_unlock(&pid_lock);
     return NULL;
+}
+
+/* REFCOUNT (v4.2.6): task_get_by_pid — preferred API for task lookup.
+ * Returns a task with ref_count incremented, or NULL if not found.
+ * Includes ZOMBIE tasks (unlike find_task_by_pid which skips them)
+ * so that waitpid() can collect them. */
+struct task_struct *task_get_by_pid(int pid) {
+    if (pid < 0 || pid >= MAX_PID) return NULL;
+    spin_lock(&pid_lock);
+    struct task_struct *t = pid_table[pid];
+    if (t && t->state != TASK_DEAD) {
+        __sync_fetch_and_add(&t->ref_count, 1);
+        spin_unlock(&pid_lock);
+        return t;
+    }
+    spin_unlock(&pid_lock);
+    return NULL;
+}
+
+/* REFCOUNT (v4.2.6): task_free — actually free all task resources.
+ * Called automatically by task_put() when ref_count reaches 0 and
+ * the task is in ZOMBIE or DEAD state.
+ *
+ * Frees in order: kernel stack, page tables, file descriptors,
+ * signal state, VMAs, PID, and finally the task_struct itself. */
+void task_free(struct task_struct *t) {
+    if (!t) return;
+
+    log_printf(LOG_LEVEL_DEBUG, "task_free: freeing pid=%d (%s)\n", t->pid, t->name);
+
+    /* 1. Close all file descriptors */
+    fd_close_all(t);
+
+    /* 2. Free all VMAs */
+    vma_free_all(t);
+
+    /* 3. Free signal state */
+    if (t->sig) {
+        kfree(t->sig);
+        t->sig = NULL;
+    }
+
+    /* 4. Free kernel stack */
+    if (t->stack_phys) {
+        free_page(t->stack_phys);
+        t->stack_phys = NULL;
+    }
+    if (t->stack_phys2) {
+        free_page(t->stack_phys2);
+        t->stack_phys2 = NULL;
+    }
+
+    /* 5. Free page tables (if not sharing kernel page tables) */
+    if (t->cr3 && t->cr3 != get_kernel_cr3()) {
+        extern void free_pagetable(uint64_t pml4_phys);
+        free_pagetable(t->cr3);
+        t->cr3 = 0;
+    }
+
+    /* 6. Free PID */
+    free_pid(t->pid);
+
+    /* 7. Mark as DEAD and remove from pid_table */
+    t->state = TASK_DEAD;
+    pid_table[t->pid] = NULL;
+
+    /* 8. Free the task_struct itself */
+    kfree(t);
+
+    log_printf(LOG_LEVEL_DEBUG, "task_free: done\n");
 }
 
 /* ================================================================
@@ -228,6 +302,7 @@ void scheduler_init(void) {
     current->parent     = NULL;
     current->children   = NULL;
     current->t_errno    = 0;
+    current->ref_count  = 1;         /* REFCOUNT (v4.2.6) */
     strncpy(current->name, "idle", sizeof(current->name) - 1);
     fd_table_init(current);
     pid_register(0, current);
@@ -250,6 +325,7 @@ void scheduler_init(void) {
         init->parent     = current;
         init->children   = NULL;
         init->t_errno    = 0;
+        init->ref_count  = 1;         /* REFCOUNT (v4.2.6) */
         init->vruntime   = 0;
         strncpy(init->name, "init", sizeof(init->name) - 1);
         fd_table_init(init);
@@ -374,6 +450,7 @@ struct task_struct *create_task(void (*fn)(void)) {
     t->parent      = current;
     t->children    = NULL;
     t->t_errno     = 0;
+    t->ref_count   = 1;         /* REFCOUNT (v4.2.6): one reference for existence */
     t->pid         = alloc_pid();
     if (t->pid < 0) {
         free_page(stack_page);
@@ -565,6 +642,7 @@ void schedule(void) {
     }
 
     next->state = TASK_RUNNING;
+    task_get(next);              /* REFCOUNT (v4.2.6): hold ref while running */
     current = next;
 
     /* Update per-CPU current task pointer */
@@ -608,6 +686,10 @@ void schedule(void) {
     if (current->fpu_used) {
         asm volatile ("fxrstor64 %0" :: "m"(current->fpu_state) : "memory");
     }
+    /* REFCOUNT (v4.2.6): release reference to the task we switched away from.
+     * This runs on the NEW task's stack, so it's safe even if task_put
+     * frees prev (the old task). */
+    task_put(prev);
 }
 
 void yield(void) {
@@ -742,18 +824,15 @@ void do_exit_current(int code) {
     extern void signal_child_event(struct task_struct *child, int event);
     signal_child_event(current, 0);
 
-    /* Set ZOMBIE state */
+    /* REFCOUNT (v4.2.6): Protect state transition with state_lock */
+    spin_lock((spinlock_t*)&current->state_lock);
     current->exit_code = code;
     current->state = TASK_ZOMBIE;
+    spin_unlock((spinlock_t*)&current->state_lock);
 
     /*
      * Wake parent: if parent is blocked in waitpid(), set it to READY
      * so it can collect this ZOMBIE.
-     *
-     * KNOWN RACE: After waking the parent, the parent's waitpid() can
-     * free this child's task_struct while current (the child) is still
-     * using it. The child's stack is still valid until the context
-     * switch happens in schedule() below, so this is safe in practice.
      */
     if (current->parent && current->parent->state == TASK_BLOCKED) {
         log_printf(LOG_LEVEL_DEBUG, "exit: waking parent pid=%d\n",
@@ -803,17 +882,12 @@ void do_exit_current(int code) {
     irq_restore(exit_irq_flags);
 
     /*
-     * IMPORTANT: Do NOT do our own context_switch here.
-     * The old code did "current = current->next; context_switch(...)" which
-     * could pick init (rsp=NULL) or any random task, corrupting the stack.
-     * Instead: keep ourselves as ZOMBIE (so parent's waitpid can collect us),
-     * remove from ready queue (already done above), and call schedule().
-     * schedule() will find the next runnable task and switch to it.
-     * Parent will later collect this ZOMBIE via waitpid and free us.
-     *
-     * Note: 'current' still points to this dying task.  schedule() uses
-     * current as the starting point to scan for next runnable, but we're
-     * no longer in the queue (already unlinked), so we won't be re-selected.
+     * REFCOUNT (v4.2.6): Call schedule() which will task_put(prev) after
+     * context_switch, dropping the running reference (ref_count: 2→1).
+     * The remaining existence reference (ref_count=1) is held until the
+     * parent calls waitpid() to collect this ZOMBIE.  waitpid() will then
+     * task_put() the child, dropping ref_count to 0 and triggering
+     * task_free().
      */
     schedule();
     /* NOTREACHED — schedule() context_switches away and never returns here */
@@ -853,12 +927,15 @@ retry:
             if ((pid == -1 || child->pid == pid) &&
                 child->state == TASK_ZOMBIE) {
 
+                /* REFCOUNT (v4.2.6): Hold a reference to the child while
+                 * we collect its data.  This prevents the child from being
+                 * freed by another concurrent waitpid. */
+                task_get(child);
+
                 /* Found ZOMBIE child — collect it.
-                 * Save values BEFORE freeing child (use-after-free safety). */
+                 * Save values BEFORE releasing the reference (use-after-free safety). */
                 int collected_pid   = child->pid;
                 int collected_code  = child->exit_code;
-                void *child_stack   = child->stack_phys;
-                uint64_t child_cr3  = child->cr3;
 
                 if (status) *status = collected_code;
 
@@ -868,20 +945,14 @@ retry:
                     current->children = node->next;
                 kfree(node);
 
-                /* Free child resources */
-                if (child_stack) {
-                    free_page(child_stack);
-                }
-                if (child_cr3 && child_cr3 != get_kernel_cr3()) {
-                    extern void free_pagetable(uint64_t pml4_phys);
-                    free_pagetable(child_cr3);
-                }
+                spin_unlock((spinlock_t*)&current->child_lock);
 
-                free_pid(collected_pid);
-                child->state = TASK_DEAD;
-                kfree(child);
-
-                spin_unlock((spinlock_t*)&current->child_lock);  /* FIXED: unlock before return */
+                /* REFCOUNT (v4.2.6): Release the existence reference.
+                 * This drops ref_count from 1 to 0.  Since the child is
+                 * in ZOMBIE state, task_put() will call task_free() to
+                 * actually free all resources (kernel stack, page tables,
+                 * file descriptors, signal state, VMAs, PID, task_struct). */
+                task_put(child);
 
                 log_printf(LOG_LEVEL_INFO, "waitpid: collected pid=%d exit_code=%d\n",
                            collected_pid, collected_code);

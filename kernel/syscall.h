@@ -62,6 +62,7 @@ enum {
     SYS_GETDENTS64 = 217,    /* FIXED (v4.2.3): 64-bit directory entries */
     SYS_GETCWD    = 79,
     SYS_CHDIR     = 80,
+    SYS_FCHDIR    = 81,     /* POSIX (v4.2.6) */
     SYS_RENAME    = 82,
     SYS_MKDIR     = 83,
     SYS_RMDIR     = 84,
@@ -84,6 +85,32 @@ enum {
     SYS_GETPPID   = 110,
     SYS_SETSID    = 112,
     SYS_GETPGID   = 121,
+    /* POSIX (v4.2.6): UID/GID management */
+    SYS_SETRESUID  = 117,
+    SYS_GETRESUID  = 118,
+    SYS_SETRESGID  = 119,
+    SYS_GETRESGID  = 120,
+    /* POSIX (v4.2.6): Thread/process ops */
+    SYS_FUTEX      = 202,
+    SYS_SCHED_SETAFFINITY = 203,
+    SYS_SCHED_GETAFFINITY = 204,
+    SYS_SET_TID_ADDRESS   = 218,
+    SYS_TGKILL     = 234,
+    /* POSIX (v4.2.6): *at family syscalls */
+    SYS_MKDIRAT    = 258,
+    SYS_MKNODAT    = 259,
+    SYS_FCHOWNAT   = 260,
+    SYS_UNLINKAT   = 263,
+    SYS_LINKAT     = 265,
+    SYS_SYMLINKAT  = 266,
+    SYS_READLINKAT = 267,
+    SYS_FCHMODAT   = 268,
+    SYS_FACCESSAT  = 269,
+    /* POSIX (v4.2.6): Resource limits & handles */
+    SYS_PRLIMIT64  = 302,
+    SYS_NAME_TO_HANDLE_AT = 303,
+    SYS_GETCPU     = 309,
+    SYS_MEMBARRIER = 324,
     SYS_CLOCK_GETTIME = 228,
     /* Custom AuroraOS syscalls */
     SYS_SBRK      = 256,
@@ -94,6 +121,9 @@ enum {
     SYS_SETRLIMIT = 160,
     SYS_SCHED_YIELD = 24,
     SYS_GETRANDOM = 318,
+    /* ACPI power management syscalls */
+    SYS_ACPI_SHUTDOWN = 319,
+    SYS_ACPI_REBOOT   = 320,
 };
 
 /* struct utsname — POSIX uname structure */

@@ -24,6 +24,7 @@
 
 #include "smp.h"
 #include "apic.h"
+#include "acpi.h"
 #include "include/log.h"
 #include "include/portio.h"
 #include "mem.h"
@@ -350,241 +351,13 @@ static void build_trampoline(uint64_t pml4_phys) {
 }
 
 /* ================================================================
- * ACPI MADT parsing
+ * ACPI MADT parsing (uses shared acpi.h definitions)
+ * ACPI (v4.2.6)
  *
- * ACPI tables are located by searching for the RSDP (Root System
- * Description Pointer), then finding the RSDT/XSDT, then the MADT.
- *
- * RSDP signature: "RSD PTR " (8 bytes)
- * RSDT/XSDT signature: "RSDT" / "XSDT" (4 bytes)
- * MADT signature: "APIC" (4 bytes)
+ * The RSDP/MADT discovery is handled by acpi_init() in acpi.c.
+ * smp_init() uses acpi_get_rsdp() and acpi_get_madt() to access
+ * the cached tables.
  * ================================================================ */
-
-/* ACPI SDT header */
-struct acpi_sdt_header {
-    char     signature[4];
-    uint32_t length;
-    uint8_t  revision;
-    uint8_t  checksum;
-    char     oem_id[6];
-    char     oem_table_id[8];
-    uint32_t oem_revision;
-    uint32_t creator_id;
-    uint32_t creator_revision;
-} __attribute__((packed));
-
-/* RSDP */
-struct acpi_rsdp {
-    char     signature[8];
-    uint8_t  checksum;
-    char     oem_id[6];
-    uint8_t  revision;
-    uint32_t rsdt_address;
-    /* Extended fields (ACPI 2.0+) */
-    uint32_t length;
-    uint64_t xsdt_address;
-    uint8_t  extended_checksum;
-    uint8_t  reserved[3];
-} __attribute__((packed));
-
-/* RSDT/XSDT entry */
-struct acpi_rsdt {
-    struct acpi_sdt_header h;
-    uint32_t entries[];  /* array of 32-bit pointers to other SDTs */
-} __attribute__((packed));
-
-struct acpi_xsdt {
-    struct acpi_sdt_header h;
-    uint64_t entries[];  /* array of 64-bit pointers to other SDTs */
-} __attribute__((packed));
-
-/* MADT entry types */
-#define MADT_TYPE_LAPIC      0x00
-#define MADT_TYPE_IOAPIC     0x01
-#define MADT_TYPE_ISO        0x02
-#define MADT_TYPE_NMI        0x04
-#define MADT_TYPE_LAPIC_OVERRIDE 0x05
-
-/* MADT header */
-struct acpi_madt {
-    struct acpi_sdt_header h;
-    uint32_t lapic_address;
-    uint32_t flags;
-    uint8_t  entries[];  /* variable-length entries */
-} __attribute__((packed));
-
-/* MADT entry header */
-struct madt_entry_hdr {
-    uint8_t type;
-    uint8_t length;
-} __attribute__((packed));
-
-/* MADT Local APIC entry */
-struct madt_lapic {
-    struct madt_entry_hdr h;
-    uint8_t  acpi_processor_id;
-    uint8_t  apic_id;
-    uint32_t flags;  /* bit 0 = enabled */
-} __attribute__((packed));
-
-/* MADT I/O APIC entry */
-struct madt_ioapic {
-    struct madt_entry_hdr h;
-    uint8_t  ioapic_id;
-    uint8_t  reserved;
-    uint32_t ioapic_address;
-    uint32_t global_system_interrupt_base;
-} __attribute__((packed));
-
-/* ================================================================
- * RSDP search: scan physical memory for the RSDP signature
- * ================================================================ */
-
-/*
- * Find RSDP by scanning the EBDA and BIOS areas.
- * For Multiboot, the RSDP may be passed in the boot info.
- * We search:
- *   - First 1KB of EBDA (Extended BIOS Data Area)
- *   - 0x000E0000 - 0x000FFFFF (BIOS ROM area)
- */
-static struct acpi_rsdp *find_rsdp(void *mb_info) {
-    /* Try to get RSDP from Multiboot2 tags first */
-    if (mb_info) {
-        /* Check for Multiboot2 ACPI tags */
-        struct mb2_tag {
-            uint32_t type;
-            uint32_t size;
-        };
-
-        uint32_t *ptr = (uint32_t *)mb_info;
-        uint32_t total_size = ptr[0];
-
-        for (uint32_t offset = 8; offset < total_size; ) {
-            struct mb2_tag *tag = (struct mb2_tag *)((uint8_t *)mb_info + offset);
-            if (tag->type == 0) break;  /* end tag */
-
-            /* Multiboot2 ACPI v1 RSDP tag = 14 */
-            if (tag->type == 14) {
-                struct acpi_rsdp *rsdp = (struct acpi_rsdp *)((uint8_t *)mb_info + offset + 8);
-                log_printf(LOG_LEVEL_INFO, "smp: found RSDP via Multiboot2 tag\n");
-                return rsdp;
-            }
-            /* Multiboot2 ACPI v2 RSDP tag = 15 */
-            if (tag->type == 15) {
-                struct acpi_rsdp *rsdp = (struct acpi_rsdp *)((uint8_t *)mb_info + offset + 8);
-                log_printf(LOG_LEVEL_INFO, "smp: found RSDP via Multiboot2 ACPI v2 tag\n");
-                return rsdp;
-            }
-
-            offset += ((tag->size + 7) & ~7U);
-        }
-    }
-
-    /* Fallback: scan BIOS memory areas for RSDP */
-    /* The RSDP is on a 16-byte boundary in the EBDA or 0xE0000-0xFFFFF */
-    uint32_t scan_start = 0x000E0000;
-    uint32_t scan_end   = 0x00100000;
-
-    for (uint32_t addr = scan_start; addr < scan_end; addr += 16) {
-        if (addr >= KERNEL_PHYS_MAX) break;  /* beyond identity-mapped range */
-        const char *sig = (const char *)(uintptr_t)addr;
-        if (sig[0] == 'R' && sig[1] == 'S' && sig[2] == 'D' &&
-            sig[3] == ' ' && sig[4] == 'P' && sig[5] == 'T' &&
-            sig[6] == 'R' && sig[7] == ' ') {
-            return (struct acpi_rsdp *)(uintptr_t)addr;
-        }
-    }
-
-    return NULL;
-}
-
-/*
- * Validate ACPI checksum
- */
-static int acpi_checksum(void *table, uint32_t length) {
-    uint8_t sum = 0;
-    uint8_t *ptr = (uint8_t *)table;
-    for (uint32_t i = 0; i < length; i++) {
-        sum += ptr[i];
-    }
-    return sum == 0;
-}
-
-/*
- * Find the MADT table from the RSDP.
- * Also extracts the I/O APIC base address.
- */
-static struct acpi_madt *find_madt(struct acpi_rsdp *rsdp, uint64_t *ioapic_base_out) {
-    (void)ioapic_base_out;  /* reserved for future use */
-    if (!rsdp) return NULL;
-
-    /* Check RSDP checksum */
-    if (!acpi_checksum(rsdp, 20)) {
-        log_printf(LOG_LEVEL_WARN, "smp: RSDP checksum failed\n");
-        return NULL;
-    }
-
-    /* Use XSDT if available (ACPI 2.0+) */
-    if (rsdp->revision >= 2 && rsdp->xsdt_address) {
-        struct acpi_xsdt *xsdt = (struct acpi_xsdt *)(uintptr_t)rsdp->xsdt_address;
-        if (!acpi_checksum(xsdt, xsdt->h.length)) {
-            log_printf(LOG_LEVEL_WARN, "smp: XSDT checksum failed\n");
-            return NULL;
-        }
-
-        int num_entries = ((int)xsdt->h.length - (int)sizeof(struct acpi_sdt_header)) / 8;
-        log_printf(LOG_LEVEL_DEBUG, "smp: XSDT at %p, %d entries\n",
-                   (void *)xsdt, num_entries);
-
-        for (int i = 0; i < num_entries; i++) {
-            uint64_t entry = xsdt->entries[i];
-            if (entry >= KERNEL_PHYS_MAX) continue;
-            struct acpi_sdt_header *hdr = (struct acpi_sdt_header *)(uintptr_t)entry;
-
-            if (hdr->signature[0] == 'A' && hdr->signature[1] == 'P' &&
-                hdr->signature[2] == 'I' && hdr->signature[3] == 'C') {
-                if (!acpi_checksum(hdr, hdr->length)) {
-                    log_printf(LOG_LEVEL_WARN, "smp: MADT checksum failed\n");
-                    continue;
-                }
-                return (struct acpi_madt *)hdr;
-            }
-        }
-        return NULL;
-    }
-
-    /* Fallback to RSDT (ACPI 1.0) */
-    if (rsdp->rsdt_address) {
-        struct acpi_rsdt *rsdt = (struct acpi_rsdt *)(uintptr_t)rsdp->rsdt_address;
-        if (!acpi_checksum(rsdt, rsdt->h.length)) {
-            log_printf(LOG_LEVEL_WARN, "smp: RSDT checksum failed\n");
-            return NULL;
-        }
-
-        int num_entries = ((int)rsdt->h.length - (int)sizeof(struct acpi_sdt_header)) / 4;
-        log_printf(LOG_LEVEL_DEBUG, "smp: RSDT at %p, %d entries\n",
-                   (void *)rsdt, num_entries);
-
-        struct acpi_madt *madt = NULL;
-        for (int i = 0; i < num_entries; i++) {
-            uint32_t entry = rsdt->entries[i];
-            if (entry >= KERNEL_PHYS_MAX) continue;
-            struct acpi_sdt_header *hdr = (struct acpi_sdt_header *)(uintptr_t)entry;
-
-            if (hdr->signature[0] == 'A' && hdr->signature[1] == 'P' &&
-                hdr->signature[2] == 'I' && hdr->signature[3] == 'C') {
-                if (!acpi_checksum(hdr, hdr->length)) {
-                    log_printf(LOG_LEVEL_WARN, "smp: MADT checksum failed\n");
-                    continue;
-                }
-                madt = (struct acpi_madt *)hdr;
-            }
-        }
-        return madt;
-    }
-
-    return NULL;
-}
 
 /* ================================================================
  * AP entry point (called from trampoline in 64-bit mode)
@@ -806,8 +579,34 @@ void smp_init(void *mb_info) {
     memset(cpu_data, 0, sizeof(cpu_data));
     num_cpus = 0;
 
-    /* Find RSDP and MADT */
-    struct acpi_rsdp *rsdp = find_rsdp(mb_info);
+    /* Get RSDP and MADT from the ACPI subsystem (acpi_init must be called first).
+     * Also try to extract RSDP from Multiboot2 tags if acpi_init didn't find it. */
+    struct rsdp_descriptor *rsdp = acpi_get_rsdp();
+
+    if (!rsdp && mb_info) {
+        /* Fallback: try Multiboot2 ACPI tags */
+        struct mb2_tag {
+            uint32_t type;
+            uint32_t size;
+        };
+
+        uint32_t *ptr = (uint32_t *)mb_info;
+        uint32_t total_size = ptr[0];
+
+        for (uint32_t offset = 8; offset < total_size; ) {
+            struct mb2_tag *tag = (struct mb2_tag *)((uint8_t *)mb_info + offset);
+            if (tag->type == 0) break;
+
+            if (tag->type == 14 || tag->type == 15) {
+                rsdp = (struct rsdp_descriptor *)((uint8_t *)mb_info + offset + 8);
+                log_printf(LOG_LEVEL_INFO, "smp: found RSDP via Multiboot2 tag\n");
+                break;
+            }
+
+            offset += ((tag->size + 7) & ~7U);
+        }
+    }
+
     if (!rsdp) {
         log_printf(LOG_LEVEL_INFO, "smp: no ACPI RSDP found, single-CPU mode\n");
         num_cpus = 1;
@@ -820,8 +619,7 @@ void smp_init(void *mb_info) {
         return;
     }
 
-    uint64_t ioapic_base = 0;
-    struct acpi_madt *madt = find_madt(rsdp, &ioapic_base);
+    struct acpi_madt *madt = acpi_get_madt();
     if (!madt) {
         log_printf(LOG_LEVEL_INFO, "smp: no MADT found, single-CPU mode\n");
         num_cpus = 1;
@@ -833,6 +631,8 @@ void smp_init(void *mb_info) {
         spin_unlock(&smp_init_lock);
         return;
     }
+
+    uint64_t ioapic_base = 0;
 
     log_printf(LOG_LEVEL_INFO, "smp: MADT at %p, LAPIC base=0x%x\n",
                (void *)madt, madt->lapic_address);
@@ -847,8 +647,8 @@ void smp_init(void *mb_info) {
         struct madt_entry_hdr *hdr = (struct madt_entry_hdr *)entry;
         if (hdr->length == 0) break;
 
-        if (hdr->type == MADT_TYPE_LAPIC) {
-            struct madt_lapic *lapic = (struct madt_lapic *)entry;
+        if (hdr->type == ACPI_MADT_TYPE_LAPIC) {
+            struct madt_lapic_entry *lapic = (struct madt_lapic_entry *)entry;
             /* Check if enabled (flags bit 0) or if it's the BSP */
             if ((lapic->flags & 1) || lapic_count == 0) {
                 if (lapic_count < MAX_CPUS) {
@@ -863,8 +663,8 @@ void smp_init(void *mb_info) {
                     lapic_count++;
                 }
             }
-        } else if (hdr->type == MADT_TYPE_IOAPIC) {
-            struct madt_ioapic *ioapic = (struct madt_ioapic *)entry;
+        } else if (hdr->type == ACPI_MADT_TYPE_IOAPIC) {
+            struct madt_ioapic_entry *ioapic = (struct madt_ioapic_entry *)entry;
             ioapic_base = ioapic->ioapic_address;
             log_printf(LOG_LEVEL_INFO, "smp: found IOAPIC id=%d at 0x%x\n",
                        ioapic->ioapic_id, ioapic->ioapic_address);

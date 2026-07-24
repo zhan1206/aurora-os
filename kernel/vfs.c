@@ -12,6 +12,7 @@
 #include "fs.h"
 #include "include/log.h"
 #include "include/userspace.h"
+#include "vfs_safe_copy.h"
 #include "mem.h"
 #include <string.h>
 #include <stdint.h>
@@ -749,32 +750,114 @@ struct file *vfs_open(const char *path, int flags) {
     return filp;
 }
 
+/* VFS-SMAP (v4.2.6) */
+/*
+ * vfs_is_user_addr: Returns 1 if ptr is in user space, 0 otherwise.
+ * User space is defined as addresses below 0x0000800000000000ULL.
+ */
+static int vfs_is_user_addr(const void *ptr) {
+    return ((uint64_t)(uintptr_t)ptr < 0x0000800000000000ULL);
+}
+
 ssize_t vfs_read(struct file *filp, void *buf, size_t count) {
     if (!filp || !filp->inode || !filp->inode->ops || !filp->inode->ops->read)
         return -1;
-    /*
-     * Enable SMAP bypass (STAC) so the filesystem read op can write to
-     * user-space buffers. CLAC restores protection afterward.
-     * Safe even when 'buf' is a kernel pointer (STAC/CLAC only affects
-     * supervisor access to user pages, not kernel pages).
-     */
-    stac();
-    ssize_t ret = filp->inode->ops->read(filp, buf, count, &filp->offset);
-    clac();
-    return ret;
+    if (!buf || count == 0) return -1;
+
+    /* VFS-SMAP (v4.2.6): If buf is a user-space pointer, use a kernel
+     * staging buffer so the filesystem never sees a user pointer.
+     * This is transparent to filesystem implementations — they always
+     * receive a safe kernel pointer. */
+    if (vfs_is_user_addr(buf)) {
+        ssize_t total = 0;
+        size_t remaining = count;
+
+        while (remaining > 0) {
+            size_t chunk = (remaining > VFS_IOBUF_SIZE) ? VFS_IOBUF_SIZE : remaining;
+
+            struct vfs_iobuf iobuf;
+            if (vfs_iobuf_init(&iobuf, chunk) < 0)
+                return (total > 0) ? total : -1;
+
+            /* Filesystem reads into the safe kernel buffer */
+            ssize_t n = filp->inode->ops->read(filp, iobuf.data, chunk, &filp->offset);
+            if (n < 0) {
+                vfs_iobuf_free(&iobuf);
+                return (total > 0) ? total : n;
+            }
+            if (n == 0) {
+                vfs_iobuf_free(&iobuf);
+                break;
+            }
+
+            /* Copy from kernel buffer to user space with SMAP protection */
+            if (vfs_copy_to_user_safe((char *)buf + total, &iobuf, (size_t)n) < 0) {
+                vfs_iobuf_free(&iobuf);
+                return (total > 0) ? total : -1;
+            }
+
+            vfs_iobuf_free(&iobuf);
+            total += n;
+            remaining -= (size_t)n;
+
+            /* Short read: filesystem returned less than requested */
+            if ((size_t)n < chunk) break;
+        }
+        return total;
+    }
+
+    /* Kernel buffer: call filesystem directly (no SMAP needed) */
+    return filp->inode->ops->read(filp, buf, count, &filp->offset);
 }
 
 ssize_t vfs_write(struct file *filp, const void *buf, size_t count) {
     if (!filp || !filp->inode || !filp->inode->ops || !filp->inode->ops->write)
         return -1;
-    /*
-     * Enable SMAP bypass (STAC) so the filesystem write op can read from
-     * user-space buffers. CLAC restores protection afterward.
-     */
-    stac();
-    ssize_t ret = filp->inode->ops->write(filp, buf, count, &filp->offset);
-    clac();
-    return ret;
+    if (!buf || count == 0) return -1;
+
+    /* VFS-SMAP (v4.2.6): If buf is a user-space pointer, copy to a kernel
+     * staging buffer before calling the filesystem. The filesystem always
+     * receives a safe kernel pointer. */
+    if (vfs_is_user_addr(buf)) {
+        ssize_t total = 0;
+        size_t remaining = count;
+
+        while (remaining > 0) {
+            size_t chunk = (remaining > VFS_IOBUF_SIZE) ? VFS_IOBUF_SIZE : remaining;
+
+            struct vfs_iobuf iobuf;
+            if (vfs_iobuf_init(&iobuf, chunk) < 0)
+                return (total > 0) ? total : -1;
+
+            /* Copy from user space to kernel buffer with SMAP protection */
+            if (vfs_copy_from_user_safe(&iobuf, (const char *)buf + total, chunk) < 0) {
+                vfs_iobuf_free(&iobuf);
+                return (total > 0) ? total : -1;
+            }
+
+            /* Filesystem writes from the safe kernel buffer */
+            ssize_t n = filp->inode->ops->write(filp, iobuf.data, chunk, &filp->offset);
+            if (n < 0) {
+                vfs_iobuf_free(&iobuf);
+                return (total > 0) ? total : n;
+            }
+            if (n == 0) {
+                vfs_iobuf_free(&iobuf);
+                break;
+            }
+
+            vfs_iobuf_free(&iobuf);
+            total += n;
+            remaining -= (size_t)n;
+
+            /* Short write: filesystem wrote less than requested */
+            if ((size_t)n < chunk) break;
+        }
+        return total;
+    }
+
+    /* Kernel buffer: call filesystem directly (no SMAP needed) */
+    return filp->inode->ops->write(filp, buf, count, &filp->offset);
 }
 
 int vfs_close(struct file *filp) {

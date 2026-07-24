@@ -10,6 +10,7 @@
 #include "../netdev.h"
 #include "../smp.h"
 #include "../mem.h"
+#include "unix.h"        /* AF_UNIX (v4.2.6) */
 #include <stdint.h>
 
 /* ================================================================
@@ -1555,6 +1556,9 @@ void net_init(void) {
      * making congestion control dead code.  (BUG C-7) */
     tcp_cong_init();
     spin_init(&loopback_lock);
+
+    /* AF_UNIX (v4.2.6): Initialize Unix domain socket subsystem */
+    unix_init();
 
     memset(net_ifs, 0, sizeof(net_ifs));
     memset(arp_cache, 0, sizeof(arp_cache));

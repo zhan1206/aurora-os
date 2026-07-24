@@ -93,11 +93,16 @@ _start:
     b 1b
 2:
 
-    /* Jump to kernel_main */
-    mov x0, x19                 /* DTB pointer */
-    bl kernel_main
+    /* Call arch_early_init() for TTBR0/TTBR1, MMU, GIC */
+    /* MULTIARCH (v4.2.6) */
+    bl arch_early_init
 
-    /* If kernel_main returns, halt */
+    /* Jump to kmain */
+    mov x0, x19                 /* DTB pointer */
+    mov x1, xzr                 /* arg1 = 0 */
+    bl kmain
+
+    /* If kmain returns, halt */
 halt:
     wfi
     b halt

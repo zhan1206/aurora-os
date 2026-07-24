@@ -179,4 +179,180 @@ struct drm_device *drm_get_device(void);
 /* Clear the entire screen. */
 void drm_clear_screen(uint32_t color);
 
+/* ================================================================
+ * GUI (v4.2.6) — Compositor, Window System & Input Events
+ * ================================================================ */
+
+/* Window frame geometry constants */
+#define DRM_WIN_BORDER         2
+#define DRM_WIN_TITLE_HEIGHT  24
+
+/* Input event types */
+#define DRM_EV_KEY             1
+#define DRM_EV_MOUSE_MOVE      2
+#define DRM_EV_MOUSE_BUTTON    3
+#define DRM_EV_MOUSE_SCROLL    4
+
+/* Mouse button codes */
+#define DRM_BTN_LEFT    1
+#define DRM_BTN_RIGHT   2
+#define DRM_BTN_MIDDLE  3
+
+/* Key modifier flags */
+#define DRM_MOD_SHIFT   0x01
+#define DRM_MOD_CTRL    0x02
+#define DRM_MOD_ALT     0x04
+#define DRM_MOD_CAPS    0x08
+
+/* ================================================================
+ * GUI (v4.2.6) — Structures
+ * ================================================================ */
+
+/* Window structure */
+struct drm_window {
+    struct drm_window *next;        /* linked list (sorted by z_order ascending) */
+    int x, y;                       /* top-left position of window frame */
+    int width, height;              /* client area size */
+    char title[64];                 /* window title */
+    int z_order;                    /* Z-order for stacking */
+    int visible;                    /* whether the window is visible */
+    void *framebuffer;              /* backing framebuffer for client area (32bpp) */
+    int dirty;                      /* damage tracking flag */
+    struct drm_window *parent;      /* parent window (for dialogs) */
+    struct drm_window *children;    /* child windows list head */
+    struct drm_window *child_next;  /* sibling link in children list */
+};
+
+/* Compositor state */
+struct drm_compositor {
+    struct drm_window *windows;     /* linked list head, sorted by z_order ascending */
+    struct drm_window *active_window; /* currently focused window */
+    void *screen_fb;                /* screen back buffer (32bpp) */
+    int screen_width;               /* screen width in pixels */
+    int screen_height;              /* screen height in pixels */
+    int screen_pitch;               /* screen pitch in bytes */
+    int dirty_region_x;             /* dirty rectangle x */
+    int dirty_region_y;             /* dirty rectangle y */
+    int dirty_region_w;             /* dirty rectangle width */
+    int dirty_region_h;             /* dirty rectangle height */
+    int cursor_x;                   /* mouse cursor x position */
+    int cursor_y;                   /* mouse cursor y position */
+    int cursor_visible;             /* cursor visibility flag */
+    int initialized;                /* compositor initialization flag */
+    int next_z_order;               /* auto-incrementing z_order counter */
+};
+
+/* Input event */
+struct drm_input_event {
+    int type;                       /* DRM_EV_KEY, DRM_EV_MOUSE_MOVE, etc. */
+    int key_code;                   /* key scancode or character */
+    int key_modifiers;              /* DRM_MOD_* flags */
+    int mouse_x;                    /* mouse x position */
+    int mouse_y;                    /* mouse y position */
+    int mouse_button;               /* DRM_BTN_LEFT, DRM_BTN_RIGHT, DRM_BTN_MIDDLE */
+    int mouse_dx;                   /* mouse delta x (for scroll) */
+    int mouse_dy;                   /* mouse delta y (for scroll) */
+};
+
+/* ================================================================
+ * GUI (v4.2.6) — Compositor API
+ * ================================================================ */
+
+/* Initialize the compositor with screen dimensions. */
+void drm_compositor_init(void);
+
+/* Render all visible windows to the screen back buffer. */
+void drm_compositor_render(void);
+
+/* Present the rendered frame (copy back buffer to display). */
+void drm_compositor_swap(void);
+
+/* ================================================================
+ * GUI (v4.2.6) — Window Management API
+ * ================================================================ */
+
+/* Create a new window with a backing framebuffer of client area size. */
+struct drm_window *drm_window_create(int x, int y, int w, int h, const char *title);
+
+/* Destroy a window and free its resources. */
+void drm_window_destroy(struct drm_window *window);
+
+/* Move a window to a new position. */
+void drm_window_move(struct drm_window *window, int x, int y);
+
+/* Resize a window (reallocates framebuffer). */
+void drm_window_resize(struct drm_window *window, int w, int h);
+
+/* Raise window to top of z-order. */
+void drm_window_raise(struct drm_window *window);
+
+/* Change window title. */
+void drm_window_set_title(struct drm_window *window, const char *title);
+
+/* Get the window's client framebuffer for drawing. */
+void *drm_window_get_fb(struct drm_window *window);
+
+/* Mark window as needing redraw. */
+void drm_window_mark_dirty(struct drm_window *window);
+
+/* ================================================================
+ * GUI (v4.2.6) — Input Event System API
+ * ================================================================ */
+
+/* Initialize the input subsystem. */
+void drm_input_init(void);
+
+/* Handle keyboard events. */
+void drm_input_handle_key(int key_code, int pressed);
+
+/* Handle mouse movement. */
+void drm_input_handle_mouse_move(int dx, int dy);
+
+/* Handle mouse button clicks. */
+void drm_input_handle_mouse_button(int button, int pressed);
+
+/* Find the topmost window at the given screen coordinates. */
+struct drm_window *drm_find_window_at(int x, int y);
+
+/* Set keyboard focus to the specified window. */
+void drm_input_focus_window(struct drm_window *window);
+
+/* Route an input event to the focused window. */
+void drm_input_dispatch_event(struct drm_input_event *event);
+
+/* Cycle focus to the next visible window (Alt+Tab). */
+void drm_input_cycle_focus(void);
+
+/* ================================================================
+ * GUI (v4.2.6) — Drawing Primitives API
+ * ================================================================ */
+
+/* Draw a filled rectangle on the screen (compositor back buffer). */
+void drm_draw_rect(int x, int y, int w, int h, uint32_t color);
+
+/* Draw a line using Bresenham's algorithm on the screen. */
+void drm_draw_line(int x1, int y1, int x2, int y2, uint32_t color);
+
+/* Draw text on the screen at the given position. */
+void drm_draw_text(int x, int y, const char *text, uint32_t color);
+
+/* Draw the window frame (title bar + borders) on the screen. */
+void drm_draw_window_frame(struct drm_window *window);
+
+/* Fill a rectangle on a raw 32bpp framebuffer. */
+void drm_fill_rect(void *fb, int pitch, int x, int y, int w, int h, uint32_t color);
+
+/* Get the compositor instance. */
+struct drm_compositor *drm_get_compositor(void);
+
+/* Get window client area width. */
+static inline int drm_window_client_width(struct drm_window *w) {
+    return w ? w->width : 0;
+}
+
+/* Get window client area height. */
+static inline int drm_window_client_height(struct drm_window *w) {
+    return w ? w->height : 0;
+}
+
 #endif /* DRM_H */

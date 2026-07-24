@@ -254,15 +254,15 @@ int fd_send(int fd, int target_pid) {
         return -1;
     }
 
-    struct task_struct *target = find_task_by_pid(target_pid);
+    struct task_struct *target = task_get_by_pid(target_pid);
     if (!target) return -1;
 
     /* Verify target is in a valid state */
     if (target->state == TASK_DEAD || target->state == TASK_ZOMBIE) {
         log_printf(LOG_LEVEL_WARN, "cap: fd_send: target pid %d is dead/zombie\n",
                    target_pid);
-        /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-        __sync_fetch_and_sub(&target->ref_count, 1);
+        /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+        task_put(target);
         return -1;
     }
 
@@ -286,8 +286,8 @@ int fd_send(int fd, int target_pid) {
             log_printf(LOG_LEVEL_WARN,
                        "cap: fd_send: pid %d cannot send to pid %d (not a child)\n",
                        current->pid, target_pid);
-            /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-            __sync_fetch_and_sub(&target->ref_count, 1);
+            /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+            task_put(target);
             return -1;
         }
     }
@@ -299,8 +299,8 @@ int fd_send(int fd, int target_pid) {
     uint32_t saved_caps = entry->caps;
     int new_fd = cap_fd_alloc(target, entry->file, entry->caps);
     if (new_fd < 0) {
-        /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-        __sync_fetch_and_sub(&target->ref_count, 1);
+        /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+        task_put(target);
         return -1;
     }
 
@@ -310,7 +310,7 @@ int fd_send(int fd, int target_pid) {
 
     log_printf(LOG_LEVEL_DEBUG, "cap: sent fd %d -> pid %d as fd %d (caps=0x%x)\n",
                fd, target_pid, new_fd, saved_caps);
-    /* FIXED (v4.2.5): BUG-FIND-REFCOUNT */
-    __sync_fetch_and_sub(&target->ref_count, 1);
+    /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+    task_put(target);
     return 0;
 }

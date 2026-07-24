@@ -1,6 +1,100 @@
 # AuroraOS Changelog
 
-## v4.2.5 (2026-07-22) — 致命Bug修复与安全加固
+## v4.2.6 (2026-07-22) — 长期特性集成：KASLR、POSIX 110+、多架构启动、GUI、USB、KGDB
+
+### 概述
+
+v4.2.6 是 AuroraOS 迄今为止最大的功能版本，集成了 11 项长期特性，涵盖内核安全、POSIX 兼容、多架构支持、图形框架、USB 驱动栈、内核调试器等核心领域。新增 **30+ 个文件**，**+8000 行**代码。系统调用从 85 个扩展至 **110 个**。
+
+---
+
+### 一、内核安全 (3项)
+
+**完整 KASLR**：
+- `kernel/aslr.c`、`kernel/aslr.h`: 从 KASLR-lite 升级为完整 KASLR。新增内核文本基址随机化（2MB 对齐，~16 bits 熵）、直接映射随机化、内核栈随机填充（0-8 页）、堆随机化（512MB 范围）、模块地址随机化（2GB 范围）。使用 ChaCha20 CSPRNG + TSC/RDRAND/CPUID 多源熵。
+
+**完整进程引用计数系统**：
+- `kernel/sched.c`、`kernel/sched.h`: 新增 `task_get()`/`task_put()` 标准化 API，`task_get_by_pid()` 安全 PID 查找，`task_free()` 完整资源释放。弃用 `find_task_by_pid()`。`schedule()` 正确管理运行引用，`do_exit_current()` 使用 `state_lock` 保护状态转换。更新 `signal.c`、`capability.c`、`syscall.c` 所有调用者。
+
+**VFS 层 SMAP 安全缓冲区复制**：
+- `kernel/vfs_safe_copy.h` (新): 内核缓冲区暂存机制，`vfs_copy_from_user_safe()`/`vfs_copy_to_user_safe()` 使用 `stac()`/`clac()` 保护。
+- `kernel/vfs.c`: `vfs_read()`/`vfs_write()` 自动检测用户空间指针，使用安全内核缓冲区中转，文件系统实现无需修改。
+
+---
+
+### 二、POSIX 兼容层 (4项)
+
+**AF_UNIX 域套接字**：
+- `kernel/net/unix.h`、`kernel/net/unix.c` (新，~800 行): 完整 AF_UNIX 实现。支持 SOCK_STREAM（环形缓冲区）和 SOCK_DGRAM（消息队列）。连接管理、accept 队列、阻塞等待、信号中断、死锁防护。集成到所有 socket 系统调用和 fd_table 管理。
+
+**110 个系统调用**：
+- `kernel/syscall.h`、`kernel/syscall.c`: 新增 23 个 POSIX 系统调用：FCHDIR、SETRESUID/GID、GETRESUID/GID、FUTEX（WAIT+WAKE）、SCHED_SETAFFINITY/GETAFFINITY、SET_TID_ADDRESS、TGKILL、MKDIRAT、MKNODAT、FCHOWNAT、UNLINKAT、LINKAT、SYMLINKAT、READLINKAT、FCHMODAT、FACCESSAT、PRLIMIT64、NAME_TO_HANDLE_AT、GETCPU、MEMBARRIER。
+
+**完整文件系统层次**：
+- `/dev` (kernel/devtmpfs.c): stdin、stdout、stderr 设备节点
+- `/sys` (kernel/sysfs.c): /sys/kernel/hostname、/sys/devices/cpu/online、/sys/devices/cpu/possible
+- `/tmp` (kernel/fs.c): tmpfs 挂载点
+
+**用户态动态链接器**：
+- `userspace/ld-so/ld-so.h`、`userspace/ld-so/ld-so.c` (新，~900 行): 完整 ELF 动态链接器。支持 DT_NEEDED 依赖加载、R_X86_64_RELATIVE/GLOB_DAT/JUMP_SLOT/64/COPY 重定位、延迟 PLT 绑定、符号查找、/lib 和 /usr/lib 路径搜索。自包含实现（内联汇编系统调用，无 libc 依赖）。
+- `kernel/elfloader.c`: 新增 `exec_elf_interp()` 支持 PT_INTERP 解释器加载，AT_BASE 辅助向量传递。
+
+---
+
+### 三、多架构支持
+
+**多架构可启动 (riscv64/aarch64/loongarch64)**：
+- `arch/riscv64/arch_init.c` (新): Sv39 2MB 巨页 identity map 构建，SATP 配置启用 MMU
+- `arch/aarch64/arch_init.c` (新): 4KB 粒度 Level 0/1 页表，TTBR0_EL1/TTBR1_EL1、TCR_EL1、MAIR_EL1、SCTLR_EL1 配置，GICv2 初始化
+- `arch/loongarch64/arch_init.c` (新): CRMD、ECFG 配置，TLB 刷新
+- `kernel/arch_entry.c` (新): 跨架构统一 `kmain()` 入口点
+- `kernel/include/arch.h`: 新增 `arch_tlb_flush()`、`arch_tlb_flush_all()`、`arch_get_cpu_id()` 等跨架构接口
+- `Makefile`: ARCH 变量、交叉编译器检测、per-arch CFLAGS/LDFLAGS/ASFLAGS、QEMU 运行目标
+- 修复三个架构的 linker.ld BSS 符号不匹配
+
+---
+
+### 四、GUI 框架 (DRM/KMS)
+
+- `kernel/drm.h`、`kernel/drm.c` (增强，~600 行): 窗口系统合成器、输入事件系统、窗口管理（创建/销毁/移动/缩放/提升/标题）、Bresenham 画线、Catppuccin Mocha 配色、Alt+Tab 窗口切换、鼠标光标渲染
+- `kernel/keyboard.c`: Alt+Tab 快捷键集成
+
+---
+
+### 五、USB 驱动栈
+
+- `kernel/usb/xhci.h`、`kernel/usb/xhci.c` (新，~700 行): xHCI 控制器驱动。PCI 枚举、MMIO 寄存器映射、命令环/事件环/传输环管理、设备槽位分配、地址分配、端点配置、控制传输（GET_DESCRIPTOR/SET_CONFIGURATION）
+- `kernel/usb/usb.h` (新): USB 协议层定义（设备/配置/接口/端点描述符、HID 描述符、Setup Packet）
+- `kernel/usb/hid.h`、`kernel/usb/hid.c` (新，~400 行): HID 驱动。键盘启动协议解析、HID→ASCII 键码转换表（232 项）、鼠标报告处理、控制台输入集成
+- `kernel/main.c`: 添加 `pci_init()` 调用（修复遗漏）、`xhci_init()`、`hid_init()`
+
+---
+
+### 六、ACPI 电源管理
+
+- `kernel/acpi.h`、`kernel/acpi.c` (新，~500 行): RSDP 搜索（EBDA + BIOS 区域）、RSDT/XSDT 解析、MADT 解析（LAPIC/IOAPIC/ISO/NMI）、FADT 解析、ACPI 关机（PM1a_CNT SLP_EN）、ACPI 重启（RESET_REG + 键盘控制器回退）
+- `kernel/smp.c`: 移除重复 ACPI 结构体，改用 acpi.h
+- `kernel/syscall.c`: SYS_ACPI_SHUTDOWN(319)、SYS_ACPI_REBOOT(320)
+
+---
+
+### 七、KGDB 内核调试器
+
+- `kernel/kgdb.h`、`kernel/kgdb.c` (新，~660 行): 完整 INT3 内核调试器。64 个断点、单步执行（RFLAGS.TF）、寄存器 dump、十六进制内存 dump、栈回溯（RBP 链，最多 32 帧）、符号解析（256 符号表）、命令解析器（c/s/r/m/b/d/bt/h/q）
+- `arch/x86_64/exception_handlers.S`: `kgdb_exc_common` 汇编入口，保存全部寄存器
+- `kernel/irq.c`: IDT 向量 1(#DB) 和 3(#BP) 路由到 KGDB 处理
+
+---
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 新增文件 | 30+ |
+| 修改文件 | 20+ |
+| 新增代码 | ~8000 行 |
+| 系统调用 | 85 → 110 (+25) |
+| 子系统 | 11 个新子系统 |
 
 ### 概述
 

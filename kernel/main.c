@@ -22,6 +22,7 @@
 #include "syscall.h"
 #include "fs.h"
 #include "smp.h"
+#include "acpi.h"
 #include "block_dev.h"
 #include "perf.h"
 #include "sysctl.h"
@@ -33,6 +34,10 @@
 #include "cmdline.h"
 #include "drm.h"
 #include "nvme.h"
+#include "kgdb.h"
+#include "pci.h"
+#include "usb/xhci.h"
+#include "usb/hid.h"
 #include "../boot/boot_info.h"
 
 /* ================================================================
@@ -173,6 +178,10 @@ void kernel_main(uint32_t magic, void *mb_info) {
         drm_init();
     }
 
+    /* GUI (v4.2.6) — Initialize compositor and input subsystem */
+    drm_compositor_init();
+    drm_input_init();
+
     /* Center logo vertically: 5 logo + 2 subtitle + 1 top-pad + 1 top-sep + 3 version + 1 bot-pad + 1 bot-sep = 15 */
     console_vcenter(15);
     boot_print_logo();
@@ -196,7 +205,7 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_write_ansi(SGR_RESET);
     console_vpad(1);
 
-    int boot_step = 0, boot_total = 20;
+    int boot_step = 0, boot_total = 25;  /* +3 for PCI, xHCI, HID (v4.2.6) */
     #define BOOT_STEP() do { \
         boot_step++; \
         console_write_ansi(BOOT_PROGRESS_FILL); \
@@ -278,6 +287,15 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_status_ok("Page tables (4-level, NX enabled)");
     BOOT_STEP();
 
+    /*
+     * Initialize ACPI subsystem after memory and page tables are ready.
+     * ACPI discovers RSDP, parses RSDT/XSDT, caches MADT and FADT.
+     * This must be called before smp_init() which uses MADT data.
+     */
+    acpi_init();
+    console_status_ok("ACPI (MADT + FADT parsed)");
+    BOOT_STEP();
+
     printk_console_ready();
 
     /* === Phase 3: Kernel Subsystems === */
@@ -323,6 +341,11 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_status_ok("Read-only data segment");
     BOOT_STEP();
 
+    /* KGDB (v4.2.6) - Initialize kernel debugger after IDT is set up */
+    kgdb_init();
+    console_status_ok("KGDB v4.2.6 (breakpoints, single-step, backtrace)");
+    BOOT_STEP();
+
     pit_init(100);
     console_status_ok("PIT timer (100 Hz)");
     BOOT_STEP();
@@ -339,8 +362,22 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_status_ok("Sysctl interface");
     BOOT_STEP();
 
+    /* PCI enumeration - must be called before any PCI driver */
+    pci_init();
+    console_status_ok("PCI bus enumeration");
+    BOOT_STEP();
+
     nvme_init();
     console_status_ok("NVMe driver (PCI enumeration)");
+    BOOT_STEP();
+
+    /* USB (v4.2.6) - xHCI controller and HID driver */
+    xhci_init();
+    console_status_ok("xHCI USB controller");
+    BOOT_STEP();
+
+    hid_init();
+    console_status_ok("USB HID driver (keyboard/mouse)");
     BOOT_STEP();
 
     /* === Phase 3.5: File System === */
@@ -400,6 +437,47 @@ void kernel_main(uint32_t magic, void *mb_info) {
 
     /* === Phase 4: Self-test & Launch === */
     kernel_selftest();
+
+    /* GUI (v4.2.6) — Create demo windows */
+    {
+        struct drm_window *shell_win = drm_window_create(50, 50, 400, 300, "Shell");
+        struct drm_window *welcome_win = drm_window_create(200, 150, 350, 200, "Welcome");
+
+        if (welcome_win) {
+            /* Draw welcome message on the Welcome window */
+            void *fb = drm_window_get_fb(welcome_win);
+            if (fb) {
+                drm_fill_rect(fb, welcome_win->width * 4, 0, 0,
+                              welcome_win->width, welcome_win->height, 0x003E2E2E);
+                /* We draw text using screen-level draw; for now place a colored rect */
+                drm_fill_rect(fb, welcome_win->width * 4, 20, 30,
+                              welcome_win->width - 40, 40, 0x002E3E5E);
+                drm_fill_rect(fb, welcome_win->width * 4, 20, 90,
+                              welcome_win->width - 40, 80, 0x003E2E4E);
+            }
+            drm_window_mark_dirty(welcome_win);
+        }
+
+        if (shell_win) {
+            void *fb = drm_window_get_fb(shell_win);
+            if (fb) {
+                drm_fill_rect(fb, shell_win->width * 4, 0, 0,
+                              shell_win->width, shell_win->height, 0x002E2E3E);
+                drm_fill_rect(fb, shell_win->width * 4, 10, 10,
+                              shell_win->width - 20, 20, 0x003E3E5E);
+                drm_fill_rect(fb, shell_win->width * 4, 10, 40,
+                              shell_win->width - 20, shell_win->height - 50, 0x002E3E3E);
+            }
+            drm_window_mark_dirty(shell_win);
+        }
+
+        /* Raise Welcome to top */
+        if (welcome_win) drm_window_raise(welcome_win);
+
+        /* Render and present the composited frame */
+        drm_compositor_render();
+        drm_compositor_swap();
+    }
 
     /* Demo tasks */
     create_task(task_fn1);
