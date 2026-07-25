@@ -32,8 +32,13 @@ static uint8_t dns_server_ip[4] = { 8, 8, 8, 8 };  /* Default: Google DNS */
  * dns_age_counter increments on each dns_cache_lookup; the oldest entry
  * (lowest age) is evicted when the cache is full.  Entries with age
  * difference > DNS_CACHE_TTL are considered stale and invalidated. */
+/* FIXED (v4.2.7): BUG-DNS-CACHE-STRING — Added hostname field to prevent
+ * hash collision false positives.  Two different domain names with the
+ * same hash (e.g. "abc.com" and "xyz.net") would previously return the
+ * wrong IP.  Now both hash AND hostname string are compared. */
 struct dns_cache_entry {
     uint32_t hash;
+    char     hostname[256];
     uint8_t  ip[4];
     int      valid;
     int      age;
@@ -124,7 +129,10 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
     int i;
     spin_lock(&dns_cache_lock);
     for (i = 0; i < DNS_CACHE_SIZE; i++) {
-        if (dns_cache[i].valid && dns_cache[i].hash == hash) {
+        /* FIXED (v4.2.7): BUG-DNS-CACHE-STRING — Compare both hash
+         * AND hostname string to prevent hash collision false positives. */
+        if (dns_cache[i].valid && dns_cache[i].hash == hash &&
+            strcmp(dns_cache[i].hostname, hostname) == 0) {
             memcpy(ip_out, dns_cache[i].ip, 4);
             /* FIXED (v4.2.2): Update LRU age on cache hit */
             dns_cache[i].age = dns_age_counter;
@@ -301,6 +309,14 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
                     }
                     /* If no empty slot, target is the LRU entry */
                     dns_cache[target].hash = hash;
+                    /* FIXED (v4.2.7): BUG-DNS-CACHE-STRING — Store the
+                     * domain name alongside the hash for collision-free lookup. */
+                    {
+                        int n = (int)strlen(hostname);
+                        if (n > 255) n = 255;
+                        memcpy(dns_cache[target].hostname, hostname, (size_t)n);
+                        dns_cache[target].hostname[n] = '\0';
+                    }
                     memcpy(dns_cache[target].ip, ip_out, 4);
                     dns_cache[target].age = dns_age_counter;
                     dns_cache[target].valid = 1;

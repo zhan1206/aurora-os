@@ -2,9 +2,9 @@
 
 [![CI Build](https://github.com/zhan1206/aurora-os/actions/workflows/build.yml/badge.svg)](https://github.com/zhan1206/aurora-os/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Lines of Code](https://img.shields.io/badge/code-~26,500%20lines-blue)](kernel/)
+[![Lines of Code](https://img.shields.io/badge/code-~35,000%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.2.6-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.2.7-blue)](CHANGELOG.md)
 
 **100% 自研代码** | 无 Linux 内核代码 | 无第三方内核组件
 
@@ -209,18 +209,21 @@ x86_64-elf-gdb build/kernel.elf \
 
 ```
 AuroraOS
-├── kernel/           # 内核源码（64 个 C 文件，55 个头文件，2 个汇编）
+├── kernel/           # 内核源码（69 个 C 文件，64 个头文件，2 个汇编）
 │   ├── entry.S       # Multiboot1 入口 + 32→64 位模式自切换
 │   ├── mem.c/h       # 伙伴系统物理页分配器 + Slab 内核堆
 │   ├── pagetable.c/h # x86_64 四级页表 + COW 写时复制
 │   ├── sched.c/h     # VRFair 调度器（CFS/EEVDF 启发式）+ 进程树 + 五状态机
-│   ├── syscall.c/h   # 77 个系统调用 + 6 参数 ABI
+│   ├── syscall.c/h   # 110 个系统调用 + 6 参数 ABI
 │   ├── signal.c/h    # POSIX 信号框架（5 种信号）
 │   ├── vfs.c/h       # VFS 层 + dentry 缓存 + LRU 驱逐
 │   ├── console.c/h   # VGA 文本模式 + ANSI + 行编辑
 │   ├── keyboard.c    # PS/2 键盘驱动 + E0 键处理
 │   ├── selftest.c    # 内核自测试（26 组）
-│   └── include/      # 公共头文件（18 个）
+│   ├── acpi.c/h      # ACPI 表解析 + DSDT \_S5 关机支持（v4.2.7）
+│   ├── kgdb.c/h      # KGDB 内核调试器 + GDB RSP 协议（v4.2.7）
+│   ├── usb/          # USB 子系统（xHCI 驱动 + USB 核心 + HID）（v4.2.7）
+│   └── include/      # 公共头文件（user_access.h 等）
 ├── arch/              # 多架构支持
 │   ├── x86_64/        # x86_64 架构汇编（10 个文件）
 │   ├── riscv64/       # RISC-V 64 架构（Sv39 页表 + SBI + 上下文切换）
@@ -253,21 +256,21 @@ AuroraOS
 - **Fork**: COW 页面克隆 + 完整寄存器状态复制
 - **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列，负载均衡
 
-### 系统调用（77 个）
+### 系统调用（110 个）
 
 | 类别 | 系统调用 |
 |------|----------|
-| I/O | `read`, `write`, `open`, `close`, `fstat`, `lseek`, `getdents` |
-| 进程 | `fork`, `execve`, `exit`, `getpid`, `waitpid` |
-| 内存 | `mmap`, `mprotect` |
-| 信号 | `kill`, `sigaction`, `sigreturn` |
-| 管道 | `pipe` |
-| 文件描述符 | `dup`, `dup2` |
-| 文件系统 | `mkdir`, `rmdir`, `unlink`, `rename`, `chmod`, `stat` |
-| 网络 | `socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `getsockname` |
-| 时间 | `gettimeofday`, `nanosleep`, `times` |
-| 设备控制 | `ioctl` |
-| I/O 多路复用 | `poll` |
+| I/O | `read`, `write`, `open`, `close`, `fstat`, `lseek`, `getdents`, `readv`, `writev`, `getdents64` |
+| 进程 | `fork`, `execve`, `exit`, `getpid`, `waitpid`, `clone`, `gettid`, `exit_group` |
+| 内存 | `mmap`, `mprotect`, `munmap`, `brk`, `sbrk`, `madvise` |
+| 信号 | `kill`, `sigaction`, `sigreturn`, `sigprocmask`, `tgkill` |
+| 管道 | `pipe`, `pipe2` |
+| 文件描述符 | `dup`, `dup2`, `fcntl`, `select`, `poll` |
+| 文件系统 | `mkdir`, `rmdir`, `unlink`, `rename`, `chmod`, `stat`, `link`, `mknod`, `symlink`, `readlink`, `*at` 系列 |
+| 网络 | `socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `getsockname`, `socketpair`, `getpeername` |
+| 时间 | `gettimeofday`, `nanosleep`, `times`, `clock_gettime` |
+| 设备控制 | `ioctl`, `mount`, `umount` |
+| 电源管理 | `acpi_shutdown`, `acpi_reboot` (v4.2.7) |
 
 详见 [docs/api.md](docs/api.md)。
 
@@ -282,6 +285,7 @@ AuroraOS
   - `/dev/tty` - 当前终端
   - `/dev/random` - 硬件随机数（RDRAND，阻塞）
   - `/dev/urandom` - 硬件随机数（RDRAND，非阻塞）
+  - `/dev/usb/` - USB 设备节点（v4.2.7）
 - **procfs**: 虚拟文件系统（受 CoolPotOS 启发）
   - `/proc/cpuinfo` - CPU 信息
   - `/proc/meminfo` - 内存统计
@@ -315,7 +319,7 @@ AuroraOS
 ### 安全机制
 - **ASLR**: 栈随机化（已启用）；mmap 随机化（已实现，未接入 sys_mmap 调用路径）
 - **Stack Protector**: 栈溢出保护（canary 检查）
-- **SMAP/SMEP**: 内核访问/执行用户空间内存保护（已启用，CR4.SMEP/CR4.SMAP 已设置，STAC/CLAC 已集成）
+- **SMAP/SMEP**: 内核访问/执行用户空间内存保护（已启用，CR4.SMEP/CR4.SMAP 已设置，STAC/CLAC 已集成，user_access.h 集中化管理 v4.2.7）
 - **seccomp**: 系统调用过滤框架（已实现 seccomp_check，缺少设置系统调用，当前始终通过）
 - **Capability**: 文件描述符权能框架（已实现，未在 syscall 中强制校验）
 - **内核模块签名**: 演示性占位实现（未启用，XOR 哈希 + 硬编码密钥）
@@ -333,6 +337,24 @@ AuroraOS
 - **符号解析**: 内核符号表 + 模块间符号引用
 - **x86_64 重定位**: R_X86_64_64/PC32/32/32S/RELATIVE
 - **模块签名**: 演示性占位实现（未启用，XOR 哈希 + 硬编码密钥）
+
+### USB 子系统（v4.2.7 新增）
+- **xHCI 驱动**: USB 3.x 主机控制器初始化、设备槽位管理、端点配置
+- **USB 核心**: 设备枚举、描述符解析、设备列表管理
+- **HID 驱动**: 人机接口设备（键盘/鼠标）支持
+- **热插拔**: 端口状态变更检测，设备连接/断开事件处理
+- **DMA 分配器**: DMA 安全内存分配，确保物理连续性和 identity mapping
+
+### ACPI 电源管理（v4.2.7 新增）
+- **ACPI 表解析**: RSDP/XSDT 表定位，MADT/HPET/FADT 解析
+- **DSDT \_S5 解析**: 提取 SLP_TYP 值，支持 ACPI 关机和重启
+- **电源管理 syscall**: SYS_ACPI_SHUTDOWN(319) 和 SYS_ACPI_REBOOT(320)
+
+### 内核调试（v4.2.7 新增）
+- **KGDB 断点引擎**: INT3 断点设置/清除，RFLAGS.TF 单步执行
+- **GDB RSP 协议**: 远程串行协议支持，与 GDB 客户端交互
+- **寄存器转储**: 完整 x86_64 寄存器状态查看
+- **符号表**: 地址到函数名解析，栈回溯
 
 ### 终端与 Shell
 - **VGA 文本模式**: 80×25 彩色字符
@@ -422,8 +444,9 @@ A: 构建 Debug 版本：`make debug && make iso`。日志级别可通过 `LOG_L
 ```
 AuroraOS/
 ├── kernel/              # 内核源码
-│   ├── include/         # 公共头文件（theme, errno, portio, log 等）
-│   ├── *.c, *.h         # 核心模块（64 个 C 文件 + 55 个头文件）
+│   ├── include/         # 公共头文件（theme, errno, portio, log, user_access 等）
+│   ├── usb/             # USB 子系统（xhci.c, usb.c, hid.c, xhci_dma.h）
+│   ├── *.c, *.h         # 核心模块（69 个 C 文件 + 64 个头文件）
 │   └── *.S              # 汇编文件（entry.S, irq_handler.S）
 ├── arch/                 # 多架构支持
 │   ├── x86_64/           # x86_64 架构汇编（10 个文件）

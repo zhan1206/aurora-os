@@ -840,6 +840,19 @@ void do_exit_current(int code) {
         current->parent->state = TASK_READY;
     }
 
+    /*
+     * FIXED (v4.2.7): BUG-VFORK-CLONE
+     * If the parent was vfork-blocked, wake it up on child exit.
+     * The vfork child shares the parent's address space, so the
+     * parent must be alerted when the child exits without execve.
+     */
+    if (current->parent && current->parent->vfork_done == 0) {
+        current->parent->vfork_done = 1;
+        if (current->parent->state == TASK_BLOCKED) {
+            current->parent->state = TASK_READY;
+        }
+    }
+
     /* Remove from run queue (SMP-safe: acquire run queue lock to prevent
      * races with smp_schedule() which may try to steal tasks from this CPU).
      * CRITICAL: Disable interrupts to prevent self-deadlock with
@@ -1197,9 +1210,37 @@ void smp_schedule(int my_cpu_id) {
     }
 
     if (stolen) {
-        /* Remove from source CPU and add to our CPU */
-        smp_dequeue_task(stolen, busiest_cpu);
-        smp_enqueue_task(stolen, my_cpu_id);
+        /* FIXED (v4.2.7): BUG-SMP-SCHED-DEADLOCK
+         * Inline dequeue/enqueue instead of calling smp_dequeue_task /
+         * smp_enqueue_task, which would try to acquire rq->lock again
+         * (deadlock!).  Both rq locks are already held by this function. */
+
+        /* ---- Dequeue stolen task from src_rq ---- */
+        if (src_rq->head == stolen && stolen->next == stolen) {
+            /* Only task in the queue */
+            src_rq->head = NULL;
+            src_rq->count = 0;
+        } else {
+            /* Find the task before stolen in the circular list */
+            struct task_struct *prev = src_rq->head;
+            while (prev->next != stolen) prev = prev->next;
+            prev->next = stolen->next;
+            if (src_rq->head == stolen) src_rq->head = stolen->next;
+            src_rq->count--;
+        }
+        rb_erase(&src_rq->ready_tree, &stolen->rb_node);
+
+        /* ---- Enqueue stolen task into my_rq ---- */
+        if (my_rq->head == NULL) {
+            stolen->next = stolen;
+            my_rq->head = stolen;
+        } else {
+            stolen->next = my_rq->head->next;
+            my_rq->head->next = stolen;
+        }
+        my_rq->count++;
+        stolen->rb_node.key = stolen->vruntime;
+        rb_insert(&my_rq->ready_tree, &stolen->rb_node);
 
         log_printf(LOG_LEVEL_DEBUG, "smp: migrated task pid=%d from CPU %d to CPU %d\n",
                    stolen->pid, busiest_cpu, my_cpu_id);

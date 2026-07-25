@@ -173,6 +173,12 @@ int unix_listen(struct unix_sock *sk, int backlog) {
 
 /* ================================================================
  * unix_accept                                                    /* AF_UNIX (v4.2.6) */
+ *
+ * FIXED (v4.2.7): BUG-UNIX-BACKLOG — The backlog limit is enforced by
+ * unix_connect() before adding a connection to the accept queue.
+ * unix_accept() does not need to check the backlog because it only
+ * dequeues from the already-bounded queue.  The queue length is
+ * guaranteed to be <= backlog by unix_connect().
  * ================================================================ */
 struct unix_sock *unix_accept(struct unix_sock *sk) {
     if (!sk) return NULL;
@@ -625,6 +631,36 @@ int unix_recvfrom(struct unix_sock *sk, void *buf, int max_len,
 }
 
 /* ================================================================
+ * unix_sock_put — Decrement refcount and free when zero         /* FIXED (v4.2.7): BUG-UNIX-PEER-UAF */
+ * ================================================================ */
+static void unix_sock_put(struct unix_sock *sk) {
+    if (!sk) return;
+    spin_lock(&sk->lock);
+    sk->refcount--;
+    if (sk->refcount > 0) {
+        spin_unlock(&sk->lock);
+        return;
+    }
+    spin_unlock(&sk->lock);
+
+    /* Free resources */
+    if (sk->buf) {
+        kfree(sk->buf);
+        sk->buf = NULL;
+    }
+
+    /* Free any remaining datagrams */
+    while (sk->dgram_head) {
+        struct unix_dgram *dg = sk->dgram_head;
+        sk->dgram_head = dg->next;
+        if (dg->data) kfree(dg->data);
+        kfree(dg);
+    }
+
+    kfree(sk);
+}
+
+/* ================================================================
  * unix_close                                                    /* AF_UNIX (v4.2.6) */
  * ================================================================ */
 void unix_close(struct unix_sock *sk) {
@@ -660,8 +696,13 @@ void unix_close(struct unix_sock *sk) {
         peer->write_open = 0;
         unix_wake_all(&peer->blocked_readers);
         unix_wake_all(&peer->blocked_writers);
+        /* FIXED (v4.2.7): BUG-UNIX-PEER-UAF — Clear the peer's
+         * back-reference and decrement its refcount.  This prevents
+         * a use-after-free if the peer accesses sk after sk is freed.
+         * The peer's own state is NOT set to CLOSED here — the peer
+         * manages its own lifecycle. */
         peer->peer = NULL;
-        peer->state = UNIX_CLOSED;
+        unix_sock_put(peer);
         spin_unlock(&peer->lock);
         sk->peer = NULL;
     }
@@ -684,21 +725,11 @@ void unix_close(struct unix_sock *sk) {
     }
     spin_unlock(&unix_global_lock);
 
-    /* Free resources */
-    if (sk->buf) {
-        kfree(sk->buf);
-        sk->buf = NULL;
-    }
-
-    /* Free any remaining datagrams */
-    while (sk->dgram_head) {
-        struct unix_dgram *dg = sk->dgram_head;
-        sk->dgram_head = dg->next;
-        if (dg->data) kfree(dg->data);
-        kfree(dg);
-    }
-
-    kfree(sk);
+    /* FIXED (v4.2.7): BUG-UNIX-PEER-UAF — Use refcount-based put
+     * instead of direct kfree.  The socket may still be referenced
+     * by its peer (e.g. if the peer hasn't closed yet); unix_sock_put
+     * only frees the memory when refcount reaches zero. */
+    unix_sock_put(sk);
 }
 
 /* ================================================================

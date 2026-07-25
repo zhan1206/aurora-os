@@ -1111,15 +1111,25 @@ static void *exec_elf_interp(const char *path, const char *interp_path,
         return NULL;
     }
 
-    /* 5. Create a new address space */
-    uint64_t new_pml4 = clone_kernel_pml4();
-    if (!new_pml4) {
+    /* 5. FIXED (v4.2.7): BUG-EXEC-DOUBLE-PML4
+     * Do NOT create a PML4 here.  Let elf_load_core create it by
+     * passing &new_pml4 (initialized to 0).  Previously we cloned the
+     * PML4, loaded the interpreter into it, then elf_load_core cloned
+     * another PML4 and overwrote the pointer — leaking the first PML4. */
+    uint64_t new_pml4 = 0;
+    uint64_t interp_base = INTERP_BASE;
+    uint64_t stack = 0;
+
+    /* 6. Load the main binary — this creates the PML4 */
+    void *entry = (void *)elf_load_core(path, &new_pml4, &stack, NULL, NULL,
+                                         interp_base);
+    if (!entry) {
+        log_printf(LOG_LEVEL_ERR, "exec_elf_interp: failed to load main binary\n");
         kfree(interp_phdrs); vfs_close(interp_f);
         return NULL;
     }
 
-    /* 6. Load interpreter segments at INTERP_BASE + vaddr */
-    uint64_t interp_base = INTERP_BASE;
+    /* 7. Load interpreter segments at INTERP_BASE + vaddr */
     for (int i = 0; i < interp_phnum; ++i) {
         if (interp_phdrs[i].p_type != PT_LOAD) continue;
 
@@ -1186,18 +1196,7 @@ static void *exec_elf_interp(const char *path, const char *interp_path,
     kfree(interp_phdrs);
     vfs_close(interp_f);
 
-    /* 8. Load the main binary into the same address space.
-     *    Use elf_load_core directly with interp_base set. */
-    uint64_t stack = 0;
-    void *entry = (void *)elf_load_core(path, &new_pml4, &stack, NULL, NULL,
-                                         interp_base);
-    if (!entry) {
-        log_printf(LOG_LEVEL_ERR, "exec_elf_interp: failed to load main binary\n");
-        free_pagetable(new_pml4);
-        return NULL;
-    }
-
-    /* 9. The interpreter's entry point is what we return */
+    /* 8. The interpreter's entry point is what we return */
     uint64_t interp_entry = interp_base + interp_ehdr.e_entry;
 
     *new_rsp_out = stack;
@@ -1310,9 +1309,15 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
         asm volatile ("sti" ::: "memory");
     }
 
-    /* 4. Free the old page table (user pages are freed via ref_count) */
+    /* 4. Free the old page table (user pages are freed via ref_count).
+     * FIXED (v4.2.7): BUG-EXEC-TLB-SHOOTDOWN
+     * After freeing the old PML4, other CPUs may still have stale TLB
+     * entries pointing to the freed page tables.  Invalidate all remote
+     * TLBs to prevent use-after-free via stale TLB entries. */
+    extern void smp_tlb_shootdown_all(void);
     if (old_pml4) {
         free_pagetable(old_pml4);
+        smp_tlb_shootdown_all();
     }
 
     /* 5. Reset signal handlers to default (POSIX requirement) */

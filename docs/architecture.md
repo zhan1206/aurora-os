@@ -1,10 +1,10 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
 
 ## 1. 概述
 
-AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用混合内核（Hybrid Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载和硬件性能监控。
+AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用混合内核（Hybrid Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载、硬件性能监控、USB 3.x 设备栈、ACPI 电源管理、KGDB 内核调试、KASLR 内核随机化、AF_UNIX 域套接字、动态链接器（ld.so）、GUI/DRM 显示框架、devtmpfs 设备文件系统和 sysfs 内核对象导出。
 
-- **版本**: 4.2.3
+- **版本**: 4.2.7
 - **目标架构**: x86_64 (AMD64)
 - **内核类型**: 混合内核（宏内核 + 可加载模块）
 - **启动方式**: Multiboot1 (GRUB2) / UEFI
@@ -163,7 +163,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| 系统调用分发 | `syscall.c` | 系统调用实现与分发（77 个系统调用） |
+| 系统调用分发 | `syscall.c` | 系统调用实现与分发（110 个系统调用） |
 | 系统调用入口 | `syscall_entry.c` | MSR 寄存器配置 |
 | 系统调用号 | `syscall.h` | 系统调用号枚举 |
 | 汇编入口 | `arch/x86_64/syscall.S` | syscall 指令入口 |
@@ -193,7 +193,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 | 栈保护 | `stack_protect.c` | 栈金丝雀保护（`-fstack-protector-strong`） |
 | ASLR | `aslr.c` | 地址空间布局随机化（ChaCha20 CSPRNG，栈/mmap 随机化） |
 | Seccomp | `seccomp.c` | 系统调用访问控制（256 位位图过滤器） |
-| SMAP/SMEP | `pagetable.c` | 内核访问保护（CR4 位 20/21），已启用，STAC/CLAC 框架已集成 |
+| SMAP/SMEP | `pagetable.c` | 内核访问保护（CR4 位 20/21），已启用，STAC/CLAC 框架已集成，user_access.h 集中化管理 (v4.2.7) |
 | 模块签名 | `module_sign.c` | 内核模块完整性验证演示（占位实现，XOR 哈希 + 硬编码密钥，尚未启用） |
 
 ### 3.11 ELF 加载
@@ -246,6 +246,66 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 | 模块加载器 | `module.c` | ELF 可重定位文件加载、符号解析、x86_64 重定位（5 种类型） |
 | 模块头 | `module.h` | 模块描述符、符号表、加载/卸载接口 |
 | 示例模块 | `userspace/mod_sample.c` | 示例内核模块 |
+
+### 3.17 USB 子系统（v4.2.7 更新）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| xHCI 驱动 | `usb/xhci.c` | USB 3.x 控制器初始化、设备槽位管理、端点配置、传输环、热插拔状态机 |
+| xHCI DMA | `usb/xhci_dma.h` | DMA 安全内存分配，确保物理连续性和 identity mapping (v4.2.7) |
+| USB 核心 | `usb/usb.c` | USB 设备枚举、描述符解析、设备列表管理 |
+| HID 驱动 | `usb/hid.c` | 人机接口设备（键盘/鼠标）支持 |
+| USB 头文件 | `usb/xhci.h`, `usb/usb.h`, `usb/hid.h` | xHCI 寄存器定义、USB 协议数据结构、HID 报告描述符 |
+
+### 3.18 ACPI 子系统（v4.2.7 更新）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| ACPI 解析 | `acpi.c` | RSDP/XSDT 表定位、MADT/HPET/FADT 表解析、DSDT \_S5 扫描 (v4.2.7) |
+| ACPI 头文件 | `acpi.h` | ACPI 表结构体定义、SDT 头、MADT 条目 |
+
+### 3.19 KGDB 内核调试器（v4.2.7 更新）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| 调试器核心 | `kgdb.c` | INT3 断点引擎、单步执行（RFLAGS.TF）、寄存器转储、内存 hexdump、栈回溯、GDB RSP 远程协议 (v4.2.7) |
+| 调试器头文件 | `kgdb.h` | 异常帧结构体、符号表、调试器状态定义 |
+
+### 3.20 KASLR 内核地址随机化（v4.2.6 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| KASLR 实现 | `kaslr.c` | 内核加载地址随机化、ChaCha20 CSPRNG 熵源、重定位处理 |
+| KASLR 头文件 | `kaslr.h` | KASLR 偏移量、随机化接口定义 |
+
+### 3.21 AF_UNIX 域套接字（v4.2.6 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| AF_UNIX 实现 | `af_unix.c` | 本地进程间通信、流式/数据报套接字、抽象命名空间 |
+| AF_UNIX 头文件 | `af_unix.h` | Unix 域地址结构体、协议常量定义 |
+
+### 3.22 动态链接器（v4.2.6 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| ld.so 实现 | `ldso.c` | 用户态 ELF 动态链接、共享库加载、符号解析与重定位 |
+| ld.so 头文件 | `ldso.h` | 动态链接器接口、辅助向量增强定义 |
+
+### 3.23 GUI/DRM 显示框架（v4.2.6 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| DRM/KMS 核心 | `drm.c` | 帧缓冲管理、双缓冲 flip、GOP 集成、8×16 字体渲染 |
+| GUI 合成器 | `compositor.c` | 窗口管理、输入事件路由、表面合成 |
+| 显示头文件 | `drm.h`, `compositor.h` | 显示模式、缓冲区、窗口结构体定义 |
+
+### 3.24 用户空间安全访问（v4.2.7 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| 用户空间访问 | `include/user_access.h` | 集中化用户空间地址验证宏、安全复制函数（stac/clac 封装） |
+| 用户空间定义 | `include/userspace.h` | 用户空间地址范围验证、地址合法性检查 |
 
 ## 4. 技术选型
 
@@ -396,12 +456,12 @@ ASLR 随机化:
 | 文件系统 | VFS + RamFS + EXT2 | VFS + procfs + pipefs + devtmpfs + squashfs | CoolPotOS 文件系统类型更丰富 |
 | 终端 | VGA + 帧缓冲 | flanterm 终端渲染 | 不同终端实现方案 |
 | 容器化 | Dockerfile | Dockerfile | 均支持可复现构建 |
-| 70+ POSIX syscall | 是 (77 个) | 是 | AuroraOS v4.0 已达到 77 个系统调用 |
+| 70+ POSIX syscall | 是 (110 个) | 是 | AuroraOS v4.2.6 已达到 110 个系统调用 |
 | 多平台引导 | BIOS + UEFI | UEFI (Limine) | 启动方式不同 |
 
 ## 9. 未来规划
 
-> **v4.0.0 里程碑 (2026-07-11)**: 主要功能已实现。PIE 支持、DHCP/DNS/HTTP 客户端、FAT32 LFN + squashfs、红黑树调度器、抢占式调度、NVMe 驱动、TCP 拥塞控制 + IPv6、用户态 ELF、77 个 POSIX 系统调用、DRM/KMS 框架、模块独立编译、26 组自测试、冒烟测试、回归测试框架已集成。多架构代码已准备但未集成到构建系统。
+> **v4.0.0 里程碑 (2026-07-11)**: 主要功能已实现。PIE 支持、DHCP/DNS/HTTP 客户端、FAT32 LFN + squashfs、红黑树调度器、抢占式调度、NVMe 驱动、TCP 拥塞控制 + IPv6、用户态 ELF、110 个 POSIX 系统调用、DRM/KMS 框架、模块独立编译、26 组自测试、冒烟测试、回归测试框架已集成。多架构代码已准备但未集成到构建系统。
 
 ### v4.0.0 里程碑 — 已集成功能
 - ✅ **PIE 支持**: 6 种重定位类型（R_X86_64_RELATIVE/GLOB_DAT/JUMP_SLOT/64/PC32/IRELATIVE），ASLR 随机基址，argv/envp 传递
@@ -416,7 +476,7 @@ ASLR 随机化:
 - ✅ **TCP 拥塞控制**: TCP Reno（慢启动/拥塞避免/快速重传/快速恢复），RTT 估算，窗口缩放
 - ✅ **IPv6**: 链路本地地址（EUI-64），NDP 邻居发现，ICMPv6 Echo
 - ✅ **用户态 ELF**: auxv 向量，用户栈设置，16 字节对齐
-- ✅ **POSIX 系统调用**: 77 个系统调用，SYS_MAX_NUM=384
+- ✅ **POSIX 系统调用**: 110 个系统调用，SYS_MAX_NUM=384
 - ✅ **DRM/KMS**: 帧缓冲管理，8×16 字体，双缓冲 flip，GOP 集成
 - ✅ **模块独立编译**: .km 格式，版本检查，依赖检查，Makefile 模板
 - ✅ **自测试**: 26 组测试（14→26），冒烟测试，回归测试框架（5 套件）

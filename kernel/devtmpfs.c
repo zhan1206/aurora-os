@@ -35,6 +35,21 @@ struct dev_entry {
     int         type;
 };
 
+/* FIXED (v4.2.7): BUG-DEVTMPFS-CACHE - Simple inode cache to avoid
+ * allocating a new inode on every lookup.  Without this, every open()
+ * or stat() on a device node leaks kmalloc'd inodes and inode_data. */
+#define DEV_CACHE_SIZE 16
+static struct inode *dev_inode_cache[DEV_CACHE_SIZE];
+
+/* Simple hash function for device name */
+static int dev_cache_hash(const char *name) {
+    unsigned int h = 0;
+    while (*name) {
+        h = (h * 31) + (unsigned char)(*name++);
+    }
+    return (int)(h % DEV_CACHE_SIZE);
+}
+
 /* ================================================================
  * Device inode private data
  * ================================================================ */
@@ -295,6 +310,17 @@ static struct file_ops devtmpfs_dir_ops = {
 static int devtmpfs_lookup(struct inode *dir, struct dentry *dentry) {
     if (!dir || !dentry || !dentry->name) return -1;
 
+    /* FIXED (v4.2.7): BUG-DEVTMPFS-CACHE - Check the inode cache
+     * before allocating a new one.  Without this, every lookup would
+     * kmalloc a new inode and leak the previous one. */
+    int hash = dev_cache_hash(dentry->name);
+    if (dev_inode_cache[hash] && dev_inode_cache[hash]->name &&
+        strcmp(dev_inode_cache[hash]->name, dentry->name) == 0) {
+        dev_inode_cache[hash]->dentry = dentry;
+        dentry->inode = dev_inode_cache[hash];
+        return 0;
+    }
+
     /* Search the device entry table */
     for (int i = 0; dev_entries[i].name != NULL; i++) {
         struct dev_entry *e = &dev_entries[i];
@@ -317,6 +343,10 @@ static int devtmpfs_lookup(struct inode *dir, struct dentry *dentry) {
             inode->ops = &devtmpfs_file_ops;
             inode->dentry = dentry;
             dentry->inode = inode;
+
+            /* FIXED (v4.2.7): BUG-DEVTMPFS-CACHE - Cache the inode
+             * for future lookups to avoid repeated allocations. */
+            dev_inode_cache[hash] = inode;
             return 0;
         }
     }

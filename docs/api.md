@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-AuroraOS 提供 85 个兼容 Linux x86_64 ABI 的系统调用接口。系统调用通过 `syscall` 指令触发，参数传递遵循 System V AMD64 ABI 约定。本文档完整列出所有系统调用，完整列表见 `kernel/syscall.h`。
+AuroraOS 提供 110 个兼容 Linux x86_64 ABI 的系统调用接口。系统调用通过 `syscall` 指令触发，参数传递遵循 System V AMD64 ABI 约定。本文档完整列出所有系统调用，完整列表见 `kernel/syscall.h`。
 
 ### 调用约定
 
@@ -1321,3 +1321,968 @@ ssize_t getrandom(void *buf, size_t buflen, unsigned int flags);
 | EPROTONOSUPPORT | 43 | 协议不支持 |
 | ENOTSOCK | 38 | 不是 socket |
 | ENOTCONN | 57 | socket 未连接 |
+
+---
+
+## 17. 挂载系统调用（v4.2.6 新增）
+
+### 17.1 SYS_MOUNT (165) — 挂载文件系统
+
+```c
+int mount(const char *source, const char *target, const char *filesystemtype,
+          unsigned long mountflags, const void *data);
+```
+
+**参数**:
+- `source`: 设备路径（devtmpfs/sysfs 时可忽略）
+- `target`: 挂载点路径
+- `filesystemtype`: 文件系统类型（"ext2", "ramfs", "procfs", "sysfs", "devtmpfs"）
+- `mountflags`: 挂载标志（MS_RDONLY=1, MS_NOSUID=2 等）
+- `data`: 文件系统特定数据（当前忽略）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `ENODEV`: 文件系统类型不支持
+- `ENOENT`: 挂载点不存在
+- `EBUSY`: 挂载点已被占用
+
+---
+
+### 17.2 SYS_UMOUNT (166) — 卸载文件系统
+
+```c
+int umount(const char *target);
+```
+
+**参数**:
+- `target`: 挂载点路径
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `EINVAL`: 路径未挂载
+- `EBUSY`: 文件系统正在使用中
+
+---
+
+## 18. 进程/线程扩展系统调用（v4.2.6 新增）
+
+### 18.1 SYS_CLONE (56) — 创建子进程/线程
+
+```c
+pid_t clone(unsigned long flags, void *child_stack, int *ptid, int *ctid, unsigned long newtls);
+```
+
+**参数**:
+- `flags`: 克隆标志（CLONE_VM=0x100, CLONE_FS=0x200, CLONE_FILES=0x400, CLONE_THREAD=0x10000 等）
+- `child_stack`: 子进程/线程栈指针（CLONE_VM 时必需）
+- `ptid`: 父进程 TID 输出指针
+- `ctid`: 子进程 TID 输出指针
+- `newtls`: 新线程 TLS 基址
+
+**描述**: 当前简化实现，支持基本 fork 语义和线程创建标志。
+
+**返回值**: 子进程/线程 PID，错误返回 -1
+
+**错误码**:
+- `ENOMEM`: 内存不足
+- `EINVAL`: 参数无效
+
+---
+
+### 18.2 SYS_EXIT_GROUP (231) — 退出所有线程
+
+```c
+void exit_group(int status);
+```
+
+**参数**:
+- `status`: 退出状态码
+
+**描述**: 终止当前线程组的所有线程。单线程进程等价于 exit()。
+
+---
+
+### 18.3 SYS_GETTID (186) — 获取线程 ID
+
+```c
+pid_t gettid(void);
+```
+
+**返回值**: 当前线程 TID（在当前实现中等同于 PID）
+
+---
+
+### 18.4 SYS_SET_TID_ADDRESS (218) — 设置 TID 地址
+
+```c
+int set_tid_address(int *tidptr);
+```
+
+**参数**:
+- `tidptr`: 用户空间 TID 存储地址指针
+
+**描述**: 设置线程退出时清除的 TID 地址，用于 pthread 同步。
+
+**返回值**: 当前 TID
+
+---
+
+## 19. 信号扩展系统调用（v4.2.6 新增）
+
+### 19.1 SYS_SIGPROCMASK (14) — 设置/获取信号屏蔽字
+
+```c
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+```
+
+**参数**:
+- `how`: SIG_BLOCK(0)=阻塞, SIG_UNBLOCK(1)=解除阻塞, SIG_SETMASK(2)=设置
+- `set`: 新的信号屏蔽集
+- `oldset`: 旧的信号屏蔽集输出（可为 NULL）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 19.2 SYS_RT_SIGACTION (13) — 实时信号处理
+
+```c
+int rt_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact, size_t sigsetsize);
+```
+
+**参数**:
+- `signum`: 信号编号
+- `act`: 新的信号处理动作
+- `oldact`: 旧的信号处理动作
+- `sigsetsize`: sigset_t 大小（通常为 8）
+
+**描述**: 与 sigaction 功能相同，额外支持 sigset_t 大小参数。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 19.3 SYS_TGKILL (234) — 向线程发送信号
+
+```c
+int tgkill(int tgid, int tid, int sig);
+```
+
+**参数**:
+- `tgid`: 线程组 ID
+- `tid`: 线程 ID
+- `sig`: 信号编号
+
+**描述**: 向指定线程组的特定线程发送信号。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `ESRCH`: 进程/线程不存在
+
+---
+
+## 20. 网络扩展系统调用（v4.2.6 新增）
+
+### 20.1 SYS_SOCKETPAIR (53) — 创建 socket 对
+
+```c
+int socketpair(int domain, int type, int protocol, int sv[2]);
+```
+
+**参数**:
+- `domain`: AF_UNIX(1) 本地域（当前仅支持）
+- `type`: SOCK_STREAM(1)=TCP, SOCK_DGRAM(2)=UDP
+- `protocol`: 协议（当前忽略）
+- `sv`: 两个 socket 文件描述符的输出数组
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `EAFNOSUPPORT`: 不支持的地址族
+- `EMFILE`: 文件描述符耗尽
+
+---
+
+### 20.2 SYS_GETSOCKOPT (55) — 获取 socket 选项
+
+```c
+int getsockopt(int sockfd, int level, int optname, void *optval, int *optlen);
+```
+
+**参数**:
+- `sockfd`: socket 文件描述符
+- `level`: SOL_SOCKET(1)=socket 层
+- `optname`: SO_REUSEADDR(2)=地址复用, SO_KEEPALIVE(9)=保活, SO_RCVBUF(8)=接收缓冲
+- `optval`: 选项值输出
+- `optlen`: 选项值长度输出
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 20.3 SYS_SETSOCKOPT (54) — 设置 socket 选项
+
+```c
+int setsockopt(int sockfd, int level, int optname, const void *optval, int optlen);
+```
+
+**参数**:
+- `sockfd`: socket 文件描述符
+- `level`: SOL_SOCKET(1)=socket 层
+- `optname`: 选项名称
+- `optval`: 选项值
+- `optlen`: 选项值长度
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 20.4 SYS_GETPEERNAME (52) — 获取对端地址
+
+```c
+int getpeername(int sockfd, struct sockaddr_in *addr, int *addrlen);
+```
+
+**参数**:
+- `sockfd`: socket 文件描述符
+- `addr`: 对端地址输出
+- `addrlen`: 地址长度输出
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `ENOTCONN`: socket 未连接
+
+---
+
+## 21. 内存管理扩展（v4.2.6 新增）
+
+### 21.1 SYS_MUNMAP (11) — 取消内存映射
+
+```c
+int munmap(void *addr, size_t length);
+```
+
+**参数**:
+- `addr`: 映射起始地址（页对齐）
+- `length`: 映射长度
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `EINVAL`: 参数无效
+
+---
+
+## 22. 文件系统扩展（v4.2.6 新增）
+
+### 22.1 SYS_LINK (86) — 创建硬链接
+
+```c
+int link(const char *oldpath, const char *newpath);
+```
+
+**参数**:
+- `oldpath`: 现有文件路径
+- `newpath`: 新链接路径
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `ENOENT`: 文件不存在
+- `EXDEV`: 跨文件系统链接
+
+---
+
+### 22.2 SYS_MKNOD (133) — 创建设备节点
+
+```c
+int mknod(const char *pathname, mode_t mode, dev_t dev);
+```
+
+**参数**:
+- `pathname`: 节点路径
+- `mode`: 文件类型与权限（S_IFCHR=字符设备, S_IFBLK=块设备, S_IFIFO=FIFO）
+- `dev`: 设备号（主设备号 << 8 | 次设备号）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `EEXIST`: 节点已存在
+- `EFAULT`: 路径地址无效
+
+---
+
+### 22.3 SYS_SELECT (23) — I/O 多路复用
+
+```c
+int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+```
+
+**参数**:
+- `nfds`: 最大文件描述符 + 1
+- `readfds`: 可读集合
+- `writefds`: 可写集合
+- `exceptfds`: 异常集合
+- `timeout`: 超时时间（NULL=无限等待）
+
+**返回值**: 就绪的文件描述符数量，超时返回 0，错误返回 -1
+
+---
+
+## 23. 资源与控制系统调用（v4.2.6 新增）
+
+### 23.1 SYS_GETRUSAGE (98) — 获取资源使用情况
+
+```c
+int getrusage(int who, struct rusage *usage);
+```
+
+**参数**:
+- `who`: RUSAGE_SELF(0)=当前进程, RUSAGE_CHILDREN(-1)=子进程
+- `usage`: rusage 结构体输出
+
+**rusage 结构体**:
+```c
+struct rusage {
+    struct timeval ru_utime;    /* 用户态 CPU 时间 */
+    struct timeval ru_stime;    /* 内核态 CPU 时间 */
+    long ru_maxrss;             /* 最大 RSS */
+    long ru_minflt;             /* 次要缺页 */
+    long ru_majflt;             /* 主要缺页 */
+    long ru_nvcsw;              /* 自愿上下文切换 */
+    long ru_nivcsw;             /* 非自愿上下文切换 */
+};
+```
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 23.2 SYS_PRCTL (157) — 进程控制
+
+```c
+int prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
+```
+
+**参数**:
+- `option`: 控制选项（PR_SET_NAME=设置进程名, PR_GET_NAME=获取进程名, PR_SET_SECCOMP=设置 seccomp 等）
+- `arg2-arg5`: 选项特定参数
+
+**描述**: 当前简化实现，支持基本操作。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 23.3 SYS_ARCH_PRCTL (158) — 架构特定控制
+
+```c
+int arch_prctl(int code, unsigned long addr);
+```
+
+**参数**:
+- `code`: ARCH_SET_FS=0x1002（设置 FS 段基址）, ARCH_GET_FS=0x1003（获取 FS 段基址）
+- `addr`: 段基址
+
+**描述**: x86_64 架构特定控制，用于线程本地存储（TLS）。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 23.4 SYS_FUTEX (202) — 快速用户空间互斥锁
+
+```c
+int futex(int *uaddr, int futex_op, int val, const struct timespec *timeout, int *uaddr2, int val3);
+```
+
+**参数**:
+- `uaddr`: 用户空间 futex 字地址
+- `futex_op`: 操作（FUTEX_WAIT=0=等待, FUTEX_WAKE=1=唤醒）
+- `val`: 期望值
+- `timeout`: 超时时间（FUTEX_WAIT 时可用）
+- `uaddr2`: 第二个 futex 地址（FUTEX_REQUEUE 时使用）
+- `val3`: 附加参数
+
+**描述**: 当前简化实现，支持基本 WAIT/WAKE 操作。
+
+**返回值**: 成功返回 0 或唤醒的线程数，错误返回 -1
+
+---
+
+### 23.5 SYS_CLOCK_GETRES (229) — 获取时钟分辨率
+
+```c
+int clock_getres(int clock_id, struct timespec *res);
+```
+
+**参数**:
+- `clock_id`: CLOCK_REALTIME(0)=实时时钟, CLOCK_MONOTONIC(1)=单调时钟
+- `res`: timespec 分辨率输出
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+## 24. 共享内存与 IPC（v4.2.6 新增）
+
+### 24.1 SYS_SHMAT (30) — 附加共享内存
+
+```c
+void *shmat(int shmid, const void *shmaddr, int shmflg);
+```
+
+**参数**:
+- `shmid`: 共享内存段 ID
+- `shmaddr`: 建议地址（NULL=自动选择）
+- `shmflg`: 附加标志（SHM_RDONLY=0x1000=只读）
+
+**描述**: 当前简化实现，支持基本共享内存附加。
+
+**返回值**: 附加的虚拟地址，错误返回 -1
+
+---
+
+### 24.2 SYS_SHMDT (67) — 分离共享内存
+
+```c
+int shmdt(const void *shmaddr);
+```
+
+**参数**:
+- `shmaddr`: 共享内存附加地址
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 24.3 SYS_SEMGET (64) — 获取信号量集
+
+```c
+int semget(key_t key, int nsems, int semflg);
+```
+
+**参数**:
+- `key`: 信号量键值（IPC_PRIVATE=0=新建）
+- `nsems`: 信号量数量
+- `semflg`: 创建标志（IPC_CREAT=0x1000, IPC_EXCL=0x2000）
+
+**描述**: 当前简化实现，支持基本信号量集创建。
+
+**返回值**: 信号量集 ID，错误返回 -1
+
+---
+
+### 24.4 SYS_SEMOP (65) — 信号量操作
+
+```c
+int semop(int semid, struct sembuf *sops, size_t nsops);
+```
+
+**参数**:
+- `semid`: 信号量集 ID
+- `sops`: 操作数组
+- `nsops`: 操作数量
+
+**sembuf 结构体**:
+```c
+struct sembuf {
+    unsigned short sem_num;  /* 信号量编号 */
+    short sem_op;             /* 操作（-1=P, +1=V） */
+    short sem_flg;            /* 标志（SEM_UNDO=0x1000, IPC_NOWAIT=0x800） */
+};
+```
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+## 25. 系统信息扩展（v4.2.6 新增）
+
+### 25.1 SYS_SYSLOG (103) — 读取内核日志
+
+```c
+int syslog(int type, char *buf, int len);
+```
+
+**参数**:
+- `type`: SYSLOG_ACTION_READ(2)=读取, SYSLOG_ACTION_READ_CLEAR(4)=读取并清除
+- `buf`: 输出缓冲区
+- `len`: 缓冲区大小
+
+**描述**: 读取内核环形缓冲区日志，通过 /proc/kmsg 也可访问。
+
+**返回值**: 读取的字节数，错误返回 -1
+
+---
+
+---
+
+## 27. I/O 扩展系统调用（v4.2.7 新增）
+
+### 27.1 SYS_READV (19) — 分散读取
+
+```c
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt);
+```
+
+**参数**:
+- `fd`: 文件描述符
+- `iov`: iovec 结构体数组
+- `iovcnt`: iovec 数组元素数量
+
+**iovec 结构体**:
+```c
+struct iovec {
+    void   *iov_base;   /* 缓冲区起始地址 */
+    size_t  iov_len;    /* 缓冲区长度 */
+};
+```
+
+**描述**: 从文件描述符读取数据到多个分散缓冲区（scatter read）。等价于多次 read() 调用但原子性更好。
+
+**返回值**: 实际读取字节数，EOF 返回 0，错误返回 -1
+
+**错误码**:
+- `EBADF`: 无效的文件描述符
+- `EFAULT`: 缓冲区地址无效
+- `EINVAL`: iovcnt 无效
+
+---
+
+### 27.2 SYS_WRITEV (20) — 聚集写入
+
+```c
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
+```
+
+**参数**:
+- `fd`: 文件描述符
+- `iov`: iovec 结构体数组
+- `iovcnt`: iovec 数组元素数量
+
+**描述**: 将多个分散缓冲区的数据聚集写入文件描述符（gather write）。等价于多次 write() 调用但原子性更好。
+
+**返回值**: 实际写入字节数，错误返回 -1
+
+**错误码**:
+- `EBADF`: 无效的文件描述符
+- `EFAULT`: 缓冲区地址无效
+- `EINVAL`: iovcnt 无效
+
+---
+
+### 27.3 SYS_GETDENTS64 (217) — 读取64位目录项
+
+```c
+ssize_t getdents64(int fd, struct linux_dirent64 *dirp, unsigned int count);
+```
+
+**参数**:
+- `fd`: 目录文件描述符
+- `dirp`: 目录项缓冲区
+- `count`: 缓冲区大小
+
+**linux_dirent64 结构体**:
+```c
+struct linux_dirent64 {
+    uint64_t d_ino;      /* 64位 inode 号 */
+    int64_t  d_off;      /* 64位目录偏移 */
+    uint16_t d_reclen;   /* 记录长度 */
+    uint8_t  d_type;     /* 文件类型 */
+    char     d_name[];   /* 文件名（柔性数组） */
+};
+```
+
+**描述**: 读取目录项，使用 64 位 inode 和偏移量，适用于大文件系统。与 getdents 功能相同但使用 64 位结构体。
+
+**返回值**: 读取的字节数，错误返回 -1
+
+---
+
+## 28. 路径操作扩展（v4.2.7 新增）
+
+### 28.1 SYS_FCHDIR (81) — 按文件描述符切换目录
+
+```c
+int fchdir(int fd);
+```
+
+**参数**:
+- `fd`: 已打开目录的文件描述符
+
+**描述**: 将当前工作目录切换到 fd 对应的目录。与 chdir(path) 功能相同但使用文件描述符而非路径名。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `EBADF`: 无效的文件描述符
+- `ENOTDIR`: fd 不是目录
+
+---
+
+## 29. UID/GID 扩展（v4.2.7 新增）
+
+### 29.1 SYS_SETRESUID (117) — 设置真实/有效/保存UID
+
+```c
+int setresuid(uid_t ruid, uid_t euid, uid_t suid);
+```
+
+**参数**:
+- `ruid`: 新的真实用户 ID（-1 表示不变）
+- `euid`: 新的有效用户 ID（-1 表示不变）
+- `suid`: 新的保存用户 ID（-1 表示不变）
+
+**描述**: 原子地设置进程的真实、有效和保存 set-user-ID。Linux 兼容，单用户系统简化实现。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 29.2 SYS_GETRESUID (118) — 获取真实/有效/保存UID
+
+```c
+int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid);
+```
+
+**参数**:
+- `ruid`: 真实 UID 输出指针
+- `euid`: 有效 UID 输出指针
+- `suid`: 保存 UID 输出指针
+
+**描述**: 获取进程的真实、有效和保存 set-user-ID。单用户系统均返回 0。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 29.3 SYS_SETRESGID (119) — 设置真实/有效/保存GID
+
+```c
+int setresgid(gid_t rgid, gid_t egid, gid_t sgid);
+```
+
+**参数**:
+- `rgid`: 新的真实组 ID（-1 表示不变）
+- `egid`: 新的有效组 ID（-1 表示不变）
+- `sgid`: 新的保存组 ID（-1 表示不变）
+
+**描述**: 原子地设置进程的真实、有效和保存 set-group-ID。单用户系统简化实现。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 29.4 SYS_GETRESGID (120) — 获取真实/有效/保存GID
+
+```c
+int getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid);
+```
+
+**参数**:
+- `rgid`: 真实 GID 输出指针
+- `egid`: 有效 GID 输出指针
+- `sgid`: 保存 GID 输出指针
+
+**描述**: 获取进程的真实、有效和保存 set-group-ID。单用户系统均返回 0。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+## 30. CPU 亲和性（v4.2.7 新增）
+
+### 30.1 SYS_SCHED_SETAFFINITY (203) — 设置CPU亲和性
+
+```c
+int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask);
+```
+
+**参数**:
+- `pid`: 目标进程 PID（0=当前进程）
+- `cpusetsize`: CPU 掩码大小（字节）
+- `mask`: CPU 亲和性掩码
+
+**描述**: 设置进程的 CPU 亲和性，限制进程只能在指定 CPU 核心上运行。SMP 系统中用于线程绑定。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+**错误码**:
+- `ESRCH`: 进程不存在
+- `EINVAL`: 掩码无效
+
+---
+
+### 30.2 SYS_SCHED_GETAFFINITY (204) — 获取CPU亲和性
+
+```c
+int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask);
+```
+
+**参数**:
+- `pid`: 目标进程 PID（0=当前进程）
+- `cpusetsize`: CPU 掩码大小（字节）
+- `mask`: CPU 亲和性掩码输出
+
+**描述**: 获取进程当前的 CPU 亲和性掩码。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+## 31. *at 系列系统调用（v4.2.7 新增）
+
+*at 系列系统调用允许以相对目录文件描述符为基准进行路径操作，避免 TOCTOU 竞态条件，支持线程安全的路径解析。
+
+### 31.1 SYS_MKDIRAT (258) — 相对目录创建目录
+
+```c
+int mkdirat(int dirfd, const char *pathname, int mode);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符（AT_FDCWD=-100=当前工作目录）
+- `pathname`: 相对路径名
+- `mode`: 权限模式
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.2 SYS_MKNODAT (259) — 相对目录创建设备节点
+
+```c
+int mknodat(int dirfd, const char *pathname, mode_t mode, dev_t dev);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对路径名
+- `mode`: 文件类型与权限
+- `dev`: 设备号
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.3 SYS_FCHOWNAT (260) — 相对目录修改所有者
+
+```c
+int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对路径名
+- `owner`: 用户 ID
+- `group`: 组 ID
+- `flags`: AT_SYMLINK_NOFOLLOW=0x100（不跟随符号链接）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.4 SYS_UNLINKAT (263) — 相对目录删除文件
+
+```c
+int unlinkat(int dirfd, const char *pathname, int flags);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对路径名
+- `flags`: AT_REMOVEDIR=0x200（删除目录而非文件）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.5 SYS_LINKAT (265) — 相对目录创建硬链接
+
+```c
+int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags);
+```
+
+**参数**:
+- `olddirfd`: 源基准目录文件描述符
+- `oldpath`: 源相对路径
+- `newdirfd`: 目标基准目录文件描述符
+- `newpath`: 目标相对路径
+- `flags`: AT_SYMLINK_FOLLOW=0x400（跟随符号链接）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.6 SYS_SYMLINKAT (266) — 相对目录创建符号链接
+
+```c
+int symlinkat(const char *target, int newdirfd, const char *linkpath);
+```
+
+**参数**:
+- `target`: 链接目标
+- `newdirfd`: 基准目录文件描述符
+- `linkpath`: 相对链接路径
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.7 SYS_READLINKAT (267) — 相对目录读取符号链接
+
+```c
+ssize_t readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsize);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对链接路径
+- `buf`: 输出缓冲区
+- `bufsize`: 缓冲区大小
+
+**返回值**: 写入的字节数，错误返回 -1
+
+---
+
+### 31.8 SYS_FCHMODAT (268) — 相对目录修改权限
+
+```c
+int fchmodat(int dirfd, const char *pathname, int mode, int flags);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对路径名
+- `mode`: 权限模式
+- `flags`: AT_SYMLINK_NOFOLLOW=0x100
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 31.9 SYS_FACCESSAT (269) — 相对目录检查访问权限
+
+```c
+int faccessat(int dirfd, const char *pathname, int mode, int flags);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对路径名
+- `mode`: F_OK/R_OK/W_OK/X_OK
+- `flags`: AT_EACCESS=0x200（使用有效UID/GID检查）
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+## 32. 资源与内核接口（v4.2.7 新增）
+
+### 32.1 SYS_PRLIMIT64 (302) — 获取/设置资源限制（64位）
+
+```c
+int prlimit64(pid_t pid, int resource, const struct rlimit64 *new_limit, struct rlimit64 *old_limit);
+```
+
+**参数**:
+- `pid`: 目标进程 PID（0=当前进程）
+- `resource`: 资源类型（RLIMIT_CPU/DATA/STACK/NOFILE/AS/...）
+- `new_limit`: 新的资源限制（NULL=仅查询）
+- `old_limit`: 旧的资源限制输出（可为 NULL）
+
+**描述**: 64 位版本的资源限制操作，支持查询和设置任意进程的资源限制。比 getrlimit/setrlimit 更通用。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 32.2 SYS_NAME_TO_HANDLE_AT (303) — 按名称获取文件句柄
+
+```c
+int name_to_handle_at(int dirfd, const char *pathname, struct file_handle *handle, int *mount_id, int flags);
+```
+
+**参数**:
+- `dirfd`: 基准目录文件描述符
+- `pathname`: 相对路径名
+- `handle`: 文件句柄输出
+- `mount_id`: 挂载点 ID 输出
+- `flags`: AT_SYMLINK_FOLLOW=0x400
+
+**描述**: 获取文件系统级别的文件句柄，用于在不依赖路径名的情况下追踪文件。简化实现。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 32.3 SYS_GETCPU (309) — 获取当前CPU和NUMA节点
+
+```c
+int getcpu(unsigned int *cpu, unsigned int *node);
+```
+
+**参数**:
+- `cpu`: 当前 CPU 编号输出（可为 NULL）
+- `node`: 当前 NUMA 节点编号输出（可为 NULL）
+
+**描述**: 获取调用线程当前正在执行的核心和 NUMA 节点编号。简化实现，NUMA 节点始终返回 0。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+### 32.4 SYS_MEMBARRIER (324) — 内存屏障
+
+```c
+int membarrier(int cmd, int flags);
+```
+
+**参数**:
+- `cmd`: 屏障命令（MEMBARRIER_CMD_GLOBAL=1 等）
+- `flags`: 标志（当前忽略）
+
+**描述**: 在所有运行线程上执行内存屏障，确保跨核心的内存顺序一致性。简化实现。
+
+**返回值**: 成功返回 0，错误返回 -1
+
+---
+
+## 33. ACPI 电源管理（v4.2.7 新增）
+
+### 33.1 SYS_ACPI_SHUTDOWN (319) — ACPI 关机
+
+```c
+int acpi_shutdown(void);
+```
+
+**描述**: 通过 ACPI 机制执行系统关机。内核调用 ACPI \_S5 对象的 SLP_TYP 值写入 PM1a_CNT 寄存器，触发硬件关机。
+
+**返回值**: 成功不返回，错误返回 -1
+
+**错误码**:
+- `ENOSYS`: ACPI 不可用
+
+---
+
+### 33.2 SYS_ACPI_REBOOT (320) — ACPI 重启
+
+```c
+int acpi_reboot(void);
+```
+
+**描述**: 通过 ACPI 机制执行系统重启。内核尝试 ACPI 复位寄存器（FADT RESET_REG），若失败则回退到键盘控制器（8042）或三击（triple fault）方式。
+
+**返回值**: 成功不返回，错误返回 -1
+
+**错误码**:
+- `ENOSYS`: ACPI 及备用重启方式均不可用
+
+---
+
+## 34. 错误码参考（续）

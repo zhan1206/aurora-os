@@ -188,7 +188,13 @@ void do_sys_sigreturn(void) {
              * preserved TF (bit 8, 0x100), NT (bit 14, 0x4000), and AC
              * (bit 18, 0x40000).  Corrected mask 0x3F0CF7 clears these bits
              * while preserving IF (bit 9). */
-            current->current_tf->r11 = frame.rflags & 0x3F0CF7;  /* mask IOPL/NT/TF/AC, preserve IF */
+            /* FIXED (v4.2.7): BUG-SIG-RFLAGS-IF — When returning to user
+             * mode to run a signal handler, IF (bit 9) must be set (1)
+             * because user-space always runs with interrupts enabled.
+             * The previous mask 0x3F0CF7 incorrectly cleared IF.
+             * New mask 0x3F0EF7 additionally sets IF while clearing
+             * IOPL, NT, TF, and AC. */
+            current->current_tf->r11 = (frame.rflags & 0x3F0CF7) | 0x200;  /* mask IOPL/NT/TF/AC, set IF */
             current->current_tf->r10 = frame.r10;
             current->current_tf->r9  = frame.r9;
             current->current_tf->r8  = frame.r8;

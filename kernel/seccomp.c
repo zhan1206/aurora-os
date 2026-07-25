@@ -246,8 +246,11 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
             /* Load from scratch memory M[k].
              * FIXED (v4.2.3): Implemented scratch memory.  Previously
              * always returned 0, bypassing filters that use scratch.
-             * (BUG-SEC-01) */
+             * FIXED (v4.2.7): BUG-SECCOMP-SCRATCH-BOUNDS — bounds-check
+             * k before accessing scratch[k] to prevent out-of-bounds
+             * memory access.  (BUG-SEC-01) */
             {
+                if (k >= BPF_SCRATCH_SIZE) { return -1; } /* FIXED (v4.2.7): BUG-SECCOMP-SCRATCH-BOUNDS */
                 uint32_t idx = k & (BPF_SCRATCH_SIZE - 1);
                 X = scratch[idx];
             }
@@ -406,16 +409,20 @@ int seccomp_run_bpf(const struct sock_filter *prog, uint16_t len,
          * instructions.  (BUG-SEC-01)
          * ================================================ */
         case BPF_ST:
-            /* M[k] = A */
+            /* M[k] = A
+             * FIXED (v4.2.7): BUG-SECCOMP-SCRATCH-BOUNDS */
             {
+                if (k >= BPF_SCRATCH_SIZE) { return -1; } /* FIXED (v4.2.7): BUG-SECCOMP-SCRATCH-BOUNDS */
                 uint32_t idx = k & (BPF_SCRATCH_SIZE - 1);
                 scratch[idx] = A;
             }
             break;
 
         case BPF_STX:
-            /* M[k] = X */
+            /* M[k] = X
+             * FIXED (v4.2.7): BUG-SECCOMP-SCRATCH-BOUNDS */
             {
+                if (k >= BPF_SCRATCH_SIZE) { return -1; } /* FIXED (v4.2.7): BUG-SECCOMP-SCRATCH-BOUNDS */
                 uint32_t idx = k & (BPF_SCRATCH_SIZE - 1);
                 scratch[idx] = X;
             }

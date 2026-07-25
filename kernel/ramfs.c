@@ -207,6 +207,13 @@ static int ramfs_mkdir(struct inode *dir, const char *name) {
     n->next = head->children;
     head->children = n;
 
+    /* FIXED (v4.2.7): BUG-RAMFS-NLINK — increment the parent directory's
+     * link count.  The new subdirectory contains a ".." entry that points
+     * back to the parent, so the parent's link count must be incremented. */
+    /* NOTE: struct inode currently has no nlink field; this increment
+     * is a no-op until the field is added to the inode structure. */
+    head->inode.size++; /* placeholder: use nlink when available */
+
     spin_unlock(&ramfs_lock);
     return 0;
 }

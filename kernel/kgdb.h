@@ -63,4 +63,25 @@ int  kgdb_is_initialized(void);
 void kgdb_symbol_register(const char *name, uint64_t addr);
 const char *kgdb_lookup_symbol(uint64_t addr, uint64_t *offset);
 
+/* KGDB_RSP (v4.2.7) - GDB Remote Serial Protocol support */
+/*
+ * kgdb_handle_remote: Process a single byte from the GDB RSP serial stream.
+ *
+ * Implements a minimal GDB stub supporting:
+ *   ?  — Report signal
+ *   g  — Read all registers
+ *   G  — Write all registers
+ *   m  — Read memory (addr,len)
+ *   M  — Write memory (addr,len:data)
+ *   s  — Single step
+ *   c  — Continue
+ *   Z0 — Set breakpoint (addr,kind)
+ *   z0 — Remove breakpoint (addr,kind)
+ *
+ * @c: the incoming byte from the serial port.
+ * Returns: 1 if the handler should continue polling, 0 if execution
+ *          should resume (c / s command).
+ */
+int kgdb_handle_remote(char c);
+
 #endif /* KGDB_H */

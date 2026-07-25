@@ -115,7 +115,7 @@ enum {
     /* Custom AuroraOS syscalls */
     SYS_SBRK      = 256,
     SYS_GETENV    = 257,
-    SYS_SETENV    = 258,
+    SYS_SETENV    = 325,    /* FIXED (v4.2.7): BUG-SETENV-COLLISION — was 258, collided with SYS_MKDIRAT */
     SYS_SYSINFO   = 99,
     SYS_GETRLIMIT = 97,
     SYS_SETRLIMIT = 160,

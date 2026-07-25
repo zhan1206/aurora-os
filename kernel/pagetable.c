@@ -1004,6 +1004,10 @@ int vma_find(struct task_struct *task, uint64_t addr) {
 /*
  * vma_register: Register a new VMA for a task.  The range [start, end)
  * must be page-aligned and within user space.
+ *
+ * FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — Acquire vma_lock before
+ * modifying the VMA linked list to prevent TOCTOU races between
+ * checking adjacent VMAs for merge and performing the merge.
  * (BUG 3.1)
  */
 int vma_register(struct task_struct *task, uint64_t start, uint64_t end, uint64_t flags) {
@@ -1018,49 +1022,87 @@ int vma_register(struct task_struct *task, uint64_t start, uint64_t end, uint64_
     vma->vm_start = start;
     vma->vm_end   = end;
     vma->vm_flags = flags;
+
+    /* FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — hold vma_lock while modifying the list */
+    spin_lock((spinlock_t*)&task->vma_lock);
     vma->next     = task->vm_areas;
     task->vm_areas = vma;
+    spin_unlock((spinlock_t*)&task->vma_lock);
 
     return 0;
 }
 
 /*
  * vma_free_all: Free all VMAs for a task.  Called on task exit.
+ *
+ * FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — hold vma_lock while
+ * freeing the VMA list to prevent concurrent access.
  * (BUG 3.1)
  */
 void vma_free_all(struct task_struct *task) {
     if (!task) return;
+
+    /* FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC */
+    spin_lock((spinlock_t*)&task->vma_lock);
     struct vm_area *vma = task->vm_areas;
+    task->vm_areas = NULL;
+    spin_unlock((spinlock_t*)&task->vma_lock);
+
     while (vma) {
         struct vm_area *next = vma->next;
         kfree(vma);
         vma = next;
     }
-    task->vm_areas = NULL;
 }
 
 /*
  * vma_clone: Deep-copy all VMAs from parent to child.  Called on fork.
+ *
+ * FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — hold both parent's and
+ * child's vma_lock to prevent concurrent modification of VMA lists
+ * during fork.
  * (BUG 3.1)
  */
 int vma_clone(struct task_struct *parent, struct task_struct *child) {
     if (!parent || !child) return -1;
 
+    /* FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — lock parent VMA list for reading */
+    spin_lock((spinlock_t*)&parent->vma_lock);
     struct vm_area *src = parent->vm_areas;
-    struct vm_area **dst_tail = &child->vm_areas;
+
+    struct vm_area *head = NULL;
+    struct vm_area *tail = NULL;
 
     while (src) {
         struct vm_area *vma = (struct vm_area *)kmalloc(sizeof(*vma));
         if (!vma) {
+            spin_unlock((spinlock_t*)&parent->vma_lock);
+            /* Free what we've allocated so far */
+            while (head) {
+                struct vm_area *t = head->next;
+                kfree(head);
+                head = t;
+            }
             vma_free_all(child);
             return -1;
         }
         memcpy(vma, src, sizeof(*vma));
         vma->next = NULL;
-        *dst_tail = vma;
-        dst_tail = &vma->next;
+        if (!head) {
+            head = vma;
+            tail = vma;
+        } else {
+            tail->next = vma;
+            tail = vma;
+        }
         src = src->next;
     }
+    spin_unlock((spinlock_t*)&parent->vma_lock);
+
+    /* FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — lock child VMA list for writing */
+    spin_lock((spinlock_t*)&child->vma_lock);
+    child->vm_areas = head;
+    spin_unlock((spinlock_t*)&child->vma_lock);
 
     return 0;
 }

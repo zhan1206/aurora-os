@@ -235,6 +235,8 @@ struct usb_device {
  * ================================================================ */
 struct usb_device *usb_device_list(void);
 void usb_device_add(struct usb_device *dev);
+/* FIXED (v4.2.7): BUG-XHCI-HOTPLUG */
+void usb_device_remove(struct xhci_controller *hc, uint32_t port);
 struct usb_device *usb_find_by_class(uint8_t class_code);
 
 #endif /* USB_H */

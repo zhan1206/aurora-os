@@ -76,6 +76,8 @@ struct pipe_ring {
     uint32_t count;       /* bytes in buffer */
     int      read_open;   /* read end still open? */
     int      write_open;  /* write end still open? */
+    /* FIXED (v4.2.7): BUG-PIPE-CLOSE-WAKE */
+    int      closed;      /* set to 1 when pipe is closed */
     volatile uint32_t lock;  /* spinlock for SMP safety */
     struct pipe_blocked_node *blocked_readers;  /* linked list of blocked readers */
     struct pipe_blocked_node *blocked_writers;  /* linked list of blocked writers */
@@ -98,6 +100,15 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
     if (!filp || !filp->inode) return -1;
     struct pipe_ring *ring = (struct pipe_ring *)filp->inode->priv;
     if (!ring) return -1;
+
+    /*
+     * FIXED (v4.2.7): BUG-PIPE-ADDR-VALIDATE
+     * Validate user buffer address before copying data.  Without this
+     * check, a malicious process could pass a kernel address and use
+     * pipe_read to read arbitrary kernel memory via the memcpy after
+     * stac() (which disables SMAP).
+     */
+    if (!user_addr_range_ok(buf, count)) { current->t_errno = EFAULT; return -1; }
 
     /*
      * FIXED (v4.1.4): Stack-allocated node for the blocked-readers list.
@@ -200,6 +211,15 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
     if (!filp || !filp->inode) return -1;
     struct pipe_ring *ring = (struct pipe_ring *)filp->inode->priv;
     if (!ring) return -1;
+
+    /*
+     * FIXED (v4.2.7): BUG-PIPE-ADDR-VALIDATE
+     * Validate user buffer address before reading from it.  Without
+     * this check, a malicious process could pass a kernel address
+     * and use pipe_write to leak kernel memory via the memcpy from
+     * the user buffer after stac() (which disables SMAP).
+     */
+    if (!user_addr_range_ok(buf, count)) { current->t_errno = EFAULT; return -1; }
 
     pipe_spin_lock(&ring->lock);
     if (!ring->read_open) {
@@ -319,6 +339,34 @@ static int pipe_close(struct inode *inode, struct file *filp) {
         ring->read_open = 0;
     } else {
         ring->write_open = 0;
+    }
+
+    /*
+     * FIXED (v4.2.7): BUG-PIPE-CLOSE-WAKE
+     * When a pipe end is closed, wake up any tasks blocked on the
+     * opposite end.  Readers blocked on an empty pipe should get
+     * EOF (0), and writers blocked on a full pipe should get EPIPE.
+     * Without this, blocked tasks hang forever when the other end
+     * is closed.
+     */
+    ring->closed = 1;
+    /* Wake all blocked readers */
+    struct pipe_blocked_node *rn = ring->blocked_readers;
+    ring->blocked_readers = NULL;
+    while (rn) {
+        if (rn->task->state == TASK_BLOCKED) {
+            rn->task->state = TASK_READY;
+        }
+        rn = rn->next;
+    }
+    /* Wake all blocked writers */
+    struct pipe_blocked_node *wn = ring->blocked_writers;
+    ring->blocked_writers = NULL;
+    while (wn) {
+        if (wn->task->state == TASK_BLOCKED) {
+            wn->task->state = TASK_READY;
+        }
+        wn = wn->next;
     }
 
     /* If both ends closed, free the ring.

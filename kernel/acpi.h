@@ -236,4 +236,18 @@ struct acpi_madt *acpi_get_madt(void);
  */
 int acpi_checksum(void *table, uint32_t length);
 
+/* ACPI_DSDT (v4.2.7) - DSDT/SSDT _S5 parser */
+/*
+ * acpi_parse_s5: Scan AML bytecode for the \_S5 object and extract
+ * SLP_TYPa and SLP_TYPb values for ACPI shutdown.
+ *
+ * @aml:          pointer to DSDT or SSDT AML bytecode.
+ * @len:          length of the AML bytecode in bytes.
+ * @slp_typa_out: output — SLP_TYPa value (for PM1a_CNT).
+ * @slp_typb_out: output — SLP_TYPb value (for PM1b_CNT).
+ *
+ * Returns 0 on success, -1 if _S5 not found or AML is malformed.
+ */
+int acpi_parse_s5(uint8_t *aml, size_t len, int *slp_typa_out, int *slp_typb_out);
+
 #endif /* ACPI_H */

@@ -756,7 +756,12 @@ void *alloc_pages(uint32_t order) {
 
 void free_pages(void *ptr, uint32_t order) {
     if (!ptr) return;
-    if (order > MAX_ORDER) return;
+    /* FIXED (v4.2.7): BUG-FREE-PAGES-ORDER — validate the order parameter
+     * to prevent buddy system metadata corruption from invalid orders. */
+    if (order > MAX_ORDER) {
+        log_printf(LOG_LEVEL_ERR, "free_pages: invalid order %u\n", (unsigned int)order);
+        return;
+    }
 
     uint64_t pa = (uint64_t)(uintptr_t)ptr;
     if (pa < phys_mem_base) return;

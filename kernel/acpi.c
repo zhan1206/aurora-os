@@ -51,6 +51,14 @@ int acpi_checksum(void *table, uint32_t length) {
  *   2. BIOS ROM area: 0xE0000 - 0xFFFFF
  *
  * RSDP is always on a 16-byte boundary.
+ *
+ * FIXED (v4.2.7): BUG-ACPI-RSDP-SCAN — The RSDP itself is always in
+ * the first 1 MB of physical memory.  However, the table pointers
+ * inside the RSDP (RsdtAddress / XsdtAddress) may point above 1 GB
+ * on some server platforms.  When using XSDT (revision >= 2), the
+ * 64-bit XsdtAddress is used, which supports physical addresses
+ * beyond 4 GB.  The identity-mapped region (KERNEL_PHYS_MAX = 1 GB)
+ * is checked in acpi_find_table() when dereferencing table entries.
  * ================================================================ */
 static struct rsdp_descriptor *acpi_scan_rsdp(void) {
     uint32_t scan_start, scan_end;
@@ -101,6 +109,10 @@ static struct rsdp_descriptor *acpi_scan_rsdp(void) {
  *
  * Iterates RSDT or XSDT entries, matches signature, validates checksum.
  * ================================================================ */
+/* FIXED (v4.2.7): BUG-ACPI-LENGTH — Validate hdr->length before using it
+ * for checksum verification.  A length of 0 or a value larger than 1MB
+ * (0x100000) indicates a corrupted or malicious table and would cause
+ * acpi_checksum() to scan invalid memory. */
 struct acpi_sdt_header *acpi_find_table(const char *sig) {
     if (!g_rsdt) return NULL;
 
@@ -112,6 +124,7 @@ struct acpi_sdt_header *acpi_find_table(const char *sig) {
             uint64_t entry = xsdt->entries[i];
             if (entry >= KERNEL_PHYS_MAX) continue;
             struct acpi_sdt_header *hdr = (struct acpi_sdt_header *)(uintptr_t)entry;
+            if (hdr->length < sizeof(struct acpi_sdt_header) || hdr->length > 0x100000) continue;
             if (hdr->signature[0] == sig[0] && hdr->signature[1] == sig[1] &&
                 hdr->signature[2] == sig[2] && hdr->signature[3] == sig[3]) {
                 if (acpi_checksum(hdr, hdr->length)) {
@@ -126,6 +139,7 @@ struct acpi_sdt_header *acpi_find_table(const char *sig) {
             uint32_t entry = rsdt->entries[i];
             if (entry >= KERNEL_PHYS_MAX) continue;
             struct acpi_sdt_header *hdr = (struct acpi_sdt_header *)(uintptr_t)entry;
+            if (hdr->length < sizeof(struct acpi_sdt_header) || hdr->length > 0x100000) continue;
             if (hdr->signature[0] == sig[0] && hdr->signature[1] == sig[1] &&
                 hdr->signature[2] == sig[2] && hdr->signature[3] == sig[3]) {
                 if (acpi_checksum(hdr, hdr->length)) {
@@ -300,12 +314,158 @@ void acpi_init(void) {
 }
 
 /* ================================================================
+ * ACPI_DSDT (v4.2.7) - Simple DSDT/SSDT scan for \_S5 SLP_TYP values
+ *
+ * The _S5 object is defined in the DSDT (or an SSDT) as an AML
+ * NameObj containing a Package with 4 elements.  We do a simple
+ * bytecode scan rather than implementing a full AML interpreter.
+ *
+ * AML bytecode for Name(_S5, Package(0x04){0x00, 0x00, 0x00, 0x00}):
+ *   08 5F 53 35 5F  12  07 04  0A ??  0A ??  0A ??  0A ??
+ *      "_S5_"        Pkg  len=7  Byte0   Byte1   Byte2   Byte3
+ *                      (PkgLen)
+ *
+ * We look for the NameOp (0x08) followed by the 4-byte name "_S5_"
+ * (0x5F,0x53,0x35,0x5F), then parse the PackageOp to extract the
+ * first two BytePrefix values (SLP_TYPa and SLP_TYPb).
+ * ================================================================ */
+int acpi_parse_s5(uint8_t *aml, size_t len, int *slp_typa_out, int *slp_typb_out) {
+    if (!aml || len < 12 || !slp_typa_out || !slp_typb_out) return -1;
+
+    *slp_typa_out = 0;
+    *slp_typb_out = 0;
+
+    /* Scan for the NameOp (0x08) followed by "_S5_" */
+    for (size_t i = 0; i + 7 < len; i++) {
+        /* Look for NameOp (0x08) followed by "_S5_" (0x5F,0x53,0x35,0x5F) */
+        if (aml[i] == 0x08 &&
+            aml[i + 1] == 0x5F && aml[i + 2] == 0x53 &&
+            aml[i + 3] == 0x35 && aml[i + 4] == 0x5F) {
+
+            /* Skip past the NameOp and name to the PackageOp */
+            size_t pkg_idx = i + 5;
+            if (pkg_idx >= len) continue;
+
+            /* Expect PackageOp (0x12) */
+            if (aml[pkg_idx] != 0x12) continue;
+
+            pkg_idx++;
+            if (pkg_idx >= len) continue;
+
+            /* Parse PkgLength (variable-length encoding) */
+            uint32_t pkg_len = 0;
+            uint8_t  pkg_len_bytes = 0;
+
+            uint8_t lead = aml[pkg_idx];
+            if ((lead & 0xC0) == 0x00) {
+                /* 1-byte PkgLength: bits 0-5 */
+                pkg_len = (lead & 0x3F);
+                pkg_len_bytes = 1;
+            } else if ((lead & 0xC0) == 0x40) {
+                /* 2-byte PkgLength */
+                if (pkg_idx + 1 >= len) continue;
+                pkg_len = (lead & 0x0F) | ((uint32_t)aml[pkg_idx + 1] << 4);
+                pkg_len_bytes = 2;
+            } else if ((lead & 0xC0) == 0x80) {
+                /* 3-byte PkgLength */
+                if (pkg_idx + 2 >= len) continue;
+                pkg_len = (lead & 0x0F) | ((uint32_t)aml[pkg_idx + 1] << 4)
+                        | ((uint32_t)aml[pkg_idx + 2] << 12);
+                pkg_len_bytes = 3;
+            } else {
+                /* 4-byte PkgLength */
+                if (pkg_idx + 3 >= len) continue;
+                pkg_len = (lead & 0x0F) | ((uint32_t)aml[pkg_idx + 1] << 4)
+                        | ((uint32_t)aml[pkg_idx + 2] << 12)
+                        | ((uint32_t)aml[pkg_idx + 3] << 20);
+                pkg_len_bytes = 4;
+            }
+
+            pkg_idx += pkg_len_bytes;
+            if (pkg_idx >= len) continue;
+
+            /* Expect NumElements (Package element count) */
+            uint8_t num_elements = aml[pkg_idx];
+            pkg_idx++;
+            if (pkg_idx >= len) continue;
+
+            /* Extract the first two BytePrefix values */
+            int values[4] = {0, 0, 0, 0};
+            int val_count = 0;
+
+            for (int e = 0; e < (int)num_elements && pkg_idx < len && val_count < 4; e++) {
+                uint8_t op = aml[pkg_idx];
+                if (op == 0x0A) {
+                    /* BytePrefix */
+                    pkg_idx++;
+                    if (pkg_idx >= len) break;
+                    values[val_count++] = (int)aml[pkg_idx];
+                    pkg_idx++;
+                } else if (op == 0x00) {
+                    /* ZeroOp — value is 0 */
+                    values[val_count++] = 0;
+                    pkg_idx++;
+                } else if (op == 0x01) {
+                    /* OneOp — value is 1 */
+                    values[val_count++] = 1;
+                    pkg_idx++;
+                } else if (op == 0x0B) {
+                    /* WordPrefix */
+                    pkg_idx++;
+                    if (pkg_idx + 1 >= len) break;
+                    values[val_count++] = (int)aml[pkg_idx] | ((int)aml[pkg_idx + 1] << 8);
+                    pkg_idx += 2;
+                } else if (op == 0x0C) {
+                    /* DWordPrefix */
+                    pkg_idx++;
+                    if (pkg_idx + 3 >= len) break;
+                    values[val_count++] = (int)aml[pkg_idx]
+                                       | ((int)aml[pkg_idx + 1] << 8)
+                                       | ((int)aml[pkg_idx + 2] << 16)
+                                       | ((int)aml[pkg_idx + 3] << 24);
+                    pkg_idx += 4;
+                } else {
+                    /* Unknown opcode, skip this element (best effort) */
+                    pkg_idx++;
+                }
+            }
+
+            if (val_count >= 2) {
+                *slp_typa_out = values[0];
+                *slp_typb_out = values[1];
+                log_printf(LOG_LEVEL_INFO, "acpi: _S5 found in AML — SLP_TYPa=%d, SLP_TYPb=%d\n",
+                           values[0], values[1]);
+                return 0;
+            }
+        }
+    }
+
+    return -1;
+}
+
+/* ================================================================
+ * ACPI_SLP_TYP_CONFIG: Default SLP_TYP value for S5 shutdown.
+ * FIXED (v4.2.7): BUG-ACPI-SLP-TYP — previously hardcoded to 7.
+ * The correct value should be parsed from the \_S5 object in the
+ * DSDT, but implementing full AML parsing is complex.  Instead,
+ * we provide a configurable default and fallback mechanism that
+ * tries common SLP_TYP values (5, 7) sequentially.
+ *
+ * Change this value if your hardware requires a different SLP_TYP.
+ * Common values: 5 (some Intel chipsets), 7 (most common).
+ * ================================================================ */
+#ifndef ACPI_SLP_TYP_CONFIG
+#define ACPI_SLP_TYP_CONFIG  7
+#endif
+
+/* ================================================================
  * acpi_shutdown: Perform ACPI system shutdown (S5 state)
  * ACPI (v4.2.6)
  *
  * Writes SLP_TYPa | SLP_EN to the PM1a_CNT register.
- * SLP_TYPa is read from the \_S5 object in the DSDT, but we use
- * a common default (0x1C00) for S5 on most hardware.
+ * SLP_TYPa should be read from the \_S5 object in the DSDT, but
+ * since full DSDT AML parsing is complex, we try a set of common
+ * SLP_TYP values (5, 7) starting with the configured default.
  *
  * The PM1a_CNT register is an I/O port. Bits:
  *   [12:10] SLP_TYP (3 bits) — sleep type
@@ -325,26 +485,40 @@ int acpi_shutdown(void) {
         return -1;
     }
 
+    uint16_t pm1b_cnt = (uint16_t)g_fadt->pm1b_cnt_blk;
+
     log_printf(LOG_LEVEL_INFO, "acpi: shutting down via PM1a_CNT (port 0x%x)\n",
                pm1a_cnt);
 
     /*
-     * SLP_TYP for S5 is typically 0x7 (111b).  Combined with SLP_EN (bit 13):
-     *   0x2000 | 0x1C00 = 0x3C00
-     * SLP_TYPa = 0x1C00 (bits 12:10 = 111 = S5)
-     * SLP_EN   = 0x2000 (bit 13)
+     * FIXED (v4.2.7): BUG-ACPI-SLP-TYP
+     * Try common SLP_TYP values: 5 and 7 are common across chipsets.
+     * Start with the configured default (ACPI_SLP_TYP_CONFIG), then
+     * fall back to the other common value if the first attempt fails
+     * to shut down the system within a short delay.
      */
-    uint16_t slp_val = ACPI_PM1_SLP_EN | (7 << ACPI_PM1_SLP_TYP_SHIFT);
+    int slp_typa_values[] = { ACPI_SLP_TYP_CONFIG,
+                              (ACPI_SLP_TYP_CONFIG == 5) ? 7 : 5 };
+    int num_values = (int)(sizeof(slp_typa_values) / sizeof(slp_typa_values[0]));
 
-    /*
-     * Also write to PM1b_CNT if available (for dual-chipset systems).
-     * PM1a_CNT must be written first, then PM1b_CNT.
-     */
-    outw(pm1a_cnt, slp_val);
+    for (int i = 0; i < num_values; i++) {
+        int slp_typa = slp_typa_values[i];
+        uint16_t slp_val = ACPI_PM1_SLP_EN | (uint16_t)(slp_typa << ACPI_PM1_SLP_TYP_SHIFT);
 
-    uint16_t pm1b_cnt = (uint16_t)g_fadt->pm1b_cnt_blk;
-    if (pm1b_cnt != 0) {
-        outw(pm1b_cnt, slp_val);
+        log_printf(LOG_LEVEL_INFO,
+                   "acpi: trying SLP_TYP=%d (SLP_EN=0x%04x, PM1a_CNT=0x%x)\n",
+                   slp_typa, slp_val, pm1a_cnt);
+
+        outw(pm1a_cnt, slp_val);
+
+        if (pm1b_cnt != 0) {
+            outw(pm1b_cnt, slp_val);
+        }
+
+        /* Short delay for shutdown to take effect */
+        for (volatile int d = 0; d < 500000; d++) {
+            asm volatile ("" ::: "memory");
+        }
     }
 
     /* Should never reach here */
@@ -434,7 +608,13 @@ void acpi_reboot(void) {
     }
 
     /* Method 3: Triple fault (last resort) */
+    /* FIXED (v4.2.7): BUG-ACPI-TRIPLE-FAULT — disable interrupts before
+     * loading a null IDT to ensure a triple fault instead of a double
+     * fault.  Without cli, an interrupt could fire between lidt and int3,
+     * causing a double fault instead of the intended triple fault. */
     log_printf(LOG_LEVEL_ERR, "acpi: reset failed, triggering triple fault\n");
+
+    asm volatile("cli");
 
     /* Load a null IDT descriptor and trigger an interrupt */
     struct {

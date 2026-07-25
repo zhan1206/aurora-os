@@ -252,14 +252,39 @@ int virtq_get_buf(struct virtq *vq, uint32_t *len) {
         return -1;
     }
 
-    /* Return descriptor to free list */
-    uint32_t desc_id = elem->id;
-    vq->desc[desc_id].next = (uint16_t)vq->free_head;
-    vq->free_head = desc_id;
+    /*
+     * FIXED (v4.2.7): BUG-VIRTIO-GETBUF — return all descriptors in the
+     * completed chain to the free list.  Previously only the head
+     * descriptor was returned, leaking the rest of the chain descriptors
+     * and eventually exhausting the descriptor pool.
+     */
+    {
+        uint32_t desc_id = elem->id;
+        uint32_t current = desc_id;
+        uint32_t desc_count = 0;
+
+        while (current < vq->num && desc_count < vq->num) {
+            struct virtq_desc *desc = &vq->desc[current];
+            uint16_t flags = desc->flags;
+            uint16_t next  = desc->next;
+
+            /* Return this descriptor to the free list */
+            desc->flags = 0;
+            desc->next  = (uint16_t)vq->free_head;
+            vq->free_head = current;
+            desc_count++;
+
+            /* Follow the chain: stop when no NEXT flag or next is 0 */
+            if (!(flags & VIRTQ_DESC_F_NEXT) || next == 0) {
+                break;
+            }
+            current = next;
+        }
+    }
 
     vq->last_used_idx++;
 
-    return (int)desc_id;
+    return (int)(elem->id);
 }
 
 /* ================================================================

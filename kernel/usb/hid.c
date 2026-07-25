@@ -322,9 +322,17 @@ void hid_probe(struct usb_device *dev) {
         }
     }
 
-    hid->initialized = 1;
+    /* FIXED (v4.2.7): BUG-HID-INIT — Only mark the device as initialized
+     * if the report buffer was successfully allocated.  Previously
+     * initialized was set to 1 even when kmalloc failed, causing the
+     * poll function to dereference a NULL report_buf. */
+    if (hid->report_buf) {
+        hid->initialized = 1;
+    } else {
+        hid->initialized = 0;
+    }
 
-    /* Add to global list */
+    /* Add to global list (even if uninitialized — poll will skip it) */
     hid->next = hid_device_list;
     hid_device_list = hid;
 
@@ -382,6 +390,13 @@ void hid_poll(void) {
                 if (idx == 0) ccs ^= 1;
                 if (idx == start) break;
             }
+
+            /* FIXED (v4.2.7): BUG-HID-POLL-ADVANCE - Advance the
+             * event ring dequeue pointer and update the cycle bit
+             * after processing events.  Without this, the same events
+             * are processed repeatedly on every poll. */
+            hc->event_ring_dequeue = idx;
+            hc->event_ring_ccs = ccs;
         }
         hid = hid->next;
     }

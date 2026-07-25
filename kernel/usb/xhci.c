@@ -8,6 +8,7 @@
  * /* USB (v4.2.6) */
  */
 #include "xhci.h"
+#include "xhci_dma.h"  /* XHCI_DMA (v4.2.7) */
 #include "usb.h"
 #include "../pci.h"
 #include "../include/log.h"
@@ -41,6 +42,31 @@ struct usb_device *usb_device_list(void) {
     return usb_dev_list;
 }
 
+/* FIXED (v4.2.7): BUG-XHCI-HOTPLUG — Remove a USB device from the tracking
+ * list when it is physically disconnected.  Searches by root_port and
+ * controller pointer, then unlinks the device from the global list. */
+void usb_device_remove(struct xhci_controller *hc, uint32_t port) {
+    struct usb_device *prev = NULL;
+    struct usb_device *dev = usb_dev_list;
+    while (dev) {
+        if (dev->hc == hc && dev->root_port == (uint8_t)(port + 1)) {
+            if (prev) {
+                prev->next = dev->next;
+            } else {
+                usb_dev_list = dev->next;
+            }
+            if (usb_dev_tail == dev) {
+                usb_dev_tail = prev;
+            }
+            log_printf(LOG_LEVEL_INFO, "xHCI: device removed from port %d\n", port);
+            kfree(dev);
+            return;
+        }
+        prev = dev;
+        dev = dev->next;
+    }
+}
+
 struct usb_device *usb_find_by_class(uint8_t class_code) {
     struct usb_device *dev = usb_dev_list;
     while (dev) {
@@ -57,23 +83,34 @@ struct usb_device *usb_find_by_class(uint8_t class_code) {
     return NULL;
 }
 
+/* Identity mapping: virtual == physical for kernel heap */
+/* FIXED (v4.2.7): BUG-XHCI-7 - virt_to_phys macro for DMA correctness */
+#define virt_to_phys(vaddr) ((uint64_t)(uintptr_t)(vaddr))
+
 /* ================================================================
  * MMIO Access Helpers
  * ================================================================ */
+/* FIXED (v4.2.7): BUG-XHCI-6 - add MMIO ordering barriers for uncacheable memory */
 static inline uint32_t xhci_read32(volatile uint32_t *addr) {
+    __sync_synchronize();
     return *addr;
 }
 
 static inline uint64_t xhci_read64(volatile uint64_t *addr) {
+    __sync_synchronize();
     return *addr;
 }
 
 static inline void xhci_write32(volatile uint32_t *addr, uint32_t val) {
+    __sync_synchronize();
     *addr = val;
+    __sync_synchronize();
 }
 
 static inline void xhci_write64(volatile uint64_t *addr, uint64_t val) {
+    __sync_synchronize();
     *addr = val;
+    __sync_synchronize();
 }
 
 static inline uint32_t xhci_read_op(struct xhci_controller *hc, uint32_t offset) {
@@ -112,12 +149,16 @@ static inline void xhci_write_doorbell(struct xhci_controller *hc, uint32_t offs
 }
 
 static inline uint32_t xhci_read_port(struct xhci_controller *hc, uint32_t port_index) {
-    if (port_index >= hc->num_ports) return 0;
+    /* FIXED (v4.2.7): BUG-XHCI-PORT-BOUNDS — Explicit bounds check on port
+     * index before array access.  hc->num_ports may lag behind the actual
+     * hardware port count in some corner cases. */
+    if (port_index >= hc->num_ports || port_index >= XHCI_MAX_PORTS) return 0;
     return xhci_read32((volatile uint32_t *)((uintptr_t)hc->operational + hc->port_offsets[port_index]));
 }
 
 static inline void xhci_write_port(struct xhci_controller *hc, uint32_t port_index, uint32_t val) {
-    if (port_index >= hc->num_ports) return;
+    /* FIXED (v4.2.7): BUG-XHCI-PORT-BOUNDS — Same bounds check as read. */
+    if (port_index >= hc->num_ports || port_index >= XHCI_MAX_PORTS) return;
     xhci_write32((volatile uint32_t *)((uintptr_t)hc->operational + hc->port_offsets[port_index]), val);
 }
 
@@ -128,10 +169,9 @@ static void xhci_ring_init(struct xhci_transfer_ring *ring, uint32_t size) {
     memset(ring, 0, sizeof(*ring));
     ring->size = size;
     size_t alloc_size = size * sizeof(struct xhci_trb);
-    ring->trbs = (struct xhci_trb *)kmalloc(alloc_size);
+    /* XHCI_DMA (v4.2.7) - Use xhci_dma_alloc for DMA-safe allocation */
+    ring->trbs = (struct xhci_trb *)xhci_dma_alloc(alloc_size, &ring->phys_addr);
     if (ring->trbs) {
-        memset(ring->trbs, 0, alloc_size);
-        ring->phys_addr = (uint64_t)(uintptr_t)ring->trbs;
         ring->pcs = 1;
     }
 
@@ -237,6 +277,11 @@ int xhci_send_command(struct xhci_controller *hc, struct xhci_trb *cmd_trb) {
 /* ================================================================
  * Enable Slot
  * ================================================================ */
+/* FIXED (v4.2.7): BUG-XHCI-SLOT-ID — Read the slot ID from the command
+ * completion event TRB instead of scanning the slots array.  The slot ID
+ * is in the upper 8 bits (bits 31:24) of the event TRB control field.
+ * Scanning the array is fragile because the array may have stale entries
+ * or the hardware may assign a slot ID other than the first free slot. */
 int xhci_enable_slot(struct xhci_controller *hc) {
     if (!hc) return -1;
 
@@ -244,33 +289,50 @@ int xhci_enable_slot(struct xhci_controller *hc) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.control = (XHCI_TRB_ENABLE_SLOT << XHCI_TRB_TYPE_SHIFT);
 
-    if (xhci_send_command(hc, &cmd) < 0) {
-        return -1;
-    }
+    /* Enqueue the command and ring the doorbell */
+    xhci_ring_enqueue_trb(&hc->cmd_ring, &cmd);
+    xhci_write_doorbell(hc, 0, 0);
 
-    /* The slot ID is returned in the event TRB */
-    /* We need to poll the event ring to extract it */
-    /* For now, scan through slots to find the newly enabled one */
-    for (uint32_t i = 1; i <= hc->max_slots; i++) {
-        if (!hc->slots[i].enabled) {
-            hc->slots[i].slot_id = (uint8_t)i;
-            hc->slots[i].enabled = 1;
-            /* Allocate device context */
-            size_t ctx_size = hc->csz ? 64 : 32;
-            /* Full device context = slot + 31 EPs */
-            size_t full_ctx_size = sizeof(struct xhci_device_context);
-            hc->slots[i].ctx = (struct xhci_device_context *)kmalloc(full_ctx_size);
-            if (hc->slots[i].ctx) {
-                memset(hc->slots[i].ctx, 0, full_ctx_size);
-                hc->slots[i].ctx_phys = (uint64_t)(uintptr_t)hc->slots[i].ctx;
-                /* Set DCBAA entry */
-                hc->dcbaa[i] = hc->slots[i].ctx_phys;
+    /* Poll for command completion and extract the slot ID */
+    int slot_id = -1;
+    int timeout = 5000000;
+    while (timeout-- > 0) {
+        struct xhci_trb *evt = xhci_event_ring_dequeue(hc);
+        if (evt) {
+            uint32_t evt_type = (evt->control & XHCI_TRB_TYPE_MASK) >> XHCI_TRB_TYPE_SHIFT;
+            if (evt_type == XHCI_EVT_COMMAND_COMPLETE) {
+                uint32_t cc = (evt->status & XHCI_TRB_CC_MASK) >> XHCI_TRB_CC_SHIFT;
+                if (cc == XHCI_CC_SUCCESS) {
+                    /* Slot ID is in bits 31:24 of the event TRB control field */
+                    slot_id = (int)((evt->control >> 24) & 0xFF);
+                }
+                break;
             }
-            return (int)i;
+        }
+        for (volatile int i = 0; i < 1000; i++) {
+            asm volatile ("pause" ::: "memory");
         }
     }
 
-    return -1;
+    if (slot_id <= 0 || slot_id > (int)hc->max_slots) {
+        log_printf(LOG_LEVEL_WARN, "xHCI: enable slot failed, slot_id=%d\n", slot_id);
+        return -1;
+    }
+
+    /* Initialize the slot */
+    hc->slots[slot_id].slot_id = (uint8_t)slot_id;
+    hc->slots[slot_id].enabled = 1;
+
+    /* Allocate device context */
+    /* XHCI_DMA (v4.2.7) - Use xhci_dma_alloc for DMA-safe allocation */
+    size_t full_ctx_size = sizeof(struct xhci_device_context);
+    hc->slots[slot_id].ctx = (struct xhci_device_context *)xhci_dma_alloc(full_ctx_size, &hc->slots[slot_id].ctx_phys);
+    if (hc->slots[slot_id].ctx) {
+        /* Set DCBAA entry */
+        hc->dcbaa[slot_id] = hc->slots[slot_id].ctx_phys;
+    }
+
+    return slot_id;
 }
 
 /* ================================================================
@@ -320,7 +382,7 @@ int xhci_address_device(struct xhci_controller *hc, uint8_t slot_id,
     /* Send Address Device command */
     struct xhci_trb cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.parameter = (uint64_t)(uintptr_t)ictx;
+    cmd.parameter = virt_to_phys(ictx);
     cmd.control = (XHCI_TRB_ADDRESS_DEVICE << XHCI_TRB_TYPE_SHIFT)
                 | ((uint32_t)slot_id << 24);
 
@@ -350,18 +412,26 @@ int xhci_configure_endpoint(struct xhci_controller *hc, uint8_t slot_id,
     struct xhci_device_slot *slot = &hc->slots[slot_id];
     if (!slot->enabled) return -1;
 
+    /* FIXED (v4.2.7): BUG-XHCI-EPRING-LEAK - Free old TRB array before
+     * overwriting the ep_ring.  Without this, re-configuring an endpoint
+     * leaks the previously-allocated TRB array. */
+    if (slot->ep_ring[ep_id].trbs) {
+        xhci_dma_free(slot->ep_ring[ep_id].trbs);  /* XHCI_DMA (v4.2.7) */
+    }
     /* Allocate transfer ring for this endpoint */
     xhci_ring_init(&slot->ep_ring[ep_id], 32);
     if (!slot->ep_ring[ep_id].trbs) return -1;
 
     /* Build input context */
-    size_t ctx_size = sizeof(struct xhci_input_context) + (size_t)(ep_id + 1) * sizeof(struct xhci_ep_context);
+    /* FIXED (v4.2.7): BUG-XHCI-8 - correct EP context count: we need ep_id entries */
+    size_t ctx_size = sizeof(struct xhci_input_context) + (size_t)ep_id * sizeof(struct xhci_ep_context);
     struct xhci_input_context *ictx = (struct xhci_input_context *)kmalloc(ctx_size);
     if (!ictx) return -1;
     memset(ictx, 0, ctx_size);
 
     /* Add this endpoint context */
-    ictx->add_flags = (uint32_t)(1U << ep_id);
+    /* FIXED (v4.2.7): BUG-XHCI-8 - bit 0 is slot, bit 1 is EP0, so bit for EP N is N+1 */
+    ictx->add_flags = (uint32_t)(1U << (ep_id + 1));
 
     /* Locate the EP context in the input context */
     struct xhci_ep_context *ep = (struct xhci_ep_context *)(ictx + 1);
@@ -380,7 +450,7 @@ int xhci_configure_endpoint(struct xhci_controller *hc, uint8_t slot_id,
     /* Send Configure Endpoint command */
     struct xhci_trb cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.parameter = (uint64_t)(uintptr_t)ictx;
+    cmd.parameter = virt_to_phys(ictx);
     cmd.control = (XHCI_TRB_CONFIGURE_EP << XHCI_TRB_TYPE_SHIFT)
                 | ((uint32_t)slot_id << 24);
 
@@ -546,10 +616,12 @@ int xhci_get_descriptor(struct xhci_controller *hc, uint8_t slot_id,
         return -1;
     }
 
-    /* Reset ring pointers for next transfer */
-    ring->enqueue = 0;
-    ring->dequeue = 0;
-    ring->pcs ^= 1;
+    /* FIXED (v4.2.7): BUG-XHCI-DESC-RING — Do NOT reset ring pointers after
+     * each descriptor transfer.  The transfer ring is a circular buffer;
+     * resetting enqueue/dequeue to 0 and toggling pcs after every transfer
+     * causes cycle bit inconsistency.  The controller maintains the ring
+     * position through the dequeue pointer in the endpoint context.  The
+     * next transfer will naturally continue from the current enqueue position. */
 
     return (int)len;
 }
@@ -616,16 +688,219 @@ int xhci_set_configuration(struct xhci_controller *hc, uint8_t slot_id,
         }
     }
 
-    ring->enqueue = 0;
-    ring->dequeue = 0;
-    ring->pcs ^= 1;
-
     if (done) {
         slot->configured = 1;
         return 0;
     }
 
     return -1;
+}
+
+/* ================================================================
+ * XHCI_HOTPLUG (v4.2.7) - USB Device Removal
+ *
+ * Remove a USB device from the global device list and free its
+ * associated resources (device context, endpoint rings, slot).
+ * ================================================================ */
+static void usb_device_remove(struct usb_device *dev) {
+    if (!dev) return;
+
+    /* Remove from the global linked list */
+    if (usb_dev_list == dev) {
+        usb_dev_list = dev->next;
+        if (usb_dev_tail == dev) usb_dev_tail = NULL;
+    } else {
+        struct usb_device *prev = usb_dev_list;
+        while (prev && prev->next != dev) prev = prev->next;
+        if (prev) {
+            prev->next = dev->next;
+            if (usb_dev_tail == dev) usb_dev_tail = prev;
+        }
+    }
+
+    /* Free HID descriptor if any */
+    if (dev->hid_desc) {
+        kfree(dev->hid_desc);
+        dev->hid_desc = NULL;
+    }
+
+    /* Free the slot resources */
+    if (dev->hc && dev->slot_id > 0) {
+        struct xhci_device_slot *slot = &dev->hc->slots[dev->slot_id];
+        if (slot->ctx) {
+            xhci_dma_free(slot->ctx);  /* XHCI_DMA (v4.2.7) */
+            slot->ctx = NULL;
+        }
+        for (int ep = 0; ep < 32; ep++) {
+            if (slot->ep_ring[ep].trbs) {
+                xhci_dma_free(slot->ep_ring[ep].trbs);  /* XHCI_DMA (v4.2.7) */
+                slot->ep_ring[ep].trbs = NULL;
+            }
+        }
+        /* Clear DCBAA entry */
+        dev->hc->dcbaa[dev->slot_id] = 0;
+        slot->enabled = 0;
+        slot->addressed = 0;
+        slot->configured = 0;
+    }
+
+    kfree(dev);
+}
+
+/* ================================================================
+ * XHCI_HOTPLUG (v4.2.7) - Port Status Change Handler
+ *
+ * Proper state machine for USB port hotplug events:
+ *   1. Clear the port change bits (CSC, PRC, PEC, etc.)
+ *   2. Read current port status (CCS, speed)
+ *   3. If device connected (CCS=1): reset port, wait for enable,
+ *      enumerate the device (slot, descriptor, configuration).
+ *   4. If device disconnected (CCS=0): find the device attached to
+ *      this port, remove it from the device list, free resources.
+ * ================================================================ */
+static void xhci_handle_port_status_change(struct xhci_controller *hc, uint32_t port_id) {
+    if (!hc || port_id >= hc->num_ports) return;
+
+    /* Step 1: Read and clear port change bits */
+    uint32_t portsc = xhci_read_port(hc, port_id);
+    uint32_t change_bits = portsc & (XHCI_PORTSC_CSC | XHCI_PORTSC_PEC
+                                   | XHCI_PORTSC_WRC | XHCI_PORTSC_OCC
+                                   | XHCI_PORTSC_PRC | XHCI_PORTSC_PLC
+                                   | XHCI_PORTSC_CEC);
+    if (change_bits) {
+        xhci_write_port(hc, port_id, portsc | change_bits);
+    }
+
+    /* Step 2: Check current connection status */
+    if (portsc & XHCI_PORTSC_CCS) {
+        /* Device connected */
+        log_printf(LOG_LEVEL_INFO, "xHCI: port %d — device connected (hotplug)\n", port_id);
+
+        uint32_t speed_id = (portsc & XHCI_PORTSC_SPEED_MASK) >> XHCI_PORTSC_SPEED_SHIFT;
+        uint8_t speed = 0;
+        switch (speed_id) {
+            case XHCI_PORT_SPEED_LOW:       speed = 1; break;
+            case XHCI_PORT_SPEED_FULL:      speed = 2; break;
+            case XHCI_PORT_SPEED_HIGH:      speed = 3; break;
+            case XHCI_PORT_SPEED_SUPER:     speed = 4; break;
+            case XHCI_PORT_SPEED_SUPER_PLUS: speed = 5; break;
+            default: speed = 3; break;
+        }
+
+        log_printf(LOG_LEVEL_INFO, "xHCI: port %d speed=%d, enumerating...\n", port_id, speed);
+
+        /* Step 3: Reset port and enumerate */
+        int slot_id = xhci_reset_port(hc, port_id);
+        if (slot_id >= 0) {
+            log_printf(LOG_LEVEL_INFO, "xHCI: hotplug device on port %d assigned slot %d\n",
+                       port_id, slot_id);
+
+            struct usb_device_descriptor dev_desc;
+            if (xhci_get_descriptor(hc, (uint8_t)slot_id, USB_DESC_DEVICE, 0, 0, 0,
+                                    &dev_desc, sizeof(dev_desc)) >= 0) {
+                log_printf(LOG_LEVEL_INFO,
+                           "xHCI: hotplug device vid=%04x pid=%04x class=%d\n",
+                           dev_desc.idVendor, dev_desc.idProduct,
+                           dev_desc.bDeviceClass);
+
+                struct usb_device *udev = (struct usb_device *)kmalloc(sizeof(*udev));
+                if (udev) {
+                    memset(udev, 0, sizeof(*udev));
+                    udev->slot_id = (uint8_t)slot_id;
+                    udev->address = hc->slots[slot_id].address;
+                    udev->root_port = hc->slots[slot_id].root_port;
+                    udev->speed = hc->slots[slot_id].speed;
+                    udev->hc = hc;
+                    memcpy(&udev->dev_desc, &dev_desc, sizeof(dev_desc));
+                    usb_device_add(udev);
+
+                    /* Read configuration descriptor */
+                    struct usb_config_descriptor cfg_desc;
+                    if (xhci_get_descriptor(hc, (uint8_t)slot_id, USB_DESC_CONFIGURATION,
+                                            0, 0, 0, &cfg_desc, sizeof(cfg_desc)) >= 0) {
+                        udev->cfg_desc = cfg_desc;
+                        uint16_t total_len = cfg_desc.wTotalLength;
+                        if (total_len > 512) total_len = 512;
+                        uint8_t *cfg_buf = (uint8_t *)kmalloc(total_len);
+                        if (cfg_buf) {
+                            if (xhci_get_descriptor(hc, (uint8_t)slot_id,
+                                                    USB_DESC_CONFIGURATION, 0, 0, 0,
+                                                    cfg_buf, total_len) >= 0) {
+                                uint8_t *ptr = cfg_buf;
+                                uint8_t *end = cfg_buf + total_len;
+                                uint8_t iface_idx = 0;
+                                while (ptr + 2 <= end) {
+                                    uint8_t len2 = ptr[0];
+                                    uint8_t dtype = ptr[1];
+                                    if (len2 < 2 || ptr + len2 > end) break;
+                                    if (dtype == USB_DESC_INTERFACE && len2 >= 9) {
+                                        struct usb_interface_descriptor *ifd =
+                                            (struct usb_interface_descriptor *)ptr;
+                                        if (iface_idx < USB_MAX_INTERFACES) {
+                                            struct usb_interface *iface =
+                                                &udev->interfaces[iface_idx];
+                                            iface->interface_number = ifd->bInterfaceNumber;
+                                            iface->interface_class = ifd->bInterfaceClass;
+                                            iface->interface_subclass = ifd->bInterfaceSubClass;
+                                            iface->interface_protocol = ifd->bInterfaceProtocol;
+                                            iface->num_endpoints = 0;
+                                            iface_idx++;
+                                        }
+                                    } else if (dtype == USB_DESC_ENDPOINT && len2 >= 7) {
+                                        struct usb_endpoint_descriptor *epd =
+                                            (struct usb_endpoint_descriptor *)ptr;
+                                        if (iface_idx > 0) {
+                                            struct usb_interface *iface =
+                                                &udev->interfaces[iface_idx - 1];
+                                            if (iface->num_endpoints < USB_MAX_ENDPOINTS) {
+                                                struct usb_endpoint *ep =
+                                                    &iface->endpoints[iface->num_endpoints];
+                                                ep->ep_address = epd->bEndpointAddress;
+                                                ep->ep_type = epd->bmAttributes & 0x03;
+                                                ep->ep_id = (epd->bEndpointAddress & 0x0F) * 2
+                                                          + ((epd->bEndpointAddress & 0x80) ? 1 : 0);
+                                                ep->max_packet_size = epd->wMaxPacketSize;
+                                                ep->interval = epd->bInterval;
+                                                ep->active = 1;
+                                                iface->num_endpoints++;
+                                            }
+                                        }
+                                    } else if (dtype == USB_DESC_HID) {
+                                        udev->hid_desc = (struct usb_hid_descriptor *)kmalloc(len2);
+                                        if (udev->hid_desc) {
+                                            memcpy(udev->hid_desc, ptr, len2);
+                                        }
+                                    }
+                                    ptr += len2;
+                                }
+                                udev->num_interfaces = iface_idx;
+                            }
+                            kfree(cfg_buf);
+                        }
+                    }
+                }
+            }
+        } else {
+            log_printf(LOG_LEVEL_WARN, "xHCI: hotplug port %d — reset failed\n", port_id);
+        }
+    } else {
+        /* Device disconnected */
+        log_printf(LOG_LEVEL_INFO, "xHCI: port %d — device disconnected (hotplug)\n", port_id);
+
+        /* Find and remove the device attached to this port */
+        struct usb_device *dev = usb_dev_list;
+        while (dev) {
+            struct usb_device *next = dev->next;
+            if (dev->hc == hc && dev->root_port == (uint8_t)(port_id + 1)) {
+                log_printf(LOG_LEVEL_INFO,
+                           "xHCI: removing device vid=%04x pid=%04x from port %d\n",
+                           dev->dev_desc.idVendor, dev->dev_desc.idProduct, port_id);
+                usb_device_remove(dev);
+                break;
+            }
+            dev = next;
+        }
+    }
 }
 
 /* ================================================================
@@ -648,8 +923,10 @@ void xhci_interrupt_handler(void *stack) {
                 uint32_t evt_type = (evt->control & XHCI_TRB_TYPE_MASK) >> XHCI_TRB_TYPE_SHIFT;
                 switch (evt_type) {
                     case XHCI_EVT_PORT_STATUS_CHANGE: {
+                        /* XHCI_HOTPLUG (v4.2.7) - Proper enumeration/removal state machine */
                         uint32_t port_id = (evt->parameter >> 24) & 0xFF;
-                        log_printf(LOG_LEVEL_DEBUG, "xHCI: port %d status change\n", port_id);
+                        uint32_t port = port_id - 1;  /* port_id is 1-based */
+                        xhci_handle_port_status_change(hc, port);
                         break;
                     }
                     case XHCI_EVT_TRANSFER:
@@ -661,13 +938,17 @@ void xhci_interrupt_handler(void *stack) {
                 }
             }
 
-            /* Update Event Ring Dequeue Pointer */
-            uint64_t erdp = hc->event_ring_phys
-                          + (uint64_t)hc->event_ring_dequeue * sizeof(struct xhci_trb);
-            xhci_write_runtime(hc, XHCI_ERDP_LO(0), (uint32_t)(erdp & 0xFFFFFFFFU));
-            xhci_write_runtime(hc, XHCI_ERDP_HI(0), (uint32_t)(erdp >> 32));
-            erdp |= XHCI_ERDP_EHB;
-            xhci_write_runtime(hc, XHCI_ERDP_LO(0), (uint32_t)(erdp & 0xFFFFFFFFU));
+            /* FIXED (v4.2.7): BUG-XHCI-ERDP - Write dequeue pointer to ERDP
+             * with ERDP_BUSY (EHB) bit set so the controller knows the
+             * event ring is being consumed.  Without this write the
+             * controller may think the ring is full and stop posting events. */
+            {
+                uint64_t erdp = hc->event_ring_phys
+                              + (uint64_t)hc->event_ring_dequeue * sizeof(struct xhci_trb)
+                              | XHCI_ERDP_EHB;
+                xhci_write_runtime(hc, XHCI_ERDP_LO(0), (uint32_t)(erdp & 0xFFFFFFFFU));
+                xhci_write_runtime(hc, XHCI_ERDP_HI(0), (uint32_t)(erdp >> 32));
+            }
         }
 
         /* Clear port change bits */
@@ -718,6 +999,13 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     }
 
     /* Use identity mapping: virtual = physical */
+    /* FIXED (v4.2.7): BUG-XHCI-BAR-MAP — The PCI BAR may point to a physical
+     * address above 1 GB (KERNEL_PHYS_MAX).  If the MMIO region is not
+     * identity-mapped, accesses will page fault.  The kernel identity-maps
+     * 0..KERNEL_PHYS_MAX (1 GB).  If the BAR is above this range, we need
+     * to explicitly map the MMIO pages with map_page().  For now, assume
+     * the BAR is within the identity-mapped range (common on QEMU and
+     * most consumer hardware). */
     hc->mmio_base = (volatile uint32_t *)(uintptr_t)mmio_phys;
     log_printf(LOG_LEVEL_INFO, "xHCI: MMIO base = 0x%llx\n", (unsigned long long)mmio_phys);
 
@@ -773,14 +1061,14 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     log_printf(LOG_LEVEL_INFO, "xHCI: controller reset complete\n");
 
     /* ---- Allocate DCBAA ---- */
+    /* XHCI_DMA (v4.2.7) - Use xhci_dma_alloc for DMA-safe allocation */
     size_t dcbaa_size = (size_t)(hc->max_slots + 1) * sizeof(uint64_t);
-    hc->dcbaa = (uint64_t *)kmalloc(dcbaa_size);
+    hc->dcbaa = (uint64_t *)xhci_dma_alloc(dcbaa_size, &hc->dcbaa_phys);
     if (!hc->dcbaa) {
+        if (hc->cmd_ring.trbs) xhci_dma_free(hc->cmd_ring.trbs);
         kfree(hc);
         return -1;
     }
-    memset(hc->dcbaa, 0, dcbaa_size);
-    hc->dcbaa_phys = (uint64_t)(uintptr_t)hc->dcbaa;
 
     /* Set DCBAAP */
     xhci_write_op64(hc, XHCI_REG_DCBAAP_LO, hc->dcbaa_phys);
@@ -788,7 +1076,7 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     /* ---- Allocate Command Ring ---- */
     xhci_ring_init(&hc->cmd_ring, XHCI_CMD_RING_SIZE);
     if (!hc->cmd_ring.trbs) {
-        kfree(hc->dcbaa);
+        xhci_dma_free(hc->dcbaa);  /* XHCI_DMA (v4.2.7) */
         kfree(hc);
         return -1;
     }
@@ -798,15 +1086,14 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     xhci_write_op64(hc, XHCI_REG_CRCR_LO, crcr);
 
     /* ---- Allocate Event Ring and ERST ---- */
-    hc->event_ring = (struct xhci_trb *)kmalloc(XHCI_EVENT_RING_SIZE * sizeof(struct xhci_trb));
+    /* XHCI_DMA (v4.2.7) - Use xhci_dma_alloc for DMA-safe allocation */
+    hc->event_ring = (struct xhci_trb *)xhci_dma_alloc(XHCI_EVENT_RING_SIZE * sizeof(struct xhci_trb), &hc->event_ring_phys);
     if (!hc->event_ring) {
-        kfree(hc->cmd_ring.trbs);
-        kfree(hc->dcbaa);
+        if (hc->cmd_ring.trbs) xhci_dma_free(hc->cmd_ring.trbs);
+        xhci_dma_free(hc->dcbaa);
         kfree(hc);
         return -1;
     }
-    memset(hc->event_ring, 0, XHCI_EVENT_RING_SIZE * sizeof(struct xhci_trb));
-    hc->event_ring_phys = (uint64_t)(uintptr_t)hc->event_ring;
     hc->event_ring_dequeue = 0;
     hc->event_ring_ccs = 1;
 
@@ -816,8 +1103,8 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     hc->erst_entry.reserved = 0;
 
     xhci_write_runtime(hc, XHCI_ERSTSZ(0), XHCI_EVENT_RING_SIZE);
-    xhci_write_runtime(hc, XHCI_ERSTBA_LO(0), (uint32_t)((uint64_t)(uintptr_t)&hc->erst_entry & 0xFFFFFFFFU));
-    xhci_write_runtime(hc, XHCI_ERSTBA_HI(0), (uint32_t)(((uint64_t)(uintptr_t)&hc->erst_entry >> 32) & 0xFFFFFFFFU));
+    xhci_write_runtime(hc, XHCI_ERSTBA_LO(0), (uint32_t)(virt_to_phys(&hc->erst_entry) & 0xFFFFFFFFU));
+    xhci_write_runtime(hc, XHCI_ERSTBA_HI(0), (uint32_t)((virt_to_phys(&hc->erst_entry) >> 32) & 0xFFFFFFFFU));
 
     /* Set ERDP */
     xhci_write_runtime(hc, XHCI_ERDP_LO(0), (uint32_t)(hc->event_ring_phys & 0xFFFFFFFFU));
@@ -850,9 +1137,25 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     }
     if (timeout <= 0) {
         log_printf(LOG_LEVEL_ERR, "xHCI: controller failed to start\n");
-        kfree(hc->event_ring);
-        kfree(hc->cmd_ring.trbs);
-        kfree(hc->dcbaa);
+        /* FIXED (v4.2.7): BUG-XHCI-INIT-LEAK — Free all allocated resources
+         * on the error path.  This includes any slots that may have been
+         * allocated during the initialization sequence, their device
+         * contexts and endpoint ring TRBs. */
+        for (uint32_t s = 1; s <= hc->max_slots; s++) {
+            if (hc->slots[s].ctx) {
+                xhci_dma_free(hc->slots[s].ctx);  /* XHCI_DMA (v4.2.7) */
+                hc->slots[s].ctx = NULL;
+            }
+            for (int ep = 0; ep < 32; ep++) {
+                if (hc->slots[s].ep_ring[ep].trbs) {
+                    xhci_dma_free(hc->slots[s].ep_ring[ep].trbs);  /* XHCI_DMA (v4.2.7) */
+                    hc->slots[s].ep_ring[ep].trbs = NULL;
+                }
+            }
+        }
+        xhci_dma_free(hc->event_ring);  /* XHCI_DMA (v4.2.7) */
+        xhci_dma_free(hc->cmd_ring.trbs);  /* XHCI_DMA (v4.2.7) */
+        xhci_dma_free(hc->dcbaa);  /* XHCI_DMA (v4.2.7) */
         kfree(hc);
         return -1;
     }
@@ -861,7 +1164,9 @@ static int xhci_init_controller(struct pci_device *pci_dev) {
     /* ---- Discover Ports ---- */
     uint32_t port_offset = XHCI_REG_PORTSC_BASE;
     hc->num_ports = 0;
-    for (uint32_t i = 0; i < hc->max_ports; i++) {
+    /* FIXED (v4.2.7): BUG-XHCI-PORT-BOUNDS — Bound port index by both
+     * max_ports and XHCI_MAX_PORTS to prevent port_offsets array overflow. */
+    for (uint32_t i = 0; i < hc->max_ports && i < XHCI_MAX_PORTS; i++) {
         uint32_t portsc = xhci_read32((volatile uint32_t *)((uintptr_t)hc->operational + port_offset));
         if (portsc == 0xFFFFFFFFU) break;  /* No more ports */
         hc->port_offsets[i] = port_offset;

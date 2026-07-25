@@ -60,13 +60,15 @@ static int sysfs_read(struct file *filp, void *buf, size_t count, off_t *offset)
     if ((size_t)(*offset) + toread > (size_t)len)
         toread = (size_t)len - (size_t)(*offset);
     {
-        uint64_t saved_rflags;
-        asm volatile ("pushfq; popq %0" : "=r"(saved_rflags));
+        /* FIXED (v4.2.7): BUG-SYSFS-SMAP - stac/clac must always be
+         * paired.  Previously stac() was unconditional but clac() was
+         * conditional on the saved RFLAGS.AC bit, which could invert
+         * the AC bit state if interrupts or context switches occurred
+         * between the pushfq and the condition check.  Now both are
+         * unconditional since sysfs_read always copies to user space. */
         asm volatile ("stac" ::: "memory");
         memcpy(buf, tmp + (*offset), toread);
-        if (!(saved_rflags & (1ULL << 18))) {
-            asm volatile ("clac" ::: "memory");
-        }
+        asm volatile ("clac" ::: "memory");
     }
     *offset += (off_t)toread;
     return (ssize_t)toread;
@@ -158,13 +160,16 @@ static int read_version(char *buf, size_t size) {
     return (int)(len + 1);
 }
 
+/* FIXED (v4.2.7): BUG-OSTYPE-OVERFLOW — When size==0, the old code
+ * computed len = size - 1 = (size_t)-1, causing a huge memcpy that
+ * smashed the kernel stack.  Now we cap len at size and handle the
+ * zero-size case gracefully. */
 static int read_ostype(char *buf, size_t size) {
-    (void)size;
     const char *s = "AuroraOS\n";
     size_t len = 0;
     for (const char *p = s; *p; p++) len++;
-    if (len >= size) len = size - 1;
-    memcpy(buf, s, len);
+    if (len > size) len = size;
+    if (len > 0) memcpy(buf, s, len);
     return (int)len;
 }
 

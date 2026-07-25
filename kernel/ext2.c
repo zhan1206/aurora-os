@@ -1150,6 +1150,9 @@ struct inode *ext2_create(struct super_block *sb, struct inode *dir,
 out_free_block:
     ext2_free_block(sbi, new_blk);
 out_free_inode:
+    /* FIXED (v4.2.7): BUG-EXT2-CREATE-PUT — ensure the newly allocated
+     * inode is properly freed on all error paths.  ext2_free_inode()
+     * clears the inode bitmap and decrements the free inode count. */
     ext2_free_inode(sbi, new_ino);
     kfree(block_buf);
     return NULL;

@@ -55,8 +55,12 @@ static uint16_t checksum_calc(const void *data, int len) {
         sum += *ptr++;
         len -= 2;
     }
+    /* FIXED (v4.2.7): BUG-TCP-CSUM-ODD — The remaining odd byte must
+     * be treated as the high byte of a 16-bit word with a zero low byte
+     * (RFC 1071).  Previously it was treated as the low byte, yielding
+     * incorrect checksums for odd-length data. */
     if (len > 0) {
-        sum += *(const uint8_t *)ptr;
+        sum += ((uint16_t)*(const uint8_t *)ptr) << 8;
     }
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -101,7 +105,9 @@ static uint16_t tcp_udp_checksum(const uint8_t src_ip[4],
         remaining -= 2;
     }
     if (remaining > 0) {
-        sum += *(const uint8_t *)ptr;
+        /* FIXED (v4.2.7): BUG-TCP-CSUM-ODD — Same odd-byte padding
+         * fix as in checksum_calc above. */
+        sum += ((uint16_t)*(const uint8_t *)ptr) << 8;
     }
 
     while (sum >> 16) {
@@ -1228,10 +1234,13 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
                 listener->pending_ids[listener->pending_count++] = new_id;
             }
 
-            spin_unlock(&tcp_lock);
-
-            /* Send SYN-ACK */
+            /* FIXED (v4.2.7): BUG-TCP-SYNACK-LOCK — Send SYN-ACK while
+             * holding tcp_lock to prevent SMP race on socket fields.
+             * Previously the lock was released before the packet was sent,
+             * allowing another CPU to modify the socket state. */
             tcp_send_packet(&tcp_sockets[slot], TCP_SYN | TCP_ACK, NULL, 0);
+
+            spin_unlock(&tcp_lock);
             return;
         }
 

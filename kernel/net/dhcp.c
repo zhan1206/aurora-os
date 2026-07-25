@@ -46,6 +46,11 @@ enum dhcp_state {
     DHCP_REQUEST_SENT,   /* REQUEST sent, awaiting ACK */
     DHCP_WAIT_ACK,       /* Actively waiting for ACK */
     DHCP_BOUND,          /* Configured with IP */
+    /* FIXED (v4.2.7): BUG-DHCP-REBIND — REBINDING state: T2 expired,
+     * broadcast REQUEST to any server (not just original).  Prevents
+     * premature IP release.  Only goes to INIT/ERROR if REBIND fails. */
+    DHCP_REBIND_SENT,    /* REBIND REQUEST broadcast sent */
+    DHCP_WAIT_REBIND,    /* Actively waiting for REBIND ACK */
     DHCP_ERROR           /* Failed, will retry after delay */
 };
 
@@ -299,6 +304,74 @@ static int dhcp_send_request(void) {
 }
 
 /* ================================================================
+ * dhcp_send_rebind — Broadcast REQUEST to *any* server (no server ID)
+ *
+ * FIXED (v4.2.7): BUG-DHCP-REBIND — When T2 expires, the client must
+ * broadcast a REQUEST to any DHCP server, not just the original one.
+ * Unlike dhcp_send_request(), this does NOT include Option 54 (Server
+ * Identifier), so any server can respond with an ACK.
+ * ================================================================ */
+static int dhcp_send_rebind(void) {
+    struct net_if *iface = net_get_interface(0);
+    if (!iface) return -1;
+
+    int pkt_len = (int)sizeof(struct dhcp_hdr) + 128;
+    uint8_t *pkt = (uint8_t *)kmalloc((size_t)pkt_len);
+    if (!pkt) return -1;
+
+    memset(pkt, 0, (size_t)pkt_len);
+
+    struct dhcp_hdr *dhcp = (struct dhcp_hdr *)pkt;
+    dhcp->op = 1;
+    dhcp->htype = 1;
+    dhcp->hlen = 6;
+    dhcp->hops = 0;
+    dhcp->xid = htonl(dhcp_xid);
+    dhcp->secs = 0;
+    dhcp->flags = htons(0x8000);
+    memcpy(dhcp->chaddr, iface->mac, 6);
+    dhcp->magic = htonl(DHCP_MAGIC_COOKIE);
+    /* Rebind: set ciaddr to our current IP so the server knows we're rebinding */
+    memcpy(dhcp->ciaddr, iface->ip, 4);
+
+    uint8_t *opt = pkt + sizeof(struct dhcp_hdr);
+    int opt_len = 0;
+
+    /* Option 53: DHCP Message Type = REQUEST */
+    uint8_t msg_type = DHCP_REQUEST;
+    opt_len += dhcp_build_option(opt + opt_len, DHCP_OPT_MSG_TYPE,
+                                  1, &msg_type);
+
+    /* Option 50: Requested IP Address (our current IP) */
+    opt_len += dhcp_build_option(opt + opt_len, DHCP_OPT_REQ_IP,
+                                  4, iface->ip);
+
+    /* NOTE: NO Option 54 (Server Identifier) — any server can respond */
+
+    /* Option 55: Parameter Request List */
+    uint8_t params[] = { DHCP_OPT_SUBNET_MASK, DHCP_OPT_ROUTER, DHCP_OPT_DNS };
+    opt_len += dhcp_build_option(opt + opt_len, 55,
+                                  (uint8_t)sizeof(params), params);
+
+    /* Option 255: END */
+    opt[opt_len++] = DHCP_OPT_END;
+
+    uint8_t broadcast[4] = { 255, 255, 255, 255 };
+
+    int ret = udp_send(DHCP_CLIENT_PORT, broadcast, DHCP_SERVER_PORT,
+                       pkt, (uint16_t)(sizeof(struct dhcp_hdr) + opt_len));
+    kfree(pkt);
+
+    if (ret < 0) {
+        log_printf(LOG_LEVEL_ERR, "dhcp: failed to send REBIND REQUEST\n");
+        return -1;
+    }
+
+    log_printf(LOG_LEVEL_INFO, "dhcp: REBIND REQUEST sent (broadcast, no server ID)\n");
+    return 0;
+}
+
+/* ================================================================
  * dhcp_configure_interface - Apply DHCP ACK to network interface
  *
  * FIXED (v4.2.2): Extracted from old dhcp_handle_ack() into a
@@ -521,11 +594,14 @@ static int dhcp_try_receive_ack(uint8_t *buf_out, int buf_size, int *len_out) {
  *   DHCP_WAIT_OFFER     - Check for OFFER, handle timeout/retry
  *   DHCP_REQUEST_SENT   - Transition to DHCP_WAIT_ACK
  *   DHCP_WAIT_ACK       - Check for ACK/NAK, handle timeout/retry
- *   DHCP_BOUND          - Check lease expiry, trigger renewal
+ *   DHCP_BOUND          - Check lease expiry, trigger REBIND
+ *   DHCP_REBIND_SENT    - FIXED (v4.2.7): Transition to DHCP_WAIT_REBIND
+ *   DHCP_WAIT_REBIND    - FIXED (v4.2.7): Check for REBIND ACK, handle timeout/retry
  *   DHCP_ERROR          - Wait then retry from start
  *
  * Also handles the existing v4.1.9 lease renewal check when in
- * DHCP_BOUND state.
+ * DHCP_BOUND state, now with REBIND phase (v4.2.7) to prevent
+ * premature IP release.
  * ================================================================ */
 void dhcp_poll(void) {
     /*
@@ -537,13 +613,22 @@ void dhcp_poll(void) {
         if (dhcp_configured && dhcp_lease_expiry != 0) {
             if (perf.uptime_ticks >= dhcp_lease_expiry) {
                 log_printf(LOG_LEVEL_INFO, "dhcp: lease renewal time reached, "
-                           "restarting discovery\n");
+                           "entering REBIND phase\n");
+                /* FIXED (v4.2.7): BUG-DHCP-REBIND — Instead of going directly
+                 * to DHCP_IDLE (which releases the IP address), enter the
+                 * REBINDING state.  This broadcasts a REQUEST to any DHCP
+                 * server, not just the original.  Only if REBIND fails do
+                 * we release the IP and restart from INIT. */
                 dhcp_lease_expiry = 0;
                 dhcp_configured = 0;
-                /* Fall through to restart DHCP from IDLE */
-                dhcp_state = DHCP_IDLE;
+                dhcp_state = DHCP_REBIND_SENT;
                 dhcp_retry_count = 0;
                 dhcp_timeout_ticks = 0;
+                if (dhcp_send_rebind() < 0) {
+                    dhcp_state = DHCP_ERROR;
+                    dhcp_retry_count = 0;
+                    dhcp_timeout_ticks = 0;
+                }
             }
         }
     }
@@ -676,6 +761,84 @@ void dhcp_poll(void) {
     case DHCP_BOUND:
         /* Lease renewal is checked at the top of dhcp_poll() */
         break;
+
+    /*
+     * FIXED (v4.2.7): BUG-DHCP-REBIND — DHCP_REBIND_SENT state.
+     * After sending a broadcast REQUEST (without server ID), transition
+     * to DHCP_WAIT_REBIND to listen for an ACK from any server.
+     */
+    case DHCP_REBIND_SENT:
+        dhcp_state = DHCP_WAIT_REBIND;
+        dhcp_timeout_ticks = 0;
+        break;
+
+    /*
+     * FIXED (v4.2.7): BUG-DHCP-REBIND — DHCP_WAIT_REBIND state.
+     * Non-blocking wait for an ACK from any DHCP server.  If ACK
+     * received, re-apply configuration and go back to DHCP_BOUND.
+     * If timeout, retry rebind (up to DHCP_MAX_RETRIES).  Only if
+     * rebind exhausts all retries do we release the IP and go to
+     * DHCP_ERROR, which will eventually restart from INIT.
+     */
+    case DHCP_WAIT_REBIND: {
+        int timeout = dhcp_get_timeout();
+        uint8_t buf[600];
+        int ack_len = 0;
+
+        int result = dhcp_try_receive_ack(buf, (int)sizeof(buf), &ack_len);
+        if (result == 0) {
+            /* ACK received — re-apply configuration */
+            dhcp_configure_interface(buf, ack_len);
+            dhcp_state = DHCP_BOUND;
+            dhcp_retry_count = 0;
+            dhcp_timeout_ticks = 0;
+            log_printf(LOG_LEVEL_INFO, "dhcp: REBIND successful, lease renewed\n");
+            break;
+        } else if (result == 1) {
+            /* NAK received — give up, go to ERROR */
+            log_printf(LOG_LEVEL_ERR, "dhcp: REBIND NAK received\n");
+            dhcp_state = DHCP_ERROR;
+            dhcp_retry_count = 0;
+            dhcp_timeout_ticks = 0;
+            break;
+        }
+
+        dhcp_timeout_ticks++;
+        if (dhcp_timeout_ticks >= timeout) {
+            if (dhcp_retry_count < DHCP_MAX_RETRIES) {
+                dhcp_retry_count++;
+                log_printf(LOG_LEVEL_INFO,
+                           "dhcp: REBIND timeout, retry %d/%d\n",
+                           dhcp_retry_count, DHCP_MAX_RETRIES);
+                if (dhcp_send_rebind() < 0) {
+                    dhcp_state = DHCP_ERROR;
+                    dhcp_retry_count = 0;
+                    dhcp_timeout_ticks = 0;
+                    break;
+                }
+                dhcp_state = DHCP_REBIND_SENT;
+                dhcp_timeout_ticks = 0;
+            } else {
+                log_printf(LOG_LEVEL_ERR,
+                           "dhcp: REBIND failed after %d retries, "
+                           "releasing IP and restarting discovery\n",
+                           DHCP_MAX_RETRIES);
+                /* Clear the IP and restart from scratch */
+                {
+                    struct net_if *iface = net_get_interface(0);
+                    if (iface) {
+                        memset(iface->ip, 0, 4);
+                        memset(iface->netmask, 0, 4);
+                        memset(iface->gateway, 0, 4);
+                    }
+                }
+                dhcp_state = DHCP_ERROR;
+                dhcp_retry_count = 0;
+                dhcp_timeout_ticks = 0;
+            }
+        }
+        break;
+    }
 
     /*
      * FIXED (v4.2.2): DHCP_ERROR - Wait for a delay, then retry

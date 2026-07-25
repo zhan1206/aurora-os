@@ -63,6 +63,7 @@ typedef enum {
 #define RLIMIT_STACK    3
 #define RLIMIT_NOFILE   7
 #define RLIMIT_AS       9
+#define RLIMIT_NLIMITS  16     /* FIXED (v4.2.7): BUG-PRLIMIT-BOUNDS — max rlimit array size */
 
 /* Forward declaration for linked list */
 struct task_struct;
@@ -128,6 +129,8 @@ struct task_struct {
 
     /* --- Fork state --- */
     int       is_fork_child;   /* 1 if this task is a fresh fork child (returns 0) */
+    /* FIXED (v4.2.7): BUG-VFORK-CLONE — vfork blocks parent until child execve/exit */
+    int       vfork_done;      /* set to 1 when vfork child has execve'd or exited */
 
     /* --- File descriptors --- */
     uintptr_t fd_table[MAX_FDS];
@@ -139,6 +142,8 @@ struct task_struct {
     uint64_t  brk;             /* program break (heap end) for this process */
     uint64_t  mmap_base;       /* next mmap allocation address (ASLR-randomized) */
     struct vm_area *vm_areas;  /* FIXED (v4.1.4): VMA linked list for guard page support (BUG 3.1) */
+    /* FIXED (v4.2.7): BUG-VMA-MERGE-ATOMIC — spinlock protects VMA list from concurrent modifications */
+    int       vma_lock;       /* spinlock for vm_areas linked list */
 
     /* --- Environment variables --- */
     char      env_keys[16][64];   /* environment variable keys */

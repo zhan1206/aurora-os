@@ -1040,6 +1040,11 @@ int fat32_write_lfn(struct fat32_sb_info *sbi, uint32_t dir_cluster,
         uint32_t cluster_idx = offset / cluster_size;
         uint32_t cluster_off = offset % cluster_size;
 
+        /* FIXED (v4.2.7): BUG-FAT32-DIR-EOF — check for end-of-cluster-chain
+         * marker before traversing.  Without this check, traversal can
+         * continue past the end of the chain on corrupted filesystems. */
+        if (cluster >= FAT32_CLUSTER_EOC_MIN) break;
+
         uint32_t target_cluster = cluster;
         for (uint32_t s = 0; s < cluster_idx; s++) {
             uint32_t next = fat32_get_cluster(sbi, target_cluster);
@@ -1810,9 +1815,12 @@ struct super_block *fat32_mount(struct block_device *bdev) {
                sbi->root_cluster, sbi->total_clusters);
 
     /* Optionally cache the FAT into memory */
+    /* FIXED (v4.2.7): BUG-FAT32-OVERFLOW — use uint64_t for the
+     * multiplication to avoid overflow on volumes >2TB where
+     * sectors_per_fat * bytes_per_sector can exceed 4 GiB. */
     {
-        uint32_t fat_bytes = sbi->sectors_per_fat * sbi->bytes_per_sector;
-        sbi->fat_cache = (uint32_t *)kmalloc(fat_bytes);
+        uint64_t fat_bytes = (uint64_t)sbi->sectors_per_fat * sbi->bytes_per_sector;
+        sbi->fat_cache = (uint32_t *)kmalloc((size_t)fat_bytes);
         if (sbi->fat_cache) {
             uint8_t *fat_buf = (uint8_t *)sbi->fat_cache;
             uint32_t sectors_per_read = sbi->bytes_per_sector;
@@ -1828,8 +1836,8 @@ struct super_block *fat32_mount(struct block_device *bdev) {
                 }
             }
             if (sbi->fat_cache)
-                log_printf(LOG_LEVEL_INFO, "fat32: FAT cached (%u bytes)\n",
-                           fat_bytes);
+                log_printf(LOG_LEVEL_INFO, "fat32: FAT cached (%llu bytes)\n",
+                           (unsigned long long)fat_bytes);
         }
     }
 

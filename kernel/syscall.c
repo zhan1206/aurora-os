@@ -385,7 +385,9 @@ static long sys_fstat(int fd, struct kstat *statbuf) {
  * ================================================================ */
 static long sys_mmap(void *addr, size_t length, int prot, int flags,
                      int fd, off_t offset) {
-    (void)addr; (void)fd; (void)offset;
+    (void)fd; (void)offset;
+
+    #define MAP_FIXED 0x10
 
     /* Anonymous mapping only in this phase */
     if (!(flags & 0x20)) { /* MAP_ANONYMOUS = 0x20 */
@@ -397,24 +399,59 @@ static long sys_mmap(void *addr, size_t length, int prot, int flags,
     /* Guard against overflow in page count calculation */
     if (length > SIZE_MAX - PAGE_SIZE + 1) { current->t_errno = ENOMEM; return -1; }
 
+    /*
+     * FIXED (v4.2.7): BUG-MAP-HUGETLB-OVERFLOW
+     * MAP_HUGETLB: align to 2MB boundary.  The alignment code
+     * (addr + 0x1FFFFF) & ~0x1FFFFF can overflow for addresses
+     * near 0xFFFFFFFFFFFFFFFF.  Check for overflow before aligning.
+     */
+    #define MAP_HUGETLB 0x40000
+    #define HUGETLB_MASK 0x1FFFFFULL
+    if (flags & MAP_HUGETLB) {
+        uint64_t a = (uint64_t)(uintptr_t)addr;
+        if (a > UINTPTR_MAX - HUGETLB_MASK) {
+            current->t_errno = EINVAL; return -1;
+        }
+        addr = (void *)(uintptr_t)((a + HUGETLB_MASK) & ~HUGETLB_MASK);
+    }
+
     /* Align length to page size */
     size_t num_pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
 
     /*
-     * FIXED (v4.1.3): Use ASLR-randomized mmap base instead of hardcoded
-     * 0x60000000.  Each call advances mmap_base by the allocation size to
-     * prevent overlapping mappings.  The initial base is randomized once
-     * per process via aslr_randomize_mmap().
-     *
-     * Previously, mmap always returned 0x60000000, making ASLR ineffective
-     * for anonymous mappings and allowing predictable address layouts.
+     * FIXED (v4.2.7): BUG-MAP-FIXED
+     * MAP_FIXED: unmap any existing mappings in the target range before
+     * mapping new pages.  Without this, overlapping mappings can cause
+     * page table corruption and leaked physical pages.
      */
-    if (current->mmap_base == 0) {
-        current->mmap_base = aslr_randomize_mmap();
-        if (current->mmap_base == 0) current->mmap_base = ASLR_MMAP_BASE;
+    if (flags & MAP_FIXED) {
+        uint64_t target_va = (uint64_t)(uintptr_t)addr;
+        for (size_t i = 0; i < num_pages; i++) {
+            uint64_t va = target_va + i * PAGE_SIZE;
+            unmap_page(current->cr3, va);
+        }
     }
-    uint64_t map_va = current->mmap_base;
-    current->mmap_base += num_pages * PAGE_SIZE;
+
+    uint64_t map_va;
+    if (flags & MAP_FIXED) {
+        map_va = (uint64_t)(uintptr_t)addr;
+    } else {
+        /*
+         * FIXED (v4.1.3): Use ASLR-randomized mmap base instead of hardcoded
+         * 0x60000000.  Each call advances mmap_base by the allocation size to
+         * prevent overlapping mappings.  The initial base is randomized once
+         * per process via aslr_randomize_mmap().
+         *
+         * Previously, mmap always returned 0x60000000, making ASLR ineffective
+         * for anonymous mappings and allowing predictable address layouts.
+         */
+        if (current->mmap_base == 0) {
+            current->mmap_base = aslr_randomize_mmap();
+            if (current->mmap_base == 0) current->mmap_base = ASLR_MMAP_BASE;
+        }
+        map_va = current->mmap_base;
+        current->mmap_base += num_pages * PAGE_SIZE;
+    }
 
     /* Reject mappings that would overlap kernel space.
      * User space ends at 0x00007FFFFFFFFFFF; kernel space starts above that. */
@@ -605,6 +642,17 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
         asm volatile ("mov %0, %%gs:200" :: "r"(new_rsp) : "memory");
     }
 
+    /*
+     * FIXED (v4.2.7): BUG-VFORK-CLONE
+     * Wake up the vfork-blocked parent.  The child has replaced its
+     * address space (execve), so the parent can safely resume.
+     */
+    if (current->parent && current->parent->state == TASK_BLOCKED &&
+        current->parent->vfork_done == 0) {
+        current->parent->vfork_done = 1;
+        current->parent->state = TASK_READY;
+    }
+
     /* exec never returns to the caller on success */
     return 0;
 }
@@ -664,17 +712,36 @@ static long wrap_sys_pipe(int *fds) {
  * trapframe, so the child resumes at the same user-space instruction
  * (right after the fork syscall) with the same register state.
  */
-long sys_fork(void) {
+/* CLONE_VFORK flag for vfork semantics */
+#define CLONE_VFORK 0x00004000
+
+long sys_fork(int flags) {
     if (!current) { current->t_errno = ESRCH; return -1; }
 
-    uint64_t child_cr3 = clone_current_pml4();
-    if (!child_cr3) { current->t_errno = ENOMEM; return -1; }
+    /*
+     * FIXED (v4.2.7): BUG-VFORK-CLONE
+     * vfork(): parent is blocked until child calls execve or _exit.
+     * The child shares the parent's address space directly (no COW copy).
+     * This is required for POSIX vfork semantics.
+     */
+    int is_vfork = (flags & CLONE_VFORK) != 0;
+
+    uint64_t child_cr3;
+    if (is_vfork) {
+        /* vfork: child shares parent's page tables directly */
+        child_cr3 = current->cr3;
+    } else {
+        child_cr3 = clone_current_pml4();
+        if (!child_cr3) { current->t_errno = ENOMEM; return -1; }
+    }
 
     /* Create child task that starts from the fork return point */
     struct task_struct *child = create_task(NULL);
     if (!child) {
-        extern void free_pagetable(uint64_t pml4_phys);
-        free_pagetable(child_cr3);
+        if (!is_vfork) {
+            extern void free_pagetable(uint64_t pml4_phys);
+            free_pagetable(child_cr3);
+        }
         current->t_errno = ENOMEM; return -1;
     }
 
@@ -751,6 +818,23 @@ long sys_fork(void) {
 
     /* FIXED (v4.1.4): Clone parent's VMAs to child (BUG 3.1) */
     vma_clone(current, child);
+
+    /*
+     * FIXED (v4.2.7): BUG-VFORK-CLONE
+     * vfork: block parent until child calls execve or _exit.
+     * The child runs in the parent's address space, so the parent
+     * must not be scheduled until the child releases the address
+     * space (via execve) or exits.
+     */
+    if (is_vfork) {
+        current->vfork_done = 0;
+        child->vfork_done = 0;
+        current->state = TASK_BLOCKED;
+        schedule();
+        /* Parent resumes here after child has execve'd or exited.
+         * The child's vfork_done has been set to 1 by execve/exit. */
+        current->vfork_done = 1;
+    }
 
     return child->pid;  /* parent gets child PID */
 }
@@ -1854,9 +1938,11 @@ static long sys_getpgid(int pid) {
     }
     if (!t) { current->t_errno = ESRCH; return -1; }
     /* Simplified: pgid = pid for now */
+    /* FIXED (v4.2.7): BUG-GETPGID-UAF — save pid before task_put frees task */
+    int pgid = t->pid;
     /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
     if (pid != 0) task_put(t);
-    return t->pid;
+    return pgid;
 }
 
 /* ================================================================
@@ -3125,6 +3211,10 @@ static long sys_faccessat(int dirfd, const char *path, int mode, int flags) {
 static long sys_prlimit64(int pid, int resource,
                           const struct rlimit *new_limit,
                           struct rlimit *old_limit) {
+    /* FIXED (v4.2.7): BUG-PRLIMIT-BOUNDS — validate resource index */
+    if (resource < 0 || resource >= RLIMIT_NLIMITS) {
+        current->t_errno = EINVAL; return -1;
+    }
     if (pid != 0 && pid != current->pid) {
         current->t_errno = ESRCH; return -1;
     }
@@ -3230,7 +3320,7 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
         case SYS_SIGACTION: ret = wrap_sys_sigaction((int)a1, (const struct sigaction *)a2, (struct sigaction *)a3); break;
         case SYS_SIGRETURN: ret = wrap_sys_sigreturn(); break;
         case SYS_PIPE:    ret = wrap_sys_pipe((int *)a1); break;
-        case SYS_FORK:    ret = sys_fork(); break;
+        case SYS_FORK:    ret = sys_fork((int)a1); break;
         case SYS_UNAME:   ret = sys_uname((struct utsname *)a1); break;
         case SYS_TIMES:   ret = sys_times((struct tms *)a1); break;
         case SYS_GETCWD:  ret = sys_getcwd((char *)a1, (size_t)a2); break;
