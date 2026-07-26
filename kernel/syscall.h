@@ -85,6 +85,8 @@ enum {
     SYS_GETPPID   = 110,
     SYS_SETSID    = 112,
     SYS_GETPGID   = 121,
+    /* STUB (v4.2.8): Process control */
+    SYS_PRCTL      = 157,
     /* POSIX (v4.2.6): UID/GID management */
     SYS_SETRESUID  = 117,
     SYS_GETRESUID  = 118,

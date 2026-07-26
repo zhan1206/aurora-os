@@ -28,8 +28,9 @@ with open(inp, 'rb') as f:
 
 # If output exists, append array and add registration into embed_init
 if os.path.exists(out):
+    # FIXED (v4.2.8): CI-EMBED-BINARY — use binary append mode to avoid line-ending issues
     # Append new array
-    with open(out, 'a') as f:
+    with open(out, 'ab') as f:
         f.write('\nstatic const unsigned char %s_data[] = {' % varname)
         for i, b in enumerate(data):
             if i % 12 == 0:

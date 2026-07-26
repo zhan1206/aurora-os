@@ -7,6 +7,7 @@
 #include "string.h"
 #include "../mem.h"
 #include "../aslr.h"
+#include "../sched.h"      /* FIXED (v4.2.8): BUG-DNS-BUSY — schedule() */
 #include <stdint.h>
 
 /* Byte order conversion */
@@ -206,6 +207,10 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
     int retry;
 
     for (retry = 0; retry < 30; retry++) {
+        /* FIXED (v4.2.8): BUG-DNS-BUSY — Yield CPU to other tasks
+         * and poll for network packets instead of busy-looping.
+         * Without this, the DNS query blocks the entire kernel. */
+        schedule();
         net_poll();
 
         int rx_len = udp_recvfrom(DNS_SRC_PORT, rx_buf, (int)sizeof(rx_buf),

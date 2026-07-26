@@ -180,11 +180,17 @@ int module_load(const char *path) {
     }
 
     /* ================================================================
-     * Module signature verification (FIXED v4.0.6)
+     * FIXED (v4.2.8): SEC-MODULE — Module signature verification.
      *
-     * When MODULE_SIGN_CHECK is enabled, verify the module's signature
-     * before any ELF parsing. This prevents loading of unsigned or
-     * tampered modules.
+     * NOTE: Current module signature verification uses XOR hash with a
+     * hardcoded key. This is a placeholder and does NOT provide real
+     * cryptographic security. A proper RSA/ECDSA implementation is
+     * needed for production use.
+     *
+     * Signature verification is currently OPTIONAL and gated by
+     * module_sign_is_enabled().  By default, unsigned modules are
+     * accepted.  A future hardening step should make signature
+     * verification mandatory (CONFIG_MODULE_SIG_FORCE).
      * ================================================================ */
     if (module_sign_is_enabled()) {
         size_t file_size = f->inode->size;
@@ -522,10 +528,19 @@ int module_load(const char *path) {
             uint32_t r_type   = ELF64_R_TYPE(r_info);
             uint32_t r_sym    = ELF64_R_SYM(r_info);
 
-            /* Validate r_offset is within the module's allocated memory */
+            /* FIXED (v4.2.8): SEC-MODULE — bounds check on relocation offset.
+             * A malicious ELF can set r_offset to point outside the
+             * allocated module memory, causing arbitrary kernel writes.
+             * Also check (target_base + r_offset) for overflow. */
             if (r_offset >= total_size) {
-                log_printf(LOG_LEVEL_WARN, "module_load: r_offset %llu out of bounds (module size %zu)\n",
+                log_printf(LOG_LEVEL_ERR, "module_load: relocation r_offset %llu out of bounds (module size %zu)\n",
                            (unsigned long long)r_offset, total_size);
+                relocate_errors++;
+                continue;
+            }
+            if (target_base + r_offset < target_base) {
+                log_printf(LOG_LEVEL_ERR, "module_load: relocation address overflow (base=0x%llx, offset=%llu)\n",
+                           (unsigned long long)target_base, (unsigned long long)r_offset);
                 relocate_errors++;
                 continue;
             }

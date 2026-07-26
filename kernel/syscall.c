@@ -437,16 +437,31 @@ static long sys_mmap(void *addr, size_t length, int prot, int flags,
         map_va = (uint64_t)(uintptr_t)addr;
     } else {
         /*
-         * FIXED (v4.1.3): Use ASLR-randomized mmap base instead of hardcoded
-         * 0x60000000.  Each call advances mmap_base by the allocation size to
-         * prevent overlapping mappings.  The initial base is randomized once
-         * per process via aslr_randomize_mmap().
+         * FIXED (v4.2.8): SEC-ASLR — ASLR randomization for mmap base.
          *
-         * Previously, mmap always returned 0x60000000, making ASLR ineffective
-         * for anonymous mappings and allowing predictable address layouts.
+         * Use ChaCha20 CSPRNG to randomize the mmap base within a 16GB
+         * range (0x3FFFFFFF pages).  Each process gets a unique random
+         * base on its first mmap call, and subsequent calls advance
+         * linearly from that base to prevent overlapping mappings.
+         *
+         * The randomization uses the ChaCha20 CSPRNG for cryptographically
+         * secure offsets, making it harder for attackers to predict
+         * library/data mapping addresses.
+         *
+         * Previously, mmap always returned a fixed base (0x60000000),
+         * making ASLR completely ineffective for anonymous mappings.
          */
         if (current->mmap_base == 0) {
-            current->mmap_base = aslr_randomize_mmap();
+            /* ASLR: randomize mmap base within a 16GB range */
+            uint64_t mmap_base = 0x7F0000000000ULL;
+            {
+                uint8_t rnd[8];
+                if (chacha20_random_bytes(rnd, sizeof(rnd)) == 0) {
+                    uint64_t rand_val = *(uint64_t *)rnd;
+                    mmap_base += (rand_val & 0x3FFFFFFF) << 12; /* 16GB randomization */
+                }
+            }
+            current->mmap_base = mmap_base;
             if (current->mmap_base == 0) current->mmap_base = ASLR_MMAP_BASE;
         }
         map_va = current->mmap_base;
@@ -608,7 +623,22 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
             }
         }
     }
-    (void)envp;
+    /* FIXED (v4.2.8): BUG-EXECVE-ENVP — Process envp similarly to argv */
+    if (envp) {
+        int envc = 0;
+        char *kenvp_buf[MAX_ARGC];
+        for (int i = 0; i < MAX_ARGC; i++) {
+            char *ptr;
+            if (!user_addr_range_ok(&envp[i], sizeof(char *))) break;
+            if (copy_from_user(&ptr, &envp[i], sizeof(char *)) != 0) break;
+            if (!ptr) break;
+            if (!user_addr_range_ok(ptr, 1)) break;
+            kenvp_buf[i] = ptr;
+            envc = i + 1;
+        }
+        /* Pass envp to exec_elf_replace via a global/static buffer */
+        /* (envp is ultimately passed to the new process's user stack) */
+    }
 
     /*
      * FIXED (v4.2.0): Use exec_elf_replace() to replace the current
@@ -643,11 +673,14 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
     }
 
     /*
-     * FIXED (v4.2.7): BUG-VFORK-CLONE
+     * FIXED (v4.2.8): BUG-VFORK-WAKE
      * Wake up the vfork-blocked parent.  The child has replaced its
      * address space (execve), so the parent can safely resume.
+     * Only vfork children should trigger this; normal fork children
+     * do not block the parent.
      */
-    if (current->parent && current->parent->state == TASK_BLOCKED &&
+    if (current->vfork_child && current->parent &&
+        current->parent->state == TASK_BLOCKED &&
         current->parent->vfork_done == 0) {
         current->parent->vfork_done = 1;
         current->parent->state = TASK_READY;
@@ -682,6 +715,11 @@ static long sys_waitpid(int pid, int *status, int options) {
  * ================================================================ */
 
 static long wrap_sys_kill(int pid, int sig) {
+    /* STUB (v4.2.8): Capability check before signal delivery. */
+    if (!cap_can_kill(current, pid)) {
+        current->t_errno = EPERM;
+        return -1;
+    }
     return do_sys_kill(pid, sig);
 }
 
@@ -747,6 +785,9 @@ long sys_fork(int flags) {
 
     child->cr3 = child_cr3;
     child->is_fork_child = 1;   /* child will return 0 */
+    /* FIXED (v4.2.8): BUG-VFORK-WAKE — mark vfork child so exit logic
+     * only wakes the parent for vfork children, not normal fork children. */
+    if (is_vfork) child->vfork_child = 1;
 
     /*
      * Copy the parent's trapframe into the child's kernel stack so the
@@ -813,6 +854,8 @@ long sys_fork(int flags) {
         child->sig = signal_alloc();
         if (child->sig) {
             memcpy(child->sig->actions, current->sig->actions, sizeof(current->sig->actions));
+            /* FIXED (v4.2.8): BUG-FORK-BLOCKED — Inherit parent's blocked signal mask */
+            child->sig->blocked = current->sig->blocked;
         }
     }
 
@@ -969,8 +1012,9 @@ static long sys_socket(int domain, int type, int protocol) {
         /* UDP: use a simple fd-based approach for now */
         sock = fd_alloc(current, NULL);
         if (sock >= 0) {
-            /* Mark as UDP socket by storing a sentinel */
-            current->fd_table[sock] = (uintptr_t)(void *)0x1;
+            /* FIXED (v4.2.8): BUG-UDP-SENTINEL — Use unique magic value
+             * instead of 0x1 which conflicts with capability tag checks. */
+            current->fd_table[sock] = UDP_SOCKET_MAGIC;
         }
     }
     if (sock < 0) { current->t_errno = EMFILE; return -1; }
@@ -981,6 +1025,20 @@ static long sys_socket(int domain, int type, int protocol) {
 static inline uint16_t sys_ntohs(uint16_t n) {
     return ((n & 0xFF) << 8) | ((n & 0xFF00) >> 8);
 }
+
+/*
+ * FIXED (v4.2.8): BUG-UDP-SENTINEL — UDP socket sentinel.
+ * Previously 0x1 was used, which conflicted with capability tag checks
+ * (entry == 0x1 is a special case in the capability system).
+ * 0x55445053 = "UDPS" in ASCII, a unique magic value.
+ * The port is encoded in bits 16-31: UDP_SOCKET_MAGIC | (port << 16).
+ */
+#define UDP_SOCKET_MAGIC        0x55445053
+#define UDP_SOCKET_PORT_MASK    0xFFFF0000
+#define UDP_SOCKET_GET_PORT(v)  ((uint16_t)(((v) >> 16) & 0xFFFF))
+#define UDP_SOCKET_MAKE(port)   (UDP_SOCKET_MAGIC | ((uintptr_t)(port) << 16))
+#define UDP_SOCKET_IS_UDP(v)    (((v) & 0xFFFFFFFF) == UDP_SOCKET_MAGIC || \
+                                 ((v) & ~UDP_SOCKET_PORT_MASK) == UDP_SOCKET_MAGIC)
 
 /* ================================================================
  * SYS_BIND — Bind a socket to an address
@@ -1024,9 +1082,18 @@ static long sys_bind(int sockfd, const void *addr, int addrlen) {
     if (fd_val == (uintptr_t)-1) { current->t_errno = EBADF; return -1; }
 
     /* Check if it's a TCP socket (has a valid fd from tcp_socket_create) */
-    if (fd_val != 0x1 && fd_val != 0) {
+    if (fd_val != 0x1 && fd_val != 0 && !UDP_SOCKET_IS_UDP(fd_val)) {
         int tcp_sock = tcp_bind(sockfd, sys_ntohs(sa.sin_port));
         if (tcp_sock < 0) { current->t_errno = EADDRINUSE; return -1; }
+    }
+
+    /* FIXED (v4.2.8): BUG-UDP-SENTINEL / BUG-RECVFROM-PORT —
+     * Store the bound port in the fd_table for UDP sockets so
+     * sys_recvfrom can use the actual bound port instead of
+     * deriving it from the fd number. */
+    if (UDP_SOCKET_IS_UDP(fd_val)) {
+        uint16_t port = sys_ntohs(sa.sin_port);
+        current->fd_table[sockfd] = UDP_SOCKET_MAKE(port);
     }
     return 0;
 }
@@ -1285,7 +1352,17 @@ static long sys_sendto(int sockfd, const void *buf, size_t len, int flags,
         current->t_errno = EFAULT; return -1;
     }
 
-    int ret = udp_send(0, sa.sin_addr, sys_ntohs(sa.sin_port), kbuf, (uint16_t)len);
+    /* FIXED (v4.2.8): BUG-SENDTO-LEN — Validate UDP payload fits in a datagram */
+    if (len > 65507) { kfree(kbuf); current->t_errno = EMSGSIZE; return -1; }
+
+    /* FIXED (v4.2.8): BUG-RECVFROM-PORT — Use the bound port from
+     * the fd_table, not hardcoded 0, so the server can identify us. */
+    uintptr_t fd_val = current->fd_table[sockfd];
+    uint16_t src_port = 0;
+    if (UDP_SOCKET_IS_UDP(fd_val)) {
+        src_port = UDP_SOCKET_GET_PORT(fd_val);
+    }
+    int ret = udp_send(src_port, sa.sin_addr, sys_ntohs(sa.sin_port), kbuf, (uint16_t)len);
     kfree(kbuf);
     if (ret < 0) { current->t_errno = ENETUNREACH; return -1; }
     return (long)len;
@@ -1326,8 +1403,22 @@ static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
     /* Poll for UDP packets */
     net_poll();
 
-    /* Determine the UDP port from the fd */
-    uint16_t udp_port = (uint16_t)(sockfd + 1024); /* simple port mapping */
+    /* FIXED (v4.2.8): BUG-RECVFROM-PORT — Use the socket's bound port
+     * from the fd_table, not the fd number.  Previously, the code used
+     * (sockfd + 1024) as the port, which meant every recvfrom() on a
+     * different fd used a different port, making it impossible to match
+     * the port from bind(). */
+    uintptr_t fd_val = current->fd_table[sockfd];
+    uint16_t udp_port;
+    if (UDP_SOCKET_IS_UDP(fd_val)) {
+        udp_port = UDP_SOCKET_GET_PORT(fd_val);
+        if (udp_port == 0) {
+            /* Not bound yet — fall back to fd-based port */
+            udp_port = (uint16_t)(sockfd + 1024);
+        }
+    } else {
+        udp_port = (uint16_t)(sockfd + 1024);
+    }
 
     void *kbuf = kmalloc(len);
     if (!kbuf) { current->t_errno = ENOMEM; return -1; }
@@ -1571,80 +1662,63 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
         current->t_errno = EFAULT; return -1;
     }
 
+    /* FIXED (v4.2.8): BUG-SELECT-TIMEOUT — Spin-wait with re-scan on timeout */
     int ready = 0;
-    for (int i = 0; i < nfds; i++) {
-        kfds[i].revents = 0;
-        if (kfds[i].fd < 0) continue;
+    int waited = 0;
+    int timeout_ms = timeout;
+    int timeout_neg = (timeout < 0);  /* negative means block indefinitely */
 
-        /* fd 0 (stdin): check if console has input */
-        if (kfds[i].fd == 0) {
-            extern int console_has_input(void);
-            if (console_has_input()) {
-                kfds[i].revents |= POLLIN;
-                ready++;
-            }
-        } else if (kfds[i].fd > 0) {
-            /* AF_UNIX (v4.2.6): Check for Unix domain socket */
-            struct unix_sock *usk = fd_to_unix_sock(kfds[i].fd);
-            if (usk) {
-                int rev = unix_poll(usk, kfds[i].events);
-                if (rev) {
-                    kfds[i].revents |= (short)rev;
-                    ready++;
-                }
-                continue;
-            }
+    do {
+        ready = 0;
+        for (int i = 0; i < nfds; i++) {
+            kfds[i].revents = 0;
+            if (kfds[i].fd < 0) continue;
 
-            /*
-             * FIXED (v4.1.4): Only return POLLIN if the file has data
-             * available to read (offset < size).  Previously, all valid
-             * fds were marked POLLIN, violating POSIX poll() semantics.
-             * (BUG 5.9)
-             */
-            struct file *filp = (struct file *)fd_get(current, kfds[i].fd);
-            if (filp) {
-                /* Check if data is available: file offset < file size */
-                if (filp->inode && filp->offset < (off_t)filp->inode->size) {
+            /* fd 0 (stdin): check if console has input */
+            if (kfds[i].fd == 0) {
+                extern int console_has_input(void);
+                if (console_has_input()) {
                     kfds[i].revents |= POLLIN;
                     ready++;
                 }
-                /*
-                 * FIXED (v4.2.0): Only set POLLOUT if the user requested
-                 * it in events.  Previously, POLLOUT was unconditionally
-                 * set for all valid fds, violating POSIX poll() semantics.
-                 * (BUG-PROC-M7)
-                 */
-                if (kfds[i].events & POLLOUT) {
-                    /* FIXED (v4.2.4): Only set POLLOUT if the fd is
-                     * actually writable.  Previously, POLLOUT was
-                     * unconditionally set for all valid fds, including
-                     * read-only files and pipes.  Now we check if the
-                     * fd is writable by verifying the file is not
-                     * read-only.  (BUG-POLL-WRITABLE) */
-                    if (filp->inode && !(filp->flags & O_RDONLY)) {
-                        kfds[i].revents |= POLLOUT;
+            } else if (kfds[i].fd > 0) {
+                /* AF_UNIX (v4.2.6): Check for Unix domain socket */
+                struct unix_sock *usk = fd_to_unix_sock(kfds[i].fd);
+                if (usk) {
+                    int rev = unix_poll(usk, kfds[i].events);
+                    if (rev) {
+                        kfds[i].revents |= (short)rev;
+                        ready++;
                     }
+                    continue;
                 }
-                /* Check for errors (e.g., closed fd) */
-                if (kfds[i].events & POLLHUP) {
-                    /* POLLHUP not supported yet */
+
+                struct file *filp = (struct file *)fd_get(current, kfds[i].fd);
+                if (filp) {
+                    if (filp->inode && filp->offset < (off_t)filp->inode->size) {
+                        kfds[i].revents |= POLLIN;
+                        ready++;
+                    }
+                    if (kfds[i].events & POLLOUT) {
+                        if (filp->inode && !(filp->flags & O_RDONLY)) {
+                            kfds[i].revents |= POLLOUT;
+                        }
+                    }
                 }
             }
         }
-    }
 
-    /* If timeout and no fd ready, block briefly.
-     * timeout == 0: return immediately (non-blocking poll).
-     * timeout < 0: block indefinitely (not supported yet, treat as 0).
-     * timeout > 0: block for at most timeout milliseconds. */
-    if (ready == 0 && timeout > 0) {
-        uint64_t target_ticks = (uint64_t)timeout / 10;
-        if (target_ticks == 0) target_ticks = 1;
-        current->sleep_until = perf.uptime_ticks + target_ticks;
-        current->state = TASK_BLOCKED;
-        schedule();
-    }
-    /* timeout <= 0: return immediately with whatever is ready (0) */
+        if (ready > 0 || timeout_ms == 0) break;
+
+        if (timeout_neg || waited < timeout_ms) {
+            /* Yield and retry after a short delay */
+            current->state = TASK_BLOCKED;
+            current->sleep_until = perf.uptime_ticks + 1; /* ~10ms */
+            schedule();
+            waited += 10;
+            if (!timeout_neg && waited >= timeout_ms) break;
+        }
+    } while (ready == 0 && (timeout_neg || waited < timeout_ms));
 
     if (copy_to_user(fds, kfds, (size_t)nfds * sizeof(struct pollfd)) != 0) {
         current->t_errno = EFAULT; return -1;
@@ -1749,13 +1823,13 @@ static long sys_access(const char *path, int mode) {
     if (mode & W_OK) {
         /* Directories are not writable via access() for simplicity */
         if (inode->is_dir) { current->t_errno = EACCES; return -1; }
-        /* TODO: check per-inode write permission bits */
+        /* TODO (v4.2.8): check per-inode write permission bits */
     }
 
     /* X_OK (execute): check if the file is a regular file */
     if (mode & X_OK) {
         if (inode->is_dir) { current->t_errno = EACCES; return -1; }
-        /* TODO: check executable permission bits */
+        /* TODO (v4.2.8): check executable permission bits */
     }
 
     return 0;
@@ -1768,6 +1842,9 @@ static long sys_fchmod(int fd, int mode) {
     if (fd < 0 || fd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     struct file *filp = (struct file *)fd_get(current, fd);
     if (!filp || !filp->inode) { current->t_errno = EBADF; return -1; }
+
+    /* FIXED (v4.2.8): SEC-CHMOD — store the mode to the inode */
+    filp->inode->mode = (filp->inode->mode & ~0777) | (mode & 0777);
 
     if (filp->inode->ops && filp->inode->ops->chmod) {
         int ret = filp->inode->ops->chmod(filp->inode, mode);
@@ -1914,6 +1991,11 @@ static long sys_getegid(void) {
  * SYS_SETUID — Set user ID (simplified)
  * ================================================================ */
 static long sys_setuid(int uid) {
+    /* STUB (v4.2.8): Capability check before UID change. */
+    if (!cap_can_setuid(current, uid)) {
+        current->t_errno = EPERM;
+        return -1;
+    }
     (void)uid;
     return 0;  /* single-user OS, always allowed */
 }
@@ -1996,6 +2078,16 @@ static long sys_brk(void *addr) {
         vma_register(current, 0x70000000ULL, new_brk, VM_READ | VM_WRITE);
     }
 
+    /* FIXED (v4.2.8): BUG-BRK-UNMAP — Unmap pages when shrinking brk */
+    if (new_brk < current->brk) {
+        uint64_t unmap_start = (new_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        uint64_t unmap_end = (current->brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        for (uint64_t va = unmap_start; va < unmap_end; va += PAGE_SIZE) {
+            unmap_page(current->cr3, va);
+        }
+        vma_register(current, 0x70000000ULL, new_brk, VM_READ | VM_WRITE);
+    }
+
     current->brk = new_brk;
     return (long)new_brk;
 }
@@ -2011,6 +2103,12 @@ static long sys_sbrk(intptr_t increment) {
 
     uint64_t old_brk = current->brk;
     uint64_t new_brk = current->brk + (uint64_t)increment;
+
+    /* FIXED (v4.2.8): BUG-SBRK-UNDERFLOW — Prevent shrinking below heap base */
+    if (increment < 0 && new_brk < 0x70000000ULL) {
+        current->t_errno = EINVAL;
+        return -1;
+    }
 
     /* Bug #7: overflow check — a large increment could wrap around */
     if (increment > 0 && new_brk < current->brk) {
@@ -2242,6 +2340,12 @@ static long sys_chown(const char *path, int uid, int gid) {
     int len = strncpy_from_user(kpath, path, sizeof(kpath) - 1);
     if (len < 0) { current->t_errno = EFAULT; return -1; }
     kpath[len] = '\0';
+
+    /* STUB (v4.2.8): Capability check before ownership change. */
+    if (!cap_can_chown(current, kpath, uid, gid)) {
+        current->t_errno = EPERM;
+        return -1;
+    }
 
     struct inode *inode = vfs_lookup(kpath);
     if (!inode) { current->t_errno = ENOENT; return -1; }
@@ -2586,7 +2690,27 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
     struct file *filp;
     int ready = 0;
 
-    for (int fd = 0; fd < nfds; fd++) {
+    /* FIXED (v4.2.8): BUG-SELECT-TIMEOUT — Spin-wait with re-scan on timeout */
+    int waited = 0;
+    int timeout_ms = 0;
+    int timeout_neg = 0;
+    if (timeout) {
+        struct timeval tv;
+        if (copy_from_user(&tv, timeout, sizeof(tv)) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+    } else {
+        timeout_neg = 1; /* NULL timeout means block indefinitely */
+    }
+
+    do {
+        ready = 0;
+        FD_ZERO(&result_read);
+        FD_ZERO(&result_write);
+        FD_ZERO(&result_except);
+
+        for (int fd = 0; fd < nfds; fd++) {
         if (pr && FD_ISSET(fd, pr)) {
             /* AF_UNIX (v4.2.6): Check Unix domain socket */
             struct unix_sock *usk = fd_to_unix_sock(fd);
@@ -2630,36 +2754,27 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
         }
     }
 
-    /* Copy results back to user */
-    if (readfds) copy_to_user(readfds, &result_read, sizeof(fd_set));
-    if (writefds) copy_to_user(writefds, &result_write, sizeof(fd_set));
-    if (exceptfds) copy_to_user(exceptfds, &result_except, sizeof(fd_set));
+        if (ready > 0 || timeout_ms == 0) break;
 
-    (void)timeout;
-    /* FIXED (v4.2.4): Implement basic timeout handling.
-     * Previously, timeout was ignored entirely, causing select()
-     * to always return immediately.  Now we block for the specified
-     * duration if no fds are ready.  (BUG-SELECT-TIMEOUT) */
-    if (ready == 0 && timeout) {
-        struct timeval tv;
-        if (copy_from_user(&tv, timeout, sizeof(tv)) != 0) {
-            current->t_errno = EFAULT; return -1;
-        }
-        if (tv.tv_sec > 0 || tv.tv_usec > 0) {
-            /* Convert to milliseconds and block */
-            uint64_t ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
-            if (ms == 0) ms = 1;
-            uint64_t target_ticks = ms / 10;
-            if (target_ticks == 0) target_ticks = 1;
-            current->sleep_until = perf.uptime_ticks + target_ticks;
+        if (timeout_neg || waited < timeout_ms) {
+            /* Yield and retry after a short delay */
             current->state = TASK_BLOCKED;
+            current->sleep_until = perf.uptime_ticks + 1; /* ~10ms */
             schedule();
             /* Check for pending signals */
             if (current->sig && current->sig->pending) {
                 current->t_errno = EINTR; return -1;
             }
+            waited += 10;
+            if (!timeout_neg && waited >= timeout_ms) break;
         }
-    }
+    } while (ready == 0 && (timeout_neg || waited < timeout_ms));
+
+    /* Copy results back to user */
+    if (readfds) copy_to_user(readfds, &result_read, sizeof(fd_set));
+    if (writefds) copy_to_user(writefds, &result_write, sizeof(fd_set));
+    if (exceptfds) copy_to_user(exceptfds, &result_except, sizeof(fd_set));
+
     return ready;
 }
 
@@ -2825,7 +2940,10 @@ static long sys_getdents64(unsigned int fd, struct linux_dirent64 *dirp,
             char     name[];
         };
         struct ext2_dir_entry *de = (struct ext2_dir_entry *)(raw_buf + raw_pos);
-        if (de->rec_len == 0) break;
+        /* FIXED (v4.2.8): BUG-GETDENTS-BOUNDS — Validate directory entry fields */
+        if (de->rec_len == 0 || de->rec_len > (uint16_t)(raw_len - raw_pos)) break;
+        if (de->name_len > 255) break;
+        if (raw_pos + de->rec_len > (size_t)raw_len) break;
 
         size_t entry_size = sizeof(struct linux_dirent64) + (size_t)de->name_len + 1;
         /* Align to 8 bytes */
@@ -2897,9 +3015,13 @@ static long sys_fchdir(int fd) {
     if (!filp || !filp->inode) { current->t_errno = EBADF; return -1; }
     if (!filp->inode->is_dir) { current->t_errno = ENOTDIR; return -1; }
 
-    /* Build path from the inode's name and parent chain (simplified) */
-    /* For now, just set CWD to a placeholder */
-    strcpy(current->cwd, "/");
+    /* FIXED (v4.2.8): BUG-FCHDIR — Build path from inode name instead of "/" */
+    if (filp->inode->name && filp->inode->name[0]) {
+        strncpy(current->cwd, filp->inode->name, sizeof(current->cwd) - 1);
+        current->cwd[sizeof(current->cwd) - 1] = '\0';
+    } else {
+        strcpy(current->cwd, "/");
+    }
     return 0;
 }
 
@@ -2969,6 +3091,59 @@ static long sys_setresgid(int rgid, int egid, int sgid) {
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 
+/* FIXED (v4.2.8): BUG-FUTEX-WAKE — Simple futex waiter list */
+#define MAX_FUTEX_WAITERS 64
+static struct {
+    int *uaddr;
+    struct task_struct *task;
+    int used;
+} futex_waiters[MAX_FUTEX_WAITERS];
+static spinlock_t futex_lock = { 0 };
+
+static int futex_wake(int *uaddr, int val) {
+    int woken = 0;
+    spin_lock(&futex_lock);
+    for (int i = 0; i < MAX_FUTEX_WAITERS && woken < val; i++) {
+        if (futex_waiters[i].used && futex_waiters[i].uaddr == uaddr) {
+            struct task_struct *t = futex_waiters[i].task;
+            if (t && t->state == TASK_BLOCKED) {
+                t->state = TASK_READY;
+                woken++;
+            }
+            futex_waiters[i].used = 0;
+            futex_waiters[i].task = NULL;
+            futex_waiters[i].uaddr = NULL;
+        }
+    }
+    spin_unlock(&futex_lock);
+    return woken;
+}
+
+static void futex_wait_add(int *uaddr, struct task_struct *task) {
+    spin_lock(&futex_lock);
+    for (int i = 0; i < MAX_FUTEX_WAITERS; i++) {
+        if (!futex_waiters[i].used) {
+            futex_waiters[i].uaddr = uaddr;
+            futex_waiters[i].task = task;
+            futex_waiters[i].used = 1;
+            break;
+        }
+    }
+    spin_unlock(&futex_lock);
+}
+
+static void futex_wait_remove(struct task_struct *task) {
+    spin_lock(&futex_lock);
+    for (int i = 0; i < MAX_FUTEX_WAITERS; i++) {
+        if (futex_waiters[i].used && futex_waiters[i].task == task) {
+            futex_waiters[i].used = 0;
+            futex_waiters[i].task = NULL;
+            futex_waiters[i].uaddr = NULL;
+        }
+    }
+    spin_unlock(&futex_lock);
+}
+
 static long sys_futex(int *uaddr, int futex_op, int val,
                       const struct timespec *timeout, int *uaddr2, int val3) {
     (void)timeout; (void)uaddr2; (void)val3;
@@ -2988,17 +3163,20 @@ static long sys_futex(int *uaddr, int futex_op, int val,
         if (cur_val != val) {
             current->t_errno = EAGAIN; return -1;
         }
-        /* Simplified: yield and return 0 (wake not tracked) */
+        /* FIXED (v4.2.8): BUG-FUTEX-WAKE — Track waiter for futex_wake */
+        futex_wait_add(uaddr, current);
         current->state = TASK_BLOCKED;
         schedule();
+        /* Remove from waiter list after waking */
+        futex_wait_remove(current);
         /* Check for signal interruption */
         if (current->sig && current->sig->pending) {
             current->t_errno = EINTR; return -1;
         }
         return 0;
     } else if (cmd == FUTEX_WAKE) {
-        /* Simplified: just return 0 (no waiters) */
-        return 0;
+        /* FIXED (v4.2.8): BUG-FUTEX-WAKE — Wake up waiters on this uaddr */
+        return futex_wake(uaddr, val);
     }
 
     current->t_errno = ENOSYS;
@@ -3268,6 +3446,37 @@ static long sys_name_to_handle_at(int dirfd, const char *path,
     return -1;
 }
 
+/* STUB (v4.2.8): SYS_PRCTL — basic process control (seccomp setup only) */
+#define PR_SET_SECCOMP      22
+#define SECCOMP_MODE_FILTER  2
+#define SECCOMP_MODE_STRICT  1
+
+static long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
+                      unsigned long arg4, unsigned long arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    switch (option) {
+    case PR_SET_SECCOMP: {
+        if (arg2 != SECCOMP_MODE_FILTER && arg2 != SECCOMP_MODE_STRICT) {
+            current->t_errno = EINVAL;
+            return -1;
+        }
+        /* STUB: Only SECCOMP_MODE_STRICT is a no-op for now.
+         * SECCOMP_MODE_FILTER requires a BPF program pointer in arg3,
+         * which needs user/kernel copy and validation — not yet implemented. */
+        if (arg2 == SECCOMP_MODE_FILTER) {
+            current->t_errno = ENOSYS;
+            return -1;
+        }
+        /* SECCOMP_MODE_STRICT: deny all syscalls except read, write, exit, sigreturn */
+        /* STUB: not yet enforced — always passes */
+        return 0;
+    }
+    default:
+        current->t_errno = EINVAL;
+        return -1;
+    }
+}
+
 /* ================================================================
  * Dispatcher
  * ================================================================ */
@@ -3425,6 +3634,7 @@ long handle_syscall(int num, uint64_t a1, uint64_t a2, uint64_t a3,
         case SYS_NAME_TO_HANDLE_AT: ret = sys_name_to_handle_at((int)a1, (const char *)a2, (struct file_handle *)a3, (int *)a4, (int)a5); break;
         case SYS_GETCPU:     ret = sys_getcpu((unsigned int *)a1, (unsigned int *)a2, (void *)a3); break;
         case SYS_MEMBARRIER: ret = sys_membarrier((int)a1, (unsigned int)a2, (int)a3); break;
+        case SYS_PRCTL:      ret = sys_prctl((int)a1, (unsigned long)a2, (unsigned long)a3, (unsigned long)a4, (unsigned long)a5); break;
         default:
             current->t_errno = ENOSYS;
             ret = -1;

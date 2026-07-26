@@ -17,6 +17,12 @@
  *     argument values (e.g., only allow SYS_write to fd=1).  (H-29)
  *   - Modified seccomp_check() to accept syscall arguments for BPF
  *     validation.  Backward compatible: args may be NULL for bitmap-only.
+ *
+ * STUB (v4.2.8): BPF engine and filter framework are fully implemented,
+ * but there is no userspace interface to install filters.  The seccomp
+ * check in handle_syscall() always passes because no task has a filter
+ * installed.  A SYS_PRCTL handler (PR_SET_SECCOMP) is needed to allow
+ * userspace to set seccomp filters.  See syscall.c for the prctl stub.
  */
 
 #include "seccomp.h"

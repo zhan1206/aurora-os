@@ -246,19 +246,23 @@ static void page_ref_inc(uint64_t pa) {
     if (pg) __sync_fetch_and_add(&pg->ref_count, 1);
 }
 
-static void page_ref_dec(uint64_t pa) {
+/* FIXED (v4.2.8): BUG-PAGE-REF-ATOMIC
+ * Use __sync_fetch_and_add for underflow recovery instead of CAS.
+ * The CAS-based recovery had a TOCTOU race: between fetch_and_sub
+ * and CAS, another CPU could increment ref_count, causing the CAS
+ * to fail and leaving the ref_count permanently decremented by 1.
+ * fetch_and_add is unconditionally atomic and always correct. */
+static int page_ref_dec(uint64_t pa) {
     struct page *pg = page_of_phys(pa);
-    if (pg) {
-        uint32_t old = __sync_fetch_and_sub(&pg->ref_count, 1);
-        if (old == 0) {
-            /*
-             * Underflow: ref_count was already 0 before decrement.
-             * Atomically restore to 0 using CAS to avoid racing with
-             * concurrent increments on other CPUs (NM1 fix).
-             */
-            __sync_bool_compare_and_swap(&pg->ref_count, 0xFFFFFFFF, 0);
-        }
+    if (!pg) return -1;
+    int old = __sync_fetch_and_sub(&pg->ref_count, 1);
+    if (old <= 0) {
+        /* Underflow: ref_count was already 0 before decrement.
+         * Atomically recover by adding 1 back. */
+        __sync_fetch_and_add(&pg->ref_count, 1);
+        return -1; /* was already 0 */
     }
+    return old - 1;
 }
 
 static uint32_t page_ref_get(uint64_t pa) {
@@ -419,13 +423,16 @@ int map_page(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags)
      * free triggers a slab reclaim that allocates from the same region. */
     page_ref_inc(paddr & PTE_ADDR_MASK);
 
-    /* Now safe to free the old page — the PTE already points to the new page */
+    /* FIXED (v4.2.8): BUG-MAP-PAGE-TLB
+     * Flush TLB BEFORE freeing the old page.  Previously, the old
+     * page was freed first, then TLB shootdown happened.  On SMP
+     * systems, another CPU could access the freed page via a stale
+     * TLB entry between the free and the shootdown, causing a
+     * use-after-free.  Now we shoot down first, then free. */
     if (old_phys_to_free) {
-        free_page((void *)(uintptr_t)old_phys_to_free);
-        /* FIXED (v4.2.5) BUG 3: Broadcast TLB shootdown after freeing the
-         * old page. Other CPUs may still have the old PTE cached in their
-         * TLB and could access the just-freed page. */
+        invlpg(vaddr);
         smp_tlb_shootdown(vaddr);
+        free_page((void *)(uintptr_t)old_phys_to_free);
     }
 
     invlpg(vaddr);
@@ -619,6 +626,42 @@ void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
     pt[pt_idx] = 0;
     smp_tlb_shootdown(vaddr);
 
+    /* FIXED (v4.2.8): BUG-UNMAP-PAGE-LEAK
+     * After clearing the PTE, check if the page table (PT) is now
+     * completely empty.  If so, free the PT and clear the PD entry.
+     * Repeat for PD→PDPT→PML4 to avoid leaking empty intermediate
+     * page tables. */
+    {
+        int empty = 1;
+        for (int i = 0; i < 512; i++) {
+            if (pt[i] != 0) { empty = 0; break; }
+        }
+        if (empty) {
+            free_page((void *)(uintptr_t)(pd[pd_idx] & PTE_ADDR_MASK));
+            pd[pd_idx] = 0;
+
+            /* Check if PD is now empty */
+            empty = 1;
+            for (int i = 0; i < 512; i++) {
+                if (pd[i] != 0) { empty = 0; break; }
+            }
+            if (empty) {
+                free_page((void *)(uintptr_t)(pdpt[pdpt_idx] & PTE_ADDR_MASK));
+                pdpt[pdpt_idx] = 0;
+
+                /* Check if PDPT is now empty */
+                empty = 1;
+                for (int i = 0; i < 512; i++) {
+                    if (pdpt[i] != 0) { empty = 0; break; }
+                }
+                if (empty) {
+                    free_page((void *)(uintptr_t)(pml4[pml4_idx] & PTE_ADDR_MASK));
+                    pml4[pml4_idx] = 0;
+                }
+            }
+        }
+    }
+
 out:
     spin_unlock(&pt_lock);
     irq_restore(irq_flags);
@@ -718,8 +761,23 @@ uint64_t clone_current_pml4(void) {
          * to avoid misinterpreting the physical address as a
          * page directory pointer.  (BUG-1GB-HUGE) */
         if (src_pdpte & PTE_PS) {
-            /* 1GB huge page: copy as-is (shared, read-only for COW) */
-            new_pdpt0[j] = src_pdpte;
+            /* FIXED (v4.2.8): BUG-HUGEPAGE-COW
+             * 1GB huge page: mark read-only and increment ref_count
+             * for COW semantics.  Previously, the entry was copied
+             * as-is, leaving the page writable and without ref_count
+             * tracking, which would cause data corruption on fork. */
+            uint64_t phys_1gb = src_pdpte & PTE_ADDR_MASK;
+            uint64_t flags_1gb = src_pdpte & ~PTE_ADDR_MASK;
+            page_ref_inc(phys_1gb);
+            uint64_t cow_flags = (flags_1gb & ~PTE_RW) | PTE_PRESENT;
+            if (flags_1gb & PTE_USER) cow_flags |= PTE_USER;
+            if (flags_1gb & PTE_NX)   cow_flags |= PTE_NX;
+            /* Mark read-only in BOTH parent and child */
+            src_pdpt0[j] = phys_1gb | cow_flags;
+            new_pdpt0[j] = phys_1gb | cow_flags;
+            /* TLB shootdown for the 1GB region */
+            uint64_t va_1gb = (uint64_t)j << 30;
+            smp_tlb_shootdown(va_1gb);
             continue;
         }
 
@@ -1513,6 +1571,25 @@ void free_pagetable(uint64_t pml4_phys) {
         for (int j = 0; j < 512; ++j) {
             uint64_t pdpte = pdpt[j];
             if (!(pdpte & PTE_PRESENT)) continue;
+
+            /* FIXED (v4.2.8): BUG-HUGEPAGE-FREE
+             * 1GB huge pages have PTE_PS set in the PDPT entry.
+             * Without this check, the entry would be misinterpreted
+             * as a page directory pointer, causing traversal of
+             * arbitrary memory and potential corruption. */
+            if (pdpte & PTE_PS) {
+                uint64_t phys_1gb = pdpte & PTE_ADDR_MASK;
+                struct page *pg = page_of_phys(phys_1gb);
+                if (pg) {
+                    uint32_t old_ref = __sync_sub_and_fetch(&pg->ref_count, 1);
+                    if (old_ref == 0xFFFFFFFF) {
+                        __sync_bool_compare_and_swap(&pg->ref_count, 0xFFFFFFFF, 0);
+                    } else if (old_ref == 0) {
+                        free_page((void *)(uintptr_t)phys_1gb);
+                    }
+                }
+                continue;
+            }
 
             uint64_t pd_phys = pdpte & PTE_ADDR_MASK;
             uint64_t *pd = phys_to_virt(pd_phys);

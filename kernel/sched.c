@@ -36,6 +36,11 @@ static struct task_struct *init_task = NULL;  /* pid=1, reaper for orphans */
 static struct task_struct *idle_task  = NULL;  /* pid=0, idle loop */
 
 /* Per-CPU run queues (SMP) */
+/* STUB (v4.2.8): Per-CPU run queues are allocated and initialized
+ * but only CPU 0's run queue is actively used.  AP cores (smp.c)
+ * spin in HLT and never call schedule().  smp_schedule() and
+ * smp_enqueue_task() exist but are dead code until APs participate
+ * in the scheduler.  All tasks are created on CPU 0's run queue. */
 struct run_queue per_cpu_rq[MAX_CPUS];
 
 /* Global minimum virtual runtime for CFS/EEVDF fair scheduling.
@@ -451,6 +456,11 @@ struct task_struct *create_task(void (*fn)(void)) {
     t->children    = NULL;
     t->t_errno     = 0;
     t->ref_count   = 1;         /* REFCOUNT (v4.2.6): one reference for existence */
+    /* FIXED (v4.2.8): BUG-FPU-USED
+     * fpu_used was never set to 1, so SSE/FPU registers were silently
+     * corrupted on every context switch.  Since we cannot easily detect
+     * FPU usage at runtime, assume every task uses FPU. */
+    t->fpu_used    = 1;
     t->pid         = alloc_pid();
     if (t->pid < 0) {
         free_page(stack_page);
@@ -621,6 +631,15 @@ void schedule(void) {
         uint64_t nice0_weight = 128;
         prev->vruntime += ((uint64_t)consumed * nice0_weight) / weight;
         perf_inc(PERF_VRUNTIME_UPDATES);
+
+        /* FIXED (v4.2.8): BUG-VRUNTIME-REINSERT
+         * After updating vruntime, re-insert the task into the RB tree
+         * with the new key so the tree stays correctly ordered.  Without
+         * this, the RB tree key is stale and vruntime-based scheduling
+         * degenerates to the order tasks were created. */
+        rb_erase(&rq->ready_tree, &prev->rb_node);
+        prev->rb_node.key = prev->vruntime;
+        rb_insert(&rq->ready_tree, &prev->rb_node);
     }
     /* If prev->state was TASK_BLOCKED or TASK_ZOMBIE, leave vruntime unchanged */
 
@@ -841,12 +860,18 @@ void do_exit_current(int code) {
     }
 
     /*
-     * FIXED (v4.2.7): BUG-VFORK-CLONE
-     * If the parent was vfork-blocked, wake it up on child exit.
-     * The vfork child shares the parent's address space, so the
-     * parent must be alerted when the child exits without execve.
+     * FIXED (v4.2.8): BUG-VFORK-WAKE
+     * Only vfork children should wake the parent via vfork_done.
+     * A normal fork child's parent is NOT blocked in vfork, so
+     * setting vfork_done here would be a no-op/wrong.  Additionally,
+     * the parent must be re-enqueued into the run queue (via state
+     * change to TASK_READY) so the scheduler can resume it.
+     * The parent is already in the run queue's linked list and RB
+     * tree; setting state to TASK_READY is sufficient for the
+     * scheduler to find it on the next schedule() call.
      */
-    if (current->parent && current->parent->vfork_done == 0) {
+    if (current->vfork_child && current->parent &&
+        current->parent->vfork_done == 0) {
         current->parent->vfork_done = 1;
         if (current->parent->state == TASK_BLOCKED) {
             current->parent->state = TASK_READY;

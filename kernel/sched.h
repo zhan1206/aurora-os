@@ -131,6 +131,8 @@ struct task_struct {
     int       is_fork_child;   /* 1 if this task is a fresh fork child (returns 0) */
     /* FIXED (v4.2.7): BUG-VFORK-CLONE — vfork blocks parent until child execve/exit */
     int       vfork_done;      /* set to 1 when vfork child has execve'd or exited */
+    /* FIXED (v4.2.8): BUG-VFORK-WAKE — only vfork children should wake the parent */
+    int       vfork_child;     /* 1 if this task was created via vfork (CLONE_VFORK) */
 
     /* --- File descriptors --- */
     uintptr_t fd_table[MAX_FDS];

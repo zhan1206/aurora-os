@@ -946,7 +946,7 @@ static void do_sysinfo(void) {
     /* OS info */
     console_draw_dash_section("  Operating System");
     console_draw_dash_row("Name", "AuroraOS");
-    console_draw_dash_row("Version", "3.2.0");
+    console_draw_dash_row("Version", AURORAOS_VERSION);  /* FIXED (v4.2.8): DOC-SHELL-VERSION */
     console_draw_dash_row("Architecture", "x86_64");
     console_draw_dash_row("Build", "2026-06-20");
 
@@ -1492,7 +1492,7 @@ static void do_uname(const char *args) {
     /* Check for -a flag */
     while (*args == ' ') args++;
     if (*args && strcmp(args, "-a") == 0) {
-        console_write("AuroraOS aurora 3.2.0 #1 SMP 2026-06-20 x86_64\n");
+        console_write("AuroraOS aurora 4.2.8 #1 SMP 2026-06-20 x86_64\n");
     } else {
         console_write("AuroraOS\n");
     }

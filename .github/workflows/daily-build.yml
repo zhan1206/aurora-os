@@ -128,14 +128,28 @@ jobs:
           echo "::endgroup::"
 
       # ── QEMU Boot Test ───────────────────────────────────────────
+      # FIXED (v4.2.8): CI-QEMU-TEST — replaced composite action with inline QEMU steps
       - name: QEMU boot test
         id: qemu-test
-        uses: ./.github/actions/qemu-boot-test
-        with:
-          iso-path: os.iso
-          boot-timeout: '90'
-          memory: '256'
-          verify-self-tests: 'true'
+        run: |
+          qemu-system-x86_64 -m 256M -cdrom os.iso -nographic -no-reboot 2>&1 | tee qemu_output.log &
+          QEMU_PID=$!
+          for i in $(seq 1 90); do
+            if grep -q "System Ready" qemu_output.log 2>/dev/null; then
+              echo "PASS: Kernel booted successfully"
+              kill $QEMU_PID 2>/dev/null || true
+              exit 0
+            fi
+            if ! kill -0 $QEMU_PID 2>/dev/null; then
+              echo "FAIL: QEMU exited unexpectedly"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "FAIL: Kernel did not boot within timeout"
+          kill $QEMU_PID 2>/dev/null || true
+          exit 1
+        timeout-minutes: 5
 
       - name: Generate JUnit report
         if: always()

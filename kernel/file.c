@@ -112,7 +112,7 @@ void fd_close_all(struct task_struct *t) {
  */
 void fd_close_exec(struct task_struct *t) {
     if (!t) return;
-    /* TODO: When CLOEXEC flag is implemented, iterate fds and close
+    /* TODO (v4.2.8): When CLOEXEC flag is implemented, iterate fds and close
      * those with CLOEXEC set.  For now, this is a no-op since CLOEXEC
      * is not yet supported. */
     (void)t;

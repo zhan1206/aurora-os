@@ -76,4 +76,12 @@ int fd_send(int fd, int target_pid);
  */
 int fd_check_cap(int fd, uint32_t required);
 
+/* STUB (v4.2.8): Process-level capability checks.
+ * These functions check whether the current task has permission to
+ * perform privileged operations on other processes or files.
+ * Currently always return 1 (allowed) — single-user OS. */
+int cap_can_kill(struct task_struct *caller, int target_pid);
+int cap_can_setuid(struct task_struct *caller, int new_uid);
+int cap_can_chown(struct task_struct *caller, const char *path, int uid, int gid);
+
 #endif /* CAPABILITY_H */

@@ -41,6 +41,8 @@ struct inode {
     /* FIXED (v4.2.2): Added device and inode number for inode cache keying */
     uint32_t         dev;    /* device number */
     uint32_t         ino;    /* inode number */
+    /* FIXED (v4.2.8): SEC-CHMOD — file permission mode (owner/group/other rwx) */
+    int              mode;   /* file permission bits (e.g., 0644, 0755) */
 };
 
 /* Dentry: directory entry cache */

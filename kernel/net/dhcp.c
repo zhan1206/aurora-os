@@ -523,6 +523,9 @@ static int dhcp_try_receive_offer(void) {
     if (ntohs(src_port) != DHCP_SERVER_PORT) return -1;
 
     /* Check DHCP message type */
+    /* FIXED (v4.2.8): BUG-DHCP-BYTEORDER — DHCP options are 8-bit values,
+     * no byte-order conversion needed.  msg_type is read directly as a
+     * single byte from the option data. */
     uint8_t msg_type = 0;
     if (dhcp_find_option(buf, len, DHCP_OPT_MSG_TYPE,
                           &msg_type, 1) != 1) return -1;
@@ -567,6 +570,8 @@ static int dhcp_try_receive_ack(uint8_t *buf_out, int buf_size, int *len_out) {
     if (ntohl(dhcp->xid) != dhcp_xid) return -1;
     if (ntohs(src_port) != DHCP_SERVER_PORT) return -1;
 
+    /* FIXED (v4.2.8): BUG-DHCP-BYTEORDER — DHCP options are 8-bit values,
+     * no byte-order conversion needed. */
     uint8_t msg_type = 0;
     if (dhcp_find_option(buf_out, len, DHCP_OPT_MSG_TYPE,
                           &msg_type, 1) != 1) return -1;

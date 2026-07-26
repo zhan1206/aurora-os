@@ -20,6 +20,9 @@
 #include "perf.h"
 #include "rtc.h"
 
+/* FIXED (v4.2.8): BUG-TCP-RETRANSMIT — TCP retransmit timer */
+extern void tcp_retransmit_timer(void);
+
 /* Reschedule flag: set by interrupt handlers, checked at safe points.
  * SMP: use atomic operations to ensure visibility across cores. */
 volatile int need_resched = 0;
@@ -98,4 +101,8 @@ void pit_irq_c_handler(void *rsp) {
         __sync_lock_test_and_set(&smp_balance_counter, 0);
         smp_schedule(current_cpu_id());
     }
+
+    /* FIXED (v4.2.8): BUG-TCP-RETRANSMIT — Call TCP retransmit timer
+     * on each tick so that timed-out TCP segments get retransmitted. */
+    tcp_retransmit_timer();
 }

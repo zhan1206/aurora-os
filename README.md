@@ -2,11 +2,11 @@
 
 [![CI Build](https://github.com/zhan1206/aurora-os/actions/workflows/build.yml/badge.svg)](https://github.com/zhan1206/aurora-os/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Lines of Code](https://img.shields.io/badge/code-~35,000%20lines-blue)](kernel/)
+[![Lines of Code](https://img.shields.io/badge/code-~60,000%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.2.7-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.2.8-blue)](CHANGELOG.md)
 
-**100% 自研代码** | 无 Linux 内核代码 | 无第三方内核组件
+**100%自研实现** | 无 Linux 内核代码 | 参考 Minix/Linux/CoolPotOS 设计理念  /* FIXED (v4.2.8): DOC-100% SELF-DEVELOPED */
 
 一个完全从零构建的 x86_64 hobby 操作系统，涵盖引导、分页、进程管理、系统调用、VFS、信号、管道等核心子系统。
 
@@ -302,7 +302,7 @@ AuroraOS
 - **管道**: 匿名管道，环形缓冲区（4096 字节）
 
 ### 网络栈
-- **TCP/IP 协议栈**: 完整的网络协议支持
+- **TCP/IP 协议栈**: TCP/UDP/ARP/DHCP/DNS/ICMP 基础实现（不含 TLS/SACK/高级拥塞控制）  /* FIXED (v4.2.8): DOC-TCPIP */
   - ARP（地址解析协议）
   - IPv4（互联网协议）
   - ICMP（互联网控制消息协议，含 ping 支持）
@@ -368,6 +368,8 @@ AuroraOS
 ---
 
 ## Shell 命令参考
+
+> **注意**: 以下 38+ 命令是**内核 Shell**（`kernel/shell.c`）中实现的。用户空间 Shell（`userspace/shell.c`）仅支持 8 个命令：`help`, `echo`, `exec`, `hello`, `fork`, `ps`, `getpid`, `exit`, `clear`。用户空间 Shell 是一个独立的用户态程序，通过 `exec` 命令启动。
 
 | 类别 | 命令 | 功能 |
 |------|------|------|
@@ -545,7 +547,7 @@ GitHub Actions 在每次 push 和 PR 时自动执行：
 
 ## 设计原则
 
-1. **100% 自研**: 所有代码从零编写，不包含 Linux/BSD/任何第三方内核代码
+1. **100%自研实现**: 所有代码从零编写，不包含 Linux/BSD/任何第三方内核代码，设计理念参考 Minix/Linux/CoolPotOS  /* FIXED (v4.2.8): DOC-100% SELF-DEVELOPED */
 2. **无外部依赖**: 仅依赖 GCC/LD 交叉编译器 + GRUB2 引导器（行业标准）
 3. **模块化**: 清晰的模块边界，头文件接口明确
 4. **可测试**: 内置自测试框架，CI 自动化验证

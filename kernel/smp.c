@@ -437,7 +437,13 @@ void ap_entry(void) {
     log_printf(LOG_LEVEL_INFO, "smp: CPU %d (LAPIC id=%d) online\n",
                cpu_id, cpu->lapic_id);
 
-    /* Enter the idle loop — this CPU is now ready to schedule tasks */
+    /* STUB (v4.2.8): AP cores enter an idle loop — they do not
+     * participate in the scheduler. Per-CPU run queues (per_cpu_rq)
+     * are allocated but AP cores only spin in HLT, never calling
+     * schedule().  Load balancing (smp_schedule) and work stealing
+     * are dead code until APs are integrated into the scheduler.
+     *
+     * Enter the idle loop — this CPU is now ready to schedule tasks */
     /* The scheduler will pick up tasks from the per-CPU run queue */
     while (1) {
         /* Check if there's a task to run */

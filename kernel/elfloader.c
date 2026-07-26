@@ -16,6 +16,11 @@
 #define USER_STACK_PAGES    16
 #define USER_STACK_SIZE     (USER_STACK_PAGES * PAGE_SIZE)
 
+/* STUB (v4.2.8): TODO: Integrate ld-so for dynamic linking. Currently
+ * static binaries are executed directly. The ld-so code exists in
+ * userspace/ld-so/ but needs kernel integration to load and pass
+ * control to it. exec_elf_interp() loads the interpreter ELF but
+ * the actual dynamic linker handoff is not yet connected. */
 /* LDSO (v4.2.6) */
 /* Interpreter (ld.so) fixed load address */
 #define INTERP_BASE         0x7F000000ULL

@@ -94,7 +94,8 @@ UEFI_EFI := $(ISODIR)/EFI/BOOT/BOOTX64.EFI
 
 # Find all source files
 K_C_SRCS := $(shell find $(SRCDIR) -type f -name '*.c' 2>/dev/null)
-K_S_SRCS := $(shell find $(SRCDIR) arch/x86_64 -type f -name '*.S' 2>/dev/null)
+# FIXED (v4.2.8): CI-MAKE-ARCH — use ARCH variable for multi-arch assembly sources
+K_S_SRCS := $(shell find $(SRCDIR) arch/$(ARCH) -type f -name '*.S' 2>/dev/null)
 
 OBJS := $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(K_C_SRCS))
 OBJS += $(patsubst arch/%.S,$(BUILDDIR)/arch/%.o,$(filter arch/%,$(K_S_SRCS)))

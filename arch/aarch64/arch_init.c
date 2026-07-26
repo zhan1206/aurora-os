@@ -5,6 +5,12 @@
  * Called from boot.S before kmain().
  *
  * /* MULTIARCH (v4.2.6) */
+ *
+ * /* STUB (v4.2.8): Boot stub only. Memory management, scheduling, and
+ * filesystem initialization are not yet implemented for this architecture.
+ * Only x86_64 is fully functional. The kmain entry point halts
+ * immediately after arch_early_init() because no kernel subsystems
+ * are initialized for AArch64. */
  */
 #include <stdint.h>
 #include "pagetable.h"

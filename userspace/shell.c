@@ -1,4 +1,8 @@
 /* Userspace shell with enhanced builtins and malloc support */
+/* STUB (v4.2.8): This userspace shell has only 8 commands (help, echo,
+ * exec, hello, fork, ps, getpid, exit, clear).  The 38+ commands listed
+ * in README.md's Shell Command Reference are implemented in the kernel
+ * shell (kernel/shell.c), not in this userspace shell. */
 #include <stddef.h>
 
 /* Forward declarations from libc */

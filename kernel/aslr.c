@@ -384,6 +384,33 @@ static uint64_t direct_map_offset = 0;
  */
 void kaslr_init(void) {
     /*
+     * FIXED (v4.2.8): SEC-KASLR — Honest assessment of KASLR limitations.
+     *
+     * This kernel is identity-mapped (physical == virtual), meaning the
+     * kernel text is loaded at a fixed physical address by the bootloader.
+     * True kernel text relocation is impossible in this configuration
+     * because the kernel's physical location cannot be changed after
+     * boot.  The kaslr_offset is generated and applied to indirect
+     * addresses (heap, module loads, kernel stacks, direct mapping),
+     * but the kernel .text section itself remains at its fixed address.
+     *
+     * For full KASLR protection, the kernel would need to be compiled
+     * as a position-independent executable (PIE) and loaded at a
+     * randomized physical address by the bootloader at boot time.
+     * This is a future enhancement tracked as H-30-KASLR-FULL.
+     *
+     * What IS randomized:
+     *   - Kernel heap (slab allocator) base via kaslr_randomize_heap()
+     *   - Kernel module load addresses via kaslr_randomize_module()
+     *   - Kernel stack padding per task via kaslr_randomize_stack()
+     *   - Direct mapping offset (physical memory view)
+     *
+     * What is NOT randomized:
+     *   - Kernel .text section (identity-mapped at fixed physical address)
+     *   - Kernel .data/.bss sections
+     *   - Kernel .rodata section
+     *
+     * ================================================================
      * KASLR (v4.2.6) — Multi-source entropy collection.
      *
      * 1. TSC: Read the Time Stamp Counter for high-resolution

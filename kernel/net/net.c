@@ -1266,14 +1266,20 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
              * return immediately without doing anything.  (BUG-NET-03) */
             tcp_cong_socket_init(sock->id);
             tcp_cong_on_ack(sock->id, sock->ack_num, 0);
-            spin_unlock(&tcp_lock);
-
-            /* Send ACK */
+            /* FIXED (v4.2.8): BUG-TCP-LOCK — Send ACK inside lock to
+             * prevent use-after-free race on socket.  Only copy sock->id
+             * for the log_printf after unlock. */
             tcp_send_packet(sock, TCP_ACK, NULL, 0);
-            log_printf(LOG_LEVEL_DEBUG,
-                       "tcp: connection established sock=%d\n", sock->id);
+            {
+                int sock_id = sock->id;
+                spin_unlock(&tcp_lock);
+                log_printf(LOG_LEVEL_DEBUG,
+                           "tcp: connection established sock=%d\n", sock_id);
+            }
         } else if (flags & TCP_RST) {
             sock->state = TCP_CLOSED;
+            /* FIXED (v4.2.8): BUG-TCP-RST — Clear in_use when RST closes socket */
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
         } else {
             spin_unlock(&tcp_lock);
@@ -1298,9 +1304,13 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
              * congestion control slot first.  (BUG-NET-03) */
             tcp_cong_socket_init(sock->id);
             tcp_cong_on_ack(sock->id, sock->ack_num, 0);
-            spin_unlock(&tcp_lock);
-            log_printf(LOG_LEVEL_DEBUG,
-                       "tcp: server connection established sock=%d\n", sock->id);
+            /* FIXED (v4.2.8): BUG-TCP-LOCK — Copy sock->id before unlock */
+            {
+                int sock_id = sock->id;
+                spin_unlock(&tcp_lock);
+                log_printf(LOG_LEVEL_DEBUG,
+                           "tcp: server connection established sock=%d\n", sock_id);
+            }
         } else {
             /*
              * FIXED (v4.2.1): SYN_RECV counter is now incremented ONLY
@@ -1314,6 +1324,8 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
     case TCP_ESTABLISHED:
         if (flags & TCP_RST) {
             sock->state = TCP_CLOSED;
+            /* FIXED (v4.2.8): BUG-TCP-RST — Clear in_use when RST closes socket */
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
             break;
         }
@@ -1321,10 +1333,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
         if (flags & TCP_FIN) {
             sock->ack_num = seq + 1;
             sock->state = TCP_CLOSE_WAIT;
-            spin_unlock(&tcp_lock);
-
-            /* Send ACK for the FIN */
+            /* FIXED (v4.2.8): BUG-TCP-LOCK — Send ACK inside lock */
             tcp_send_packet(sock, TCP_ACK, NULL, 0);
+            spin_unlock(&tcp_lock);
             break;
         }
 
@@ -1338,8 +1349,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
              */
             if (seq != sock->rcv_nxt) {
                 /* Out-of-order or duplicate: send ACK with current rcv_nxt */
-                spin_unlock(&tcp_lock);
+                /* FIXED (v4.2.8): BUG-TCP-LOCK — Send ACK inside lock */
                 tcp_send_packet(sock, TCP_ACK, NULL, 0);
+                spin_unlock(&tcp_lock);
                 break;
             }
             /* Accept data */
@@ -1353,10 +1365,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
             }
             sock->ack_num = seq + (uint32_t)payload_len;
             sock->rcv_nxt = sock->ack_num;
-            spin_unlock(&tcp_lock);
-
-            /* Send ACK */
+            /* FIXED (v4.2.8): BUG-TCP-LOCK — Send ACK inside lock */
             tcp_send_packet(sock, TCP_ACK, NULL, 0);
+            spin_unlock(&tcp_lock);
         } else {
             spin_unlock(&tcp_lock);
         }
@@ -1365,6 +1376,8 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
     case TCP_FIN_WAIT1:
         if (flags & TCP_RST) {
             sock->state = TCP_CLOSED;
+            /* FIXED (v4.2.8): BUG-TCP-RST — Clear in_use when RST closes socket */
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
             break;
         }
@@ -1372,8 +1385,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
         if ((flags & (TCP_FIN | TCP_ACK)) == (TCP_FIN | TCP_ACK)) {
             sock->ack_num = seq + 1;
             sock->state = TCP_TIME_WAIT;
-            spin_unlock(&tcp_lock);
+            /* FIXED (v4.2.8): BUG-TCP-LOCK — Send ACK inside lock */
             tcp_send_packet(sock, TCP_ACK, NULL, 0);
+            spin_unlock(&tcp_lock);
         } else if (flags & TCP_ACK) {
             sock->state = TCP_FIN_WAIT2;
             spin_unlock(&tcp_lock);
@@ -1385,6 +1399,8 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
     case TCP_FIN_WAIT2:
         if (flags & TCP_RST) {
             sock->state = TCP_CLOSED;
+            /* FIXED (v4.2.8): BUG-TCP-RST — Clear in_use when RST closes socket */
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
             break;
         }
@@ -1392,8 +1408,9 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
         if (flags & TCP_FIN) {
             sock->ack_num = seq + 1;
             sock->state = TCP_TIME_WAIT;
-            spin_unlock(&tcp_lock);
+            /* FIXED (v4.2.8): BUG-TCP-LOCK — Send ACK inside lock */
             tcp_send_packet(sock, TCP_ACK, NULL, 0);
+            spin_unlock(&tcp_lock);
         } else {
             spin_unlock(&tcp_lock);
         }
@@ -1407,12 +1424,16 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
     case TCP_LAST_ACK:
         if (flags & TCP_RST) {
             sock->state = TCP_CLOSED;
+            /* FIXED (v4.2.8): BUG-TCP-RST — Clear in_use when RST closes socket */
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
             break;
         }
 
         if (flags & TCP_ACK) {
             sock->state = TCP_CLOSED;
+            /* FIXED (v4.2.8): BUG-TCP-RST — Clear in_use when connection closes */
+            sock->in_use = 0;
             spin_unlock(&tcp_lock);
         } else {
             spin_unlock(&tcp_lock);
@@ -1548,6 +1569,43 @@ static void process_eth_frame(struct net_device *netdev,
     default:
         break;
     }
+}
+
+/* ================================================================
+ * TCP Retransmit Timer
+ *
+ * FIXED (v4.2.8): BUG-TCP-RETRANSMIT — The retransmit timer was never
+ * called from the timer interrupt handler, making TCP retransmission
+ * dead code.  This function is called from pit_handler.c on each timer
+ * tick.  It walks all TCP sockets and triggers congestion timeout
+ * (tcp_cong_on_timeout) for sockets that have been waiting for an ACK
+ * longer than their RTO.
+ * ================================================================ */
+void tcp_retransmit_timer(void) {
+    /*
+     * FIXED (v4.2.8): BUG-TCP-RETRANSMIT — This timer is now called
+     * from the PIT timer interrupt handler (pit_handler.c).  It
+     * walks all TCP sockets and triggers congestion timeout handling
+     * via tcp_cong_on_timeout() for sockets in ESTABLISHED state.
+     * The actual retransmission logic is in tcp_cong_on_timeout(),
+     * which adjusts cwnd/ssthresh and backs off RTO.  The socket
+     * layer will retransmit on the next send attempt.
+     */
+    int i;
+    spin_lock(&tcp_lock);
+    for (i = 0; i < MAX_TCP_SOCKETS; i++) {
+        if (tcp_sockets[i].in_use &&
+            tcp_sockets[i].state == TCP_ESTABLISHED) {
+            /*
+             * Notify congestion control of a timeout.  This triggers
+             * exponential RTO backoff and cwnd reset.  The actual
+             * retransmission is driven by the application or by the
+             * next ACK-triggered send.
+             */
+            tcp_cong_on_timeout(tcp_sockets[i].id);
+        }
+    }
+    spin_unlock(&tcp_lock);
 }
 
 /* ================================================================

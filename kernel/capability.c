@@ -178,6 +178,36 @@ void cap_fd_close_all(struct task_struct *t) {
  * Capability checks
  * ================================================================ */
 
+/* STUB (v4.2.8): cap_can_kill — Check if current task can send a signal
+ * to the target process.  Currently allows all signals (single-user OS).
+ * A full implementation would check uids, capabilities, and session IDs. */
+int cap_can_kill(struct task_struct *caller, int target_pid) {
+    (void)caller;
+    (void)target_pid;
+    /* STUB: single-user OS — always allowed */
+    return 1;
+}
+
+/* STUB (v4.2.8): cap_can_setuid — Check if current task can change UID.
+ * Currently allows all (single-user OS). */
+int cap_can_setuid(struct task_struct *caller, int new_uid) {
+    (void)caller;
+    (void)new_uid;
+    /* STUB: single-user OS — always allowed */
+    return 1;
+}
+
+/* STUB (v4.2.8): cap_can_chown — Check if current task can change file
+ * ownership.  Currently allows all (single-user OS). */
+int cap_can_chown(struct task_struct *caller, const char *path, int uid, int gid) {
+    (void)caller;
+    (void)path;
+    (void)uid;
+    (void)gid;
+    /* STUB: single-user OS — always allowed */
+    return 1;
+}
+
 int fd_check_cap(int fd, uint32_t required) {
     struct cap_entry *entry = cap_get(current, fd);
     if (!entry) return -1;

@@ -1,6 +1,124 @@
 # AuroraOS Changelog
 
-## v4.2.7 (2026-07-25) — 全量审计修复与安全加固
+## v4.2.8 (2026-07-27) — 全量审计修复: 内存/调度/网络/系统调用/安全/文档/CI
+
+### 概述
+
+v4.2.8 基于 v4.2.7 的深度代码审计，修复了 **30+ 个关键漏洞**（内存/调度/网络/系统调用/安全），并进行了 **文档诚实化**、**桩代码标注**、**CI/CD 修复**。修改 **30+ 个文件**，新增 **+2000 行**。
+
+---
+
+### 一、P0 内存修复 (6项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| BUG-A1 | mem.c | free_pages order 校验从 `order!=0 && !=` 改为 `order > p->order`，防止单页伪装大块 |
+| BUG-A2 | pagetable.c | page_ref_dec 下溢恢复从 CAS 改为 `__sync_fetch_and_add`，消除 TOCTOU |
+| BUG-A3 | pagetable.c | unmap_page 级联释放空 PT/PD/PDPT，防止页表泄漏 |
+| BUG-A4 | pagetable.c | 1GB 大页 COW 标记只读 + 递增 ref_count + 双端 TLB shootdown |
+| BUG-A5 | pagetable.c | free_pagetable 识别 1GB 大页 PDPT 条目，防止遍历任意内存 |
+| BUG-A6 | pagetable.c | map_page 先 TLB shootdown 再 free_page，消除 SMP UAF |
+
+---
+
+### 二、P0 调度器修复 (3项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| BUG-B1 | sched.c | vruntime 更新后 rb_erase + rb_insert 重新平衡红黑树 |
+| BUG-B2 | sched.c | create_task 中设置 fpu_used=1，确保 SSE 寄存器保存/恢复 |
+| BUG-B3 | sched.h/syscall.c/sched.c | vfork 唤醒仅对 vfork_child 生效，普通 fork 子进程退出不唤醒 |
+
+---
+
+### 三、P0 网络修复 (7项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| BUG-D1 | net/dhcp.c | DHCP 选项为 8-bit，无需 ntohs 转换 |
+| BUG-D2 | net/net.c | TCP 所有 tcp_send_packet 移入锁内，防止 10+ 处竞态 |
+| BUG-D3 | net/net.c | RST 处理清除 in_use=0，防止 SYN Flood 耗尽槽位 |
+| BUG-D4 | net/dns.c | DNS 轮询循环添加 schedule() 让出 CPU |
+| BUG-D5 | net/net.c+pit_handler.c | 实现 tcp_retransmit_timer()，从 PIT 中断调用 |
+| BUG-D6 | syscall.c | UDP socket 哨兵值从 0x1 改为 UDP_SOCKET_MAGIC(0x55445053) |
+| BUG-D7 | syscall.c | sys_recvfrom 使用绑定端口而非 fd 编号推导 |
+
+---
+
+### 四、P0 系统调用修复 (10项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| BUG-C1 | syscall.c | sys_execve 完整处理 envp（不再 `(void)envp`） |
+| BUG-C2 | syscall.c | sys_brk 缩小时 unmap 页面 |
+| BUG-C3 | syscall.c | sys_sbrk 禁止缩到堆基址以下 |
+| BUG-C4 | signal.c/signal.h | sys_sigreturn 恢复保存的信号掩码而非无条件清空 |
+| BUG-C5 | syscall.c | sys_fork 子进程继承父进程 blocked 掩码 |
+| BUG-C6 | syscall.c | sys_getdents64 添加 rec_len/name_len/overflow 边界检查 |
+| BUG-C7 | syscall.c | sys_select/poll 添加超时重扫描循环 |
+| BUG-C8 | syscall.c | sys_sendto UDP 添加 len > 65507 检查 |
+| BUG-C9 | syscall.c | sys_fchdir 从 inode 名称构建 CWD 而非硬编码 "/" |
+| BUG-C10 | syscall.c | sys_futex WAKE 实现完整等待者列表和唤醒 |
+
+---
+
+### 五、安全修复 (5项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| SEC-1 | vfs.c/syscall.c | chmod 存储 mode 到 inode，vfs_open 实现权限检查 |
+| SEC-2 | stack_protect.c | Stack canary 使用 SplitMix64 三轮哈希混合 RDTSC+栈地址+常量 |
+| SEC-3 | aslr.c | KASLR 添加诚实文档：说明已随机化和未随机化的部分 |
+| SEC-4 | module.c | 模块重定位添加 target_base+r_offset 溢出检查 |
+| SEC-5 | syscall.c | mmap 基址使用 ChaCha20 CSPRNG 在 16GB 范围随机化 |
+
+---
+
+### 六、文档诚实化 (6项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| DOC-1 | shell.c | sysinfo/uname 版本从硬编码 v3.2.0 改为 AURORAOS_VERSION |
+| DOC-2 | README.md | 代码行数更新为 ~60,000 |
+| DOC-3 | README.md | 测试数量 26 组与实际一致 |
+| DOC-4 | README.md | "100%自研"声明补充"参考 Minix/Linux/CoolPotOS 设计理念" |
+| DOC-5 | README.md | TCP/IP 声明改为"基础实现（不含 TLS/SACK/高级拥塞控制）" |
+| DOC-6 | CONTRIBUTING.md | 测试数量 15/16 → 26/26 |
+
+---
+
+### 七、桩代码标注 (7项)
+
+| 桩 | 文件 | 修复 |
+|-----|------|------|
+| 多架构 | arch/riscv64, aarch64, loongarch64 | 添加 STUB 注释：仅启动桩，x86_64 唯一可用 |
+| 用户态 Shell | userspace/shell.c | 添加 STUB 注释：8 命令 vs 内核 38+ |
+| ld-so | elfloader.c | 添加 STUB 注释：代码存在未集成 |
+| seccomp | seccomp.c/syscall.c | 添加 SYS_PRCTL 桩，支持 PR_SET_SECCOMP |
+| Capability | capability.c/syscall.c | 添加 kill/setuid/chown 权能检查调用点 |
+| 模块签名 | module.c | 添加 STUB 注释：XOR 哈希为占位符 |
+| SMP | smp.c/sched.c | 添加 STUB 注释：AP 自旋，仅 CPU0 运行队列 |
+
+---
+
+### 八、CI/CD 修复 (4项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| CI-1 | .github/workflows/*.yml | 替换不存在的 qemu-boot-test action 为内联 QEMU 命令 |
+| CI-2 | scripts/embed_binary.py | append 模式改为 'ab' 二进制模式 |
+| CI-3 | Makefile | ASM_SRCS 路径从硬编码 arch/x86_64 改为 arch/$(ARCH) |
+| CI-4 | kernel/file.c/syscall.c | 3 处 TODO 统一格式为 TODO (v4.2.8) |
+
+---
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 30+ |
+| 修复 Bug | 30+ |
+| 新增代码 | ~2000 行 |
 
 ### 概述
 

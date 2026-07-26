@@ -796,7 +796,13 @@ void free_pages(void *ptr, uint32_t order) {
      * too small leaves buddy pages still in use, too large covers
      * adjacent memory.  (BUG-MEM-H1)
      */
-    if (order != 0 && p->order != 0 && p->order != order) {
+    /* FIXED (v4.2.8): BUG-FREE-PAGES-ORDER
+     * Validate that the caller is not freeing a page with a larger
+     * order than it was allocated with.  You can free a larger-order
+     * page as order-0 (buddy merging will handle it), but not vice
+     * versa: freeing a single page as order=32 would corrupt the
+     * buddy system by adding a fake 4GB block to the free list. */
+    if (order > p->order && p->order != 0) {
         buddy_unlock();
         log_printf(LOG_LEVEL_ERR, "free_pages: order mismatch at pa=%p: "
                    "expected %u, got %u\n",

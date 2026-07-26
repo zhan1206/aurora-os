@@ -214,8 +214,8 @@ void do_sys_sigreturn(void) {
         current->sig->saved_rip = 0;
         current->sig->saved_rsp = 0;
 
-        /* Unblock all signals that were blocked during handler */
-        current->sig->blocked = 0;
+        /* FIXED (v4.2.8): BUG-SIGRETURN-MASK — Restore saved signal mask from sigframe */
+        current->sig->blocked = frame.blocked;
 
         log_printf(LOG_LEVEL_DEBUG, "signal: sigreturn restored RIP=%p RSP=%p\n",
                    (void *)current->current_tf->rip, (void *)current->current_tf->rsp);
@@ -399,6 +399,8 @@ void check_signals(void) {
         frame->rip    = current->current_tf->rip;
         frame->rflags = current->current_tf->r11;  /* R11 holds RFLAGS from syscall entry */
         frame->rsp    = user_rsp;
+        /* FIXED (v4.2.8): BUG-SIGRETURN-MASK — Save blocked mask for restoration */
+        frame->blocked = sig->blocked;
 
         /* Store saved context in per-task signal_state (thread-safe) */
         sig->saved_rsp = frame->rsp;

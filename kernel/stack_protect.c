@@ -40,15 +40,26 @@ void stack_protect_init(void) {
     uint64_t tsc = (tsc_high << 32) | tsc_low;
 
     /*
-     * Generate a random canary value.  We mix TSC with a fixed
-     * constant to ensure adequate entropy.  The canary must be
-     * non-zero because the stack protector check uses XOR with
-     * the stored canary (a zero canary would mask overflows).
+     * FIXED (v4.2.8): SEC-CANARY — mix RDTSC with stack address,
+     * compile-time constant, and a SplitMix64-style hash for
+     * strong entropy.  Previously used only RDTSC which is
+     * highly predictable at boot.
+     *
+     * The hash function applies three rounds of xor-shift-multiply
+     * (SplitMix64 finalizer) to achieve full avalanche, making
+     * the canary unpredictable even if the attacker knows the
+     * approximate TSC value.
      */
-    __stack_chk_guard = tsc ^ 0x9E3779B97F4A7C15ULL;
-    __stack_chk_guard ^= __stack_chk_guard >> 33;
-    __stack_chk_guard *= 0xFF51AFD7ED558CCDULL;
-    __stack_chk_guard ^= __stack_chk_guard >> 33;
+    uint64_t canary = tsc;
+    canary ^= (uint64_t)(uintptr_t)&canary;          /* stack address entropy */
+    canary ^= 0xDEADBEEFCAFEBABEULL;                  /* fixed mixing constant */
+
+    /* SplitMix64-style hash: 3 rounds of xor-shift-multiply for full avalanche */
+    canary = (canary ^ (canary >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    canary = (canary ^ (canary >> 27)) * 0x94D049BB133111EBULL;
+    canary = canary ^ (canary >> 31);
+
+    __stack_chk_guard = canary;
 
     /*
      * FIXED (v4.1.8): Set the lowest byte of the canary to 0x00

@@ -258,6 +258,8 @@ struct inode *vfs_iget(uint32_t dev, uint32_t ino) {
     memset(new_inode, 0, sizeof(*new_inode));
     new_inode->dev = dev;
     new_inode->ino = ino;
+    /* FIXED (v4.2.8): BUG-FILE-PERM — set default permissions (0644 for files, 0755 for dirs) */
+    new_inode->mode = 0644;
 
     /* Determine which slot to use */
     int slot = empty_slot;
@@ -715,6 +717,24 @@ struct file *vfs_open(const char *path, int flags) {
     struct inode *inode = vfs_lookup(path);
     if (!inode) return NULL;
 
+    /* FIXED (v4.2.8): SEC-CHMOD — check file permissions before opening.
+     * Only enforce when mode != 0 (i.e., chmod has been called or the
+     * filesystem set a non-zero mode).  mode == 0 means "no permission
+     * restrictions" (backward compatibility with files that predate
+     * permission support). */
+    if (inode->mode) {
+        int access_mode = (flags & O_RDWR) ? 2 : ((flags & O_WRONLY) ? 1 : 0);
+        if ((inode->mode & 0444) == 0 && access_mode == 0) {
+            return NULL; /* read not allowed */
+        }
+        if ((inode->mode & 0222) == 0 && access_mode == 1) {
+            return NULL; /* write not allowed */
+        }
+        if ((inode->mode & 0222) == 0 && access_mode == 2) {
+            return NULL; /* read+write: write permission required */
+        }
+    }
+
     struct file *filp = (struct file *)kmalloc(sizeof(*filp));
     if (!filp) return NULL;
     memset(filp, 0, sizeof(*filp));
@@ -1069,9 +1089,15 @@ int vfs_chmod(const char *path, int mode) {
 
     struct inode *inode = vfs_lookup(path);
     if (!inode) return -1;
-    if (!inode->ops || !inode->ops->chmod) return -1;
 
-    return inode->ops->chmod(inode, mode);
+    /* FIXED (v4.2.8): SEC-CHMOD — store the permission mode to the inode */
+    inode->mode = (inode->mode & ~0777) | (mode & 0777);
+
+    /* Also delegate to filesystem-specific chmod if available */
+    if (inode->ops && inode->ops->chmod) {
+        return inode->ops->chmod(inode, mode);
+    }
+    return 0;
 }
 
 /* ================================================================
