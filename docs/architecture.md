@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
 
 ## 1. 概述
 
@@ -112,7 +112,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| 调度器 | `sched.c` | 轮转调度、PID 管理、任务切换、fork/exec、per-CPU 就绪队列 |
+| 调度器 | `sched.c` | 轮转调度、PID 管理、任务切换、fork/exec、per-CPU 就绪队列 /* FIXED (v4.2.9): DOC-SMP — AP cores idle, only CPU0 runs scheduler */
 | 调度器头 | `sched.h` | 任务结构体、调度器接口 |
 | 上下文切换 | `arch/x86_64/context.S` | 汇编级上下文保存与恢复 |
 | 用户态入口 | `arch/x86_64/enter_user.S` | 从内核态切换到用户态 |
@@ -315,7 +315,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 | 内存模型 | 4 级分页 (PML4) | x86_64 标准，支持 48 位虚拟地址 |
 | 物理内存分配 | Buddy 伙伴系统 | 高效的连续页分配与合并 |
 | 内核堆分配 | Slab 分配器 | 小对象高效分配，减少碎片 |
-| 进程调度 | VRFair (CFS/EEVDF 启发) + SMP 工作窃取 | 基于 vruntime 的公平调度，per-CPU 就绪队列，负载均衡 |
+| 进程调度 | VRFair (CFS/EEVDF 启发) | 基于 vruntime 的公平调度，per-CPU 就绪队列 /* FIXED (v4.2.9): DOC-SMP — AP cores idle, only CPU0 runs scheduler; load balancing is dead code */ |
 | 文件系统 | VFS + RamFS + Ext2 | 抽象层支持多种文件系统，ext2 支持持久化 |
 | 块设备 | block_dev 抽象层 + ramdisk + VirtIO | 统一块设备接口，支持多种后端 |
 | 系统调用 | SYSCALL 指令 (MSR) + seccomp 过滤 | x86_64 快速系统调用标准，256 位位图过滤 |
@@ -387,7 +387,7 @@ ASLR 随机化:
 - PIT 定时器中断触发 `schedule_tick()` 递减时间片
 - 时间片耗尽时设置 `need_resched` 标志，在安全点（iretq/syscall 返回）切换
 - 支持 `preempt_disable()`/`preempt_enable()` 嵌套保护临界区
-- SMP 支持工作窃取（work stealing）负载均衡
+- SMP 支持工作窃取（work stealing）负载均衡 /* FIXED (v4.2.9): DOC-SMP — AP cores idle, only CPU0 runs scheduler; load balancing is dead code */
 
 ### 7.3 安全架构
 - 用户/内核地址空间隔离（高半核）
@@ -406,7 +406,7 @@ ASLR 随机化:
 - ACPI MADT 表解析，自动检测 CPU 核心数
 - AP 启动跳板代码（trampoline at 0x8000）
 - per-CPU 数据结构（cpu_data），GS 段基址快速访问
-- per-CPU 就绪队列（per_cpu_rq[MAX_CPUS]），支持工作窃取
+- per-CPU 就绪队列（per_cpu_rq[MAX_CPUS]），支持工作窃取 /* FIXED (v4.2.9): DOC-SMP — AP cores idle, only CPU0 runs scheduler; load balancing is dead code */
 - 原子自旋锁（lock cmpxchg + pause）替代 CLI/STI
 - 票据锁（ticket lock）提供公平、可扩展的替代方案
 - IPI 中断处理（reschedule 0xFE、TLB shootdown 0xFD）
@@ -473,7 +473,7 @@ ASLR 随机化:
 - ✅ **红黑树调度器**: O(log n) 就绪队列，per-CPU rbtree，vruntime 排序
 - ✅ **抢占式调度**: 10ms 时间片，preempt_disable/enable 嵌套保护，schedule_tick()
 - ✅ **NVMe 驱动**: PCI 枚举，Admin/IO 队列，PRP 列表，MSI-X，块设备集成
-- ✅ **TCP 拥塞控制**: TCP Reno（慢启动/拥塞避免/快速重传/快速恢复），RTT 估算，窗口缩放
+- ✅ **TCP 拥塞控制**: TCP Reno（慢启动/拥塞避免/快速重传/快速恢复），RTT 估算，窗口缩放。重传定时器已接入 PIT 中断处理（v4.2.8 修复） /* FIXED (v4.2.9): DOC-TCP-RENO */
 - ✅ **IPv6**: 链路本地地址（EUI-64），NDP 邻居发现，ICMPv6 Echo
 - ✅ **用户态 ELF**: auxv 向量，用户栈设置，16 字节对齐
 - ✅ **POSIX 系统调用**: 110 个系统调用，SYS_MAX_NUM=384

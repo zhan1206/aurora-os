@@ -104,6 +104,11 @@ static int read_cpuinfo(char *buf, size_t size) {
     if (size < 256) return -1;
     int len = 0;
 
+#ifdef __x86_64__
+    /* FIXED (v4.2.9): BUG-CPUID-NONX86 — Architecture guard: cpuid
+     * instruction is only available on x86.  Non-x86 targets return
+     * generic CPU info. */
+
     /* Read CPUID leaf 0: vendor string in EBX:EDX:ECX */
     uint32_t ebx, ecx, edx;
     uint32_t max_leaf;
@@ -165,6 +170,16 @@ static int read_cpuinfo(char *buf, size_t size) {
     if (len >= (int)size) len = (int)size - 1;
     buf[len] = '\0';
     return len;
+
+#else
+    /* FIXED (v4.2.9): BUG-CPUID-NONX86 — Non-x86: return generic CPU info */
+    len += append_str(buf + len, size - (size_t)len, "vendor_id       : generic\n");
+    len += append_str(buf + len, size - (size_t)len, "cpu family      : 0\n");
+    len += append_str(buf + len, size - (size_t)len, "model           : 0\n");
+    if (len >= (int)size) len = (int)size - 1;
+    buf[len] = '\0';
+    return len;
+#endif
 }
 
 /*

@@ -1,6 +1,85 @@
 # AuroraOS Changelog
 
-## v4.2.8 (2026-07-27) — 全量审计修复: 内存/调度/网络/系统调用/安全/文档/CI
+## v4.2.9 (2026-07-28) — 补充审计修复: 系统调用/网络/安全/CI/文档
+
+### 概述
+
+v4.2.9 基于第三轮补充审计，修复了 **25+ 个漏洞**（系统调用/网络/安全/CI/文档），修改 **20+ 个文件**。
+
+---
+
+### 一、系统调用修复 (5项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| send/recv | syscall.c | send/recv/sendto/recvfrom 添加 `len > INT32_MAX` 检查，防止 size_t 截断回绕 |
+| ioctl | syscall.c | 硬编码 256 → `_IOC_SIZE(request)` 动态大小检查 |
+| mmap_base | syscall.c | 累加前添加溢出检查，溢出则重置基址 |
+| readlink/symlink | syscall.c/fs.h | readlink 返回真实链接目标；symlink 创建符号链接 inode |
+| signal SMAP | signal.c | 信号交付时仅在 memcpy 期间临时 stac/clac，缩小 SMAP 禁用窗口 |
+
+---
+
+### 二、网络栈修复 (8项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| HTTP 握手 | net/net.c | tcp_send 非 ESTABLISHED 状态返回 -EAGAIN |
+| accept 状态 | net/net.c | accept 仅返回 ESTABLISHED 状态 socket |
+| SYN Flood | net/net.c | 每 poll 周期最多 5 个 SYN_RECEIVED，速率限制 |
+| HTTP 头部分割 | net/http.c | 累积缓冲区 4096 字节，跨 recv 搜索 \r\n\r\n |
+| TCP 拥塞覆盖 | net/tcp_cong.c | 覆盖前检查目标槽位是否活跃 |
+| ARP 悬空指针 | net/net.c | arp_cache_add 返回类型改为 void |
+| Loopback 覆盖 | net/net.c | 单缓冲区 → 16 槽环形缓冲队列 |
+| IPv6 邻居 | net/ipv6.c | 新增 ipv6_neighbor_age() 老化函数，300 周期超时 |
+
+---
+
+### 三、安全修复 (1项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| cap fd 类型混淆 | kernel/file.c | fd_get() 添加 cap_entry magic 检查，防止 fd/cap 指针类型混淆 |
+
+---
+
+### 四、CI/CD 修复 (2项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| checkstyle/cppcheck | .github/workflows/build.yml | continue-on-error: true → false，阻断 PR |
+| first-contributions | .github/workflows/build.yml | 路径修正为 docs/first-contributions.md |
+
+---
+
+### 五、文档修复 (6项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| modules.md | docs/modules.md | 系统调用 77 → 110 |
+| ASLR PRNG | README.md | xorshift64 → ChaCha20 CSPRNG |
+| aslr.h | kernel/aslr.h | kaslr_relocate_kernel 文档诚实化 |
+| SMP 文档 | README.md/docs/architecture.md | 标注 AP 空闲、仅 CPU0 调度 |
+| TCP Reno | docs/architecture.md | 标注重传定时器已接入 PIT |
+| /dev/usb/ | README.md | 标注为计划中 |
+
+---
+
+### 六、其他 (1项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| cpuid 非 x86 | kernel/procfs.c | 添加 `#ifdef __x86_64__` 架构守卫 |
+
+---
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 20+ |
+| 修复 Bug | 25+ |
+| 新增代码 | ~1000 行 |
 
 ### 概述
 

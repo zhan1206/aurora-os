@@ -195,11 +195,12 @@ uint64_t kaslr_randomize_heap(void);
 uint64_t kaslr_randomize_module(uint64_t base, uint64_t max_range);
 
 /*
- * kaslr_relocate_kernel: Adjust the kernel page table entries
- * by the current kaslr_offset.  This shifts the kernel's virtual
- * address space by the random offset, making ROP/JOP gadgets
- * unpredictable.  Must be called after kaslr_init() and before
- * any user-space tasks are created.
+ * FIXED (v4.2.9): DOC-ASLR-RELOCATE — This function is a no-op for
+ * the current identity-mapped kernel.  The kernel is mapped 1:1
+ * (physical == virtual in 0-1GB), so kaslr_offset is applied via the
+ * kaslr_apply() inline when computing virtual addresses.  The function
+ * exists as a hook for future virtual-kernel support where it would
+ * walk PML4[256..511] and add the offset to each kernel PTE.
  */
 void kaslr_relocate_kernel(void);
 

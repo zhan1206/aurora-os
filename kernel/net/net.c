@@ -218,7 +218,13 @@ static int arp_cache_find(const uint8_t ip[4], uint8_t mac_out[6]) {
     return -1;
 }
 
-static struct arp_entry *arp_cache_add(const uint8_t ip[4],
+/*
+ * FIXED (v4.2.9): BUG-ARP-POINTER — arp_cache_add no longer returns a
+ * pointer to an internal cache entry after releasing the lock.  The
+ * pointer was already unused by the caller, but the signature invited
+ * use-after-free bugs.  Changed to void return.
+ */
+static void arp_cache_add(const uint8_t ip[4],
                                         const uint8_t mac[6]) {
     /* Find an empty or oldest entry */
     int target = 0;
@@ -243,7 +249,6 @@ static struct arp_entry *arp_cache_add(const uint8_t ip[4],
     arp_cache[target].age = ++arp_age_counter;
     arp_cache[target].valid = 1;
     spin_unlock(&arp_lock);
-    return &arp_cache[target];
 }
 
 /*
@@ -693,6 +698,7 @@ static struct tcp_socket tcp_sockets[MAX_TCP_SOCKETS];
 static spinlock_t tcp_lock;
 static int tcp_next_id = 1;
 static uint32_t tcp_iss = 0; /* initial send sequence counter */
+static int syn_rate_count = 0;  /* FIXED (v4.2.9): BUG-SYN-FLOOD — per-poll-window SYN counter */
 
 /*
  * FIXED (v4.1.8): Use TSC + large increment for better ISN randomness.
@@ -878,9 +884,12 @@ int tcp_send(int sock, const void *data, int len) {
         return -1;
     }
 
+    /* FIXED (v4.2.9): BUG-HTTP-HANDSHAKE — Only allow send() in
+     * ESTABLISHED or CLOSE_WAIT states.  Return -EAGAIN so the caller
+     * can retry after the 3-way handshake completes. */
     if (s->state != TCP_ESTABLISHED && s->state != TCP_CLOSE_WAIT) {
         spin_unlock(&tcp_lock);
-        return -1;
+        return -EAGAIN;
     }
 
     if (len <= 0) {
@@ -1012,6 +1021,14 @@ int tcp_accept(int sock, uint8_t remote_ip[4], uint16_t *remote_port) {
     /* Find the accepted socket and get its remote address */
     struct tcp_socket *accepted = tcp_find_socket(accepted_id);
     if (accepted) {
+        /* FIXED (v4.2.9): BUG-ACCEPT-STATE — Only return sockets that
+         * have completed the 3-way handshake (ESTABLISHED).  If the
+         * socket is still in SYN_RECEIVED, tcp_send() would refuse to
+         * send, breaking the server side. */
+        if (accepted->state != TCP_ESTABLISHED) {
+            spin_unlock(&tcp_lock);
+            return -1;
+        }
         if (remote_ip) memcpy(remote_ip, accepted->remote_ip, 4);
         if (remote_port) *remote_port = accepted->remote_port;
     }
@@ -1199,6 +1216,16 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
                 spin_unlock(&tcp_lock);
                 return;
             }
+
+            /* FIXED (v4.2.9): BUG-SYN-FLOOD — Rate limit incoming SYN
+             * packets to prevent SYN flood attacks from exhausting the
+             * 16 TCP slots.  Allow at most 5 SYN_RECEIVED sockets per
+             * poll window.  The counter is reset in net_poll(). */
+            if (syn_rate_count >= 5) {
+                spin_unlock(&tcp_lock);
+                return;
+            }
+            syn_rate_count++;
 
             /* Create a new socket for this connection */
             int new_id = tcp_next_id++;
@@ -1463,18 +1490,36 @@ static void tcp_handle_packet(const uint8_t src_ip[4],
  * Loopback Device
  * ================================================================ */
 #define LOOPBACK_MTU  65536
-#define LOOPBACK_BUF_SIZE 8192
 
-static uint8_t loopback_buf[LOOPBACK_BUF_SIZE];
-static int loopback_buf_len = 0;
+/* FIXED (v4.2.9): BUG-LOOPBACK — Use a ring buffer queue instead of a
+ * single static buffer.  The old design used one buffer that was
+ * overwritten by every subsequent send(), causing data loss when
+ * multiple packets were sent before being consumed. */
+#define LOOPBACK_QUEUE_SIZE 16
+#define LOOPBACK_BUF_SIZE 2048
+
+static struct {
+    uint8_t data[LOOPBACK_BUF_SIZE];
+    int len;
+} loopback_queue[LOOPBACK_QUEUE_SIZE];
+static int loopback_head = 0;  /* next to dequeue */
+static int loopback_tail = 0;  /* next to enqueue */
+static int loopback_count = 0;
 static spinlock_t loopback_lock;
 
 static int loopback_send(struct net_device *netdev, const void *data, int len) {
     (void)netdev;
     spin_lock(&loopback_lock);
+    if (loopback_count >= LOOPBACK_QUEUE_SIZE) {
+        /* Queue full — drop oldest */
+        loopback_head = (loopback_head + 1) % LOOPBACK_QUEUE_SIZE;
+        loopback_count--;
+    }
     if (len > LOOPBACK_BUF_SIZE) len = LOOPBACK_BUF_SIZE;
-    memcpy(loopback_buf, data, (size_t)len);
-    loopback_buf_len = len;
+    memcpy(loopback_queue[loopback_tail].data, data, (size_t)len);
+    loopback_queue[loopback_tail].len = len;
+    loopback_tail = (loopback_tail + 1) % LOOPBACK_QUEUE_SIZE;
+    loopback_count++;
     spin_unlock(&loopback_lock);
     return len;
 }
@@ -1482,14 +1527,15 @@ static int loopback_send(struct net_device *netdev, const void *data, int len) {
 static int loopback_recv(struct net_device *netdev, void *buf, int max_len) {
     (void)netdev;
     spin_lock(&loopback_lock);
-    if (loopback_buf_len <= 0) {
+    if (loopback_count <= 0) {
         spin_unlock(&loopback_lock);
         return 0;
     }
-    int copy_len = loopback_buf_len;
+    int copy_len = loopback_queue[loopback_head].len;
     if (copy_len > max_len) copy_len = max_len;
-    memcpy(buf, loopback_buf, (size_t)copy_len);
-    loopback_buf_len = 0;
+    memcpy(buf, loopback_queue[loopback_head].data, (size_t)copy_len);
+    loopback_head = (loopback_head + 1) % LOOPBACK_QUEUE_SIZE;
+    loopback_count--;
     spin_unlock(&loopback_lock);
     return copy_len;
 }
@@ -1631,7 +1677,7 @@ void net_init(void) {
     memset(arp_cache, 0, sizeof(arp_cache));
     memset(udp_sockets, 0, sizeof(udp_sockets));
     memset(tcp_sockets, 0, sizeof(tcp_sockets));
-    memset(loopback_buf, 0, sizeof(loopback_buf));
+    memset(loopback_queue, 0, sizeof(loopback_queue));
 
     /* Initialize loopback */
     loopback_init();
@@ -1720,6 +1766,10 @@ void net_poll(void) {
     uint8_t buf[2048];
     int i;
 
+    /* FIXED (v4.2.9): BUG-SYN-FLOOD — Reset SYN rate limit counter
+     * each poll cycle so that the 5-SYN limit is per window. */
+    syn_rate_count = 0;
+
     for (i = 0; i < net_if_count; i++) {
         if (!(net_ifs[i].flags & NETIF_FLAG_UP)) continue;
         if (!net_ifs[i].netdev) continue;
@@ -1736,6 +1786,11 @@ void net_poll(void) {
      * (H-20: ARP cache no aging)
      */
     arp_cache_age();
+
+    /* FIXED (v4.2.9): BUG-IPV6-NEIGH — Age out stale IPv6 neighbor
+     * cache entries to prevent the cache from filling up with
+     * unreachable hosts. */
+    ipv6_neighbor_age();
 
     /*
      * FIXED (v4.1.8): Periodic TCP timeout cleanup.

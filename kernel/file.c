@@ -11,7 +11,17 @@
 #include "sched.h"
 #include "include/log.h"
 #include "net/unix.h"     /* AF_UNIX (v4.2.6) */
+#include "capability.h"   /* FIXED (v4.2.9): SEC-CAP-FD-TYPE - type check for fd_table */
 #include <string.h>
+
+/* FIXED (v4.2.9): SEC-CAP-FD-TYPE — fd_table entry type tags.
+ * cap_fd_* functions share fd_table with fd_* but store cap_entry*
+ * pointers instead of raw file* pointers.  These type constants
+ * allow fd_get to distinguish and reject capability entries,
+ * preventing type confusion that would cause vfs_close to be
+ * called on a cap_entry* pointer. */
+#define FD_TYPE_FILE  0
+#define FD_TYPE_CAP   1
 
 void fd_table_init(struct task_struct *t) {
     for (int i = 0; i < MAX_FDS; ++i)
@@ -33,6 +43,14 @@ void *fd_get(struct task_struct *t, int fd) {
     if (!t) return NULL;
     if (fd < 0 || fd >= MAX_FDS) return NULL;
     if (t->fd_table[fd] == (uintptr_t)-1) return NULL;
+
+    /* FIXED (v4.2.9): SEC-CAP-FD-TYPE — Check for cap_entry* stored
+     * by cap_fd_* functions.  cap_entry has a magic field at offset 0;
+     * if it matches CAP_ENTRY_MAGIC, this is a capability fd, not a
+     * regular file fd.  Return NULL to prevent type confusion. */
+    struct cap_entry *entry = (struct cap_entry *)t->fd_table[fd];
+    if (entry->magic == CAP_ENTRY_MAGIC) return NULL;
+
     return (void *)t->fd_table[fd];
 }
 

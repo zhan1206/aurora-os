@@ -31,6 +31,9 @@
  * SMP safety.  (BUG 4.4) */
 #define CURRENT_TF()  ((struct trapframe *)current->current_tf)
 
+/* ioctl size macro (standard Linux _IOC_SIZE) */
+#define _IOC_SIZE(nr) (((nr) >> 16) & 0x3FFF)
+
 /* ================================================================
  * I/O syscalls
  * ================================================================ */
@@ -465,6 +468,12 @@ static long sys_mmap(void *addr, size_t length, int prot, int flags,
             if (current->mmap_base == 0) current->mmap_base = ASLR_MMAP_BASE;
         }
         map_va = current->mmap_base;
+        /* FIXED (v4.2.9): BUG-MMAP-OVERFLOW — Check mmap_base accumulation
+         * for overflow into kernel space before incrementing. */
+        if (current->mmap_base + length < current->mmap_base ||
+            current->mmap_base + length > 0x7FFFFFFFFFFFULL) {
+            current->mmap_base = 0x7F0000000000ULL; /* Reset */
+        }
         current->mmap_base += num_pages * PAGE_SIZE;
     }
 
@@ -1222,6 +1231,8 @@ static long sys_send(int sockfd, const void *buf, size_t len, int flags) {
     (void)flags;
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!buf || len == 0) return 0;
+    /* FIXED (v4.2.9): BUG-SEND-LEN-TRUNC — Prevent size_t to int truncation */
+    if (len > INT32_MAX) { current->t_errno = EMSGSIZE; return -1; }
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
 
     /* AF_UNIX (v4.2.6) */
@@ -1260,6 +1271,8 @@ static long sys_recv(int sockfd, void *buf, size_t len, int flags) {
     (void)flags;
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!buf || len == 0) return 0;
+    /* FIXED (v4.2.9): BUG-SEND-LEN-TRUNC — Prevent size_t to int truncation */
+    if (len > INT32_MAX) { current->t_errno = EMSGSIZE; return -1; }
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
 
     /* AF_UNIX (v4.2.6) */
@@ -1306,6 +1319,8 @@ static long sys_sendto(int sockfd, const void *buf, size_t len, int flags,
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!buf || len == 0) return 0;
     if (!dest_addr) { current->t_errno = EINVAL; return -1; }
+    /* FIXED (v4.2.9): BUG-SEND-LEN-TRUNC — Prevent size_t to int/uint16_t truncation */
+    if (len > INT32_MAX) { current->t_errno = EMSGSIZE; return -1; }
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
 
     /* AF_UNIX (v4.2.6) */
@@ -1373,6 +1388,8 @@ static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
     (void)flags;
     if (sockfd < 0 || sockfd >= MAX_FDS) { current->t_errno = EBADF; return -1; }
     if (!buf || len == 0) return 0;
+    /* FIXED (v4.2.9): BUG-SEND-LEN-TRUNC — Prevent size_t to int truncation */
+    if (len > INT32_MAX) { current->t_errno = EMSGSIZE; return -1; }
     if (!user_addr_range_ok(buf, len)) { current->t_errno = EFAULT; return -1; }
 
     /* AF_UNIX (v4.2.6) */
@@ -1635,8 +1652,14 @@ static long sys_ioctl(int fd, int request, void *arg) {
      * directly to vfs_ioctl without any validation, bypassing address
      * checks and potentially allowing kernel access to arbitrary memory
      * without SMAP protection.  (BUG 3.4)
+     *
+     * FIXED (v4.2.9): BUG-IOCTL-SIZE — Replace hardcoded 256-byte
+     * check with _IOC_SIZE(request) for proper size validation.
+     * Requests with arg_size > 256 are rejected with EINVAL.
      */
-    if (arg && !user_addr_range_ok(arg, 256)) {
+    size_t arg_size = _IOC_SIZE(request);
+    if (arg_size > 256) { current->t_errno = EINVAL; return -1; }
+    if (arg && !user_addr_range_ok(arg, arg_size > 0 ? arg_size : 256)) {
         current->t_errno = EFAULT; return -1;
     }
     int ret = vfs_ioctl(filp, request, arg);
@@ -1913,7 +1936,22 @@ static long sys_readlink(const char *path, char *buf, size_t bufsize) {
     if (len < 0) { current->t_errno = EFAULT; return -1; }
     kpath[len] = '\0';
 
-    /* Simplified: no symlink support, return the path itself */
+    /* FIXED (v4.2.9): BUG-SYMLINK — Read symlink target from inode */
+    struct inode *inode = vfs_lookup(kpath);
+    if (!inode) { current->t_errno = ENOENT; return -1; }
+    if (inode->symlink_target) {
+        size_t target_len = strlen(inode->symlink_target);
+        size_t copy_len = (target_len < bufsize) ? target_len : (bufsize - 1);
+        if (copy_to_user(buf, inode->symlink_target, copy_len) != 0) {
+            current->t_errno = EFAULT; return -1;
+        }
+        if (copy_len < bufsize) {
+            char zero = '\0';
+            copy_to_user(buf + copy_len, &zero, 1);
+        }
+        return (long)copy_len;
+    }
+    /* Fallback: return the path itself if no symlink target */
     size_t copy_len = (size_t)len;
     if (copy_len >= bufsize) copy_len = bufsize - 1;
     if (copy_to_user(buf, kpath, copy_len) != 0) {
@@ -1942,10 +1980,20 @@ static long sys_symlink(const char *target, const char *linkpath) {
     ktarget[tlen] = '\0';
     klink[llen] = '\0';
 
-    /* Simplified: create a regular file containing the target path */
+    /* FIXED (v4.2.9): BUG-SYMLINK — Create symlink inode with target stored */
+    /* Create the symlink file and store the target in the inode */
     struct file *f = vfs_open(klink, O_CREAT | O_WRONLY);
     if (!f) { current->t_errno = EACCES; return -1; }
-    vfs_write(f, ktarget, (size_t)(tlen + 1));
+    /* Store the target path in the inode's symlink_target field */
+    if (f->inode) {
+        if (f->inode->symlink_target) {
+            kfree(f->inode->symlink_target);
+        }
+        f->inode->symlink_target = (char *)kmalloc((size_t)(tlen + 1));
+        if (f->inode->symlink_target) {
+            memcpy(f->inode->symlink_target, ktarget, (size_t)(tlen + 1));
+        }
+    }
     vfs_close(f);
     return 0;
 }

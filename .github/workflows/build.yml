@@ -50,7 +50,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run code style checks
-        continue-on-error: true
+        # FIXED (v4.2.9): CI-STYLE - Style checks now block PRs
+        continue-on-error: false
         run: |
           chmod +x .github/workflows/checkstyle.sh
           .github/workflows/checkstyle.sh
@@ -125,7 +126,7 @@ jobs:
           echo "::endgroup::"
 
   # ────────────────────────────────────────────────────────────────────
-  #  cppcheck — Static analysis (non-blocking, informational only)
+  #  cppcheck — Static analysis (blocks PRs on failure)
   # ────────────────────────────────────────────────────────────────────
   cppcheck:
     name: 'cppcheck Static Analysis'
@@ -133,7 +134,8 @@ jobs:
     timeout-minutes: 10
     needs: lint
     if: ${{ !cancelled() }}
-    continue-on-error: true
+    # FIXED (v4.2.9): CI-STYLE - cppcheck now blocks PRs
+    continue-on-error: false
 
     steps:
       - name: Checkout
@@ -487,7 +489,7 @@ jobs:
             "LICENSE"
             "CHANGELOG.md"
             "CONTRIBUTING.md"
-            "first-contributions.md"
+            "docs/first-contributions.md"  # FIXED (v4.2.9): CI-FIRST-CONTRIB - corrected path
             "Makefile"
             "linker.ld"
             ".gitignore"

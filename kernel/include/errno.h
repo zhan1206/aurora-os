@@ -53,6 +53,7 @@
 #define ENOTCONN 107   /* Transport endpoint is not connected */
 #define ESHUTDOWN 108  /* Cannot send after transport endpoint shutdown */
 #define EOPNOTSUPP 95  /* Operation not supported on transport endpoint */
+#define EMSGSIZE  90   /* Message too long */
 
 /* Per-task error number — accessed via current->t_errno in task_struct */
 /* (see sched.h for the task_struct definition) */

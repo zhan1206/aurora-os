@@ -88,8 +88,16 @@ void tcp_cong_socket_init(int sock_id) {
     }
 
     if (slot < 0) {
-        /* Overwrite oldest */
-        slot = sock_id % MAX_TCP_CONG_SOCKETS;
+        /* FIXED (v4.2.9): BUG-TCP-OVERWRITE — Before overwriting by
+         * slot_id % MAX_TCP_CONG_SOCKETS, check if the target slot is
+         * still in use.  If it is, reject the new connection instead of
+         * silently corrupting an active congestion control state. */
+        int candidate = sock_id % MAX_TCP_CONG_SOCKETS;
+        if (tcp_cong_data[candidate].cwnd != 0) {
+            spin_unlock(&tcp_cong_lock);
+            return;
+        }
+        slot = candidate;
     }
 
     memset(&tcp_cong_data[slot], 0, sizeof(tcp_cong_data[slot]));

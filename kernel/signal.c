@@ -354,66 +354,70 @@ void check_signals(void) {
             return;
         }
 
-        /* Save RFLAGS to restore AC flag after user memory access.
-         * This ensures SMAP is properly re-enabled even if an
-         * exception occurs within the protected window. */
-        uint64_t saved_rflags;
-        asm volatile ("pushfq; popq %0" : "=r"(saved_rflags));
-        asm volatile ("stac" ::: "memory");
+        /* FIXED (v4.2.9): BUG-SIGNAL-SMAP — Enable SMAP only around
+         * actual memcpy operations to user space, not the entire
+         * frame/trampoline setup.  This minimizes the SMAP-disabled
+         * window and prevents accidental kernel writes to user memory. */
 
-        uint8_t *tramp = (uint8_t *)(uintptr_t)(new_rsp + 8);
-        tramp[0] = 0xB8;                        /* mov eax, imm32 */
+        /* Build trampoline code in a kernel buffer */
+        uint8_t tramp_buf[SIG_TRAMPOLINE_SIZE];
+        memset(tramp_buf, 0, sizeof(tramp_buf));
+        tramp_buf[0] = 0xB8;                        /* mov eax, imm32 */
         {
             uint32_t sigret = (uint32_t)SYS_SIGRETURN;
-            tramp[1] = (uint8_t)(sigret);
-            tramp[2] = (uint8_t)(sigret >> 8);
-            tramp[3] = (uint8_t)(sigret >> 16);
-            tramp[4] = (uint8_t)(sigret >> 24);
+            tramp_buf[1] = (uint8_t)(sigret);
+            tramp_buf[2] = (uint8_t)(sigret >> 8);
+            tramp_buf[3] = (uint8_t)(sigret >> 16);
+            tramp_buf[4] = (uint8_t)(sigret >> 24);
         }
-        tramp[5] = 0x0F;                        /* syscall */
-        tramp[6] = 0x05;
-        /* Zero the remaining trampoline bytes for security */
-        memset(tramp + 7, 0, SIG_TRAMPOLINE_SIZE - 7);
+        tramp_buf[5] = 0x0F;                        /* syscall */
+        tramp_buf[6] = 0x05;
 
-        /* Write return address pointing to trampoline code */
-        *(uint64_t *)(uintptr_t)new_rsp = new_rsp + 8;
-
-        /* Place sigframe above trampoline */
-        struct sigframe *frame = (struct sigframe *)(uintptr_t)(new_rsp + 8 + SIG_TRAMPOLINE_SIZE);
-
-        /* Save current user context */
-        frame->signo  = s;
-        frame->r15    = current->current_tf->r15;
-        frame->r14    = current->current_tf->r14;
-        frame->r13    = current->current_tf->r13;
-        frame->r12    = current->current_tf->r12;
-        frame->r11    = current->current_tf->r11;
-        frame->r10    = current->current_tf->r10;
-        frame->r9     = current->current_tf->r9;
-        frame->r8     = current->current_tf->r8;
-        frame->rsi    = current->current_tf->rsi;
-        frame->rdi    = current->current_tf->rdi;
-        frame->rdx    = current->current_tf->rdx;
-        frame->rcx    = current->current_tf->rcx;
-        frame->rax    = current->current_tf->rax;
-        frame->rip    = current->current_tf->rip;
-        frame->rflags = current->current_tf->r11;  /* R11 holds RFLAGS from syscall entry */
-        frame->rsp    = user_rsp;
-        /* FIXED (v4.2.8): BUG-SIGRETURN-MASK — Save blocked mask for restoration */
-        frame->blocked = sig->blocked;
+        /* Build sigframe on kernel stack */
+        struct sigframe frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.signo  = s;
+        frame.r15    = current->current_tf->r15;
+        frame.r14    = current->current_tf->r14;
+        frame.r13    = current->current_tf->r13;
+        frame.r12    = current->current_tf->r12;
+        frame.r11    = current->current_tf->r11;
+        frame.r10    = current->current_tf->r10;
+        frame.r9     = current->current_tf->r9;
+        frame.r8     = current->current_tf->r8;
+        frame.rsi    = current->current_tf->rsi;
+        frame.rdi    = current->current_tf->rdi;
+        frame.rdx    = current->current_tf->rdx;
+        frame.rcx    = current->current_tf->rcx;
+        frame.rax    = current->current_tf->rax;
+        frame.rip    = current->current_tf->rip;
+        frame.rflags = current->current_tf->r11;  /* R11 holds RFLAGS from syscall entry */
+        frame.rsp    = user_rsp;
+        frame.blocked = sig->blocked;
 
         /* Store saved context in per-task signal_state (thread-safe) */
-        sig->saved_rsp = frame->rsp;
-        sig->saved_rip = frame->rip;
+        sig->saved_rsp = frame.rsp;
+        sig->saved_rip = frame.rip;
 
-        /* Modify trapframe: redirect to handler */
+        /* Copy sigframe to user stack with SMAP temporarily disabled */
+        {
+            uint64_t frame_addr = new_rsp + 8 + SIG_TRAMPOLINE_SIZE;
+            asm volatile ("stac" ::: "memory");
+            memcpy((void *)(uintptr_t)frame_addr, &frame, sizeof(frame));
+            asm volatile ("clac" ::: "memory");
+        }
+
+        /* Modify trapframe: redirect to handler (kernel memory, no SMAP issue) */
         current->current_tf->rip = (uint64_t)(uintptr_t)handler;
         current->current_tf->rsp = new_rsp;
         current->current_tf->rdi = (uint64_t)s;  /* arg0 = signo */
 
-        /* Restore AC flag to its original state, re-enabling SMAP
-         * if it was previously enabled. */
-        if (!(saved_rflags & (1ULL << 18))) {
+        /* Write return address and trampoline to user stack with SMAP temporarily disabled */
+        {
+            uint64_t ret_addr = new_rsp + 8;
+            asm volatile ("stac" ::: "memory");
+            memcpy((void *)(uintptr_t)new_rsp, &ret_addr, sizeof(ret_addr));
+            memcpy((void *)(uintptr_t)(new_rsp + 8), tramp_buf, SIG_TRAMPOLINE_SIZE);
             asm volatile ("clac" ::: "memory");
         }
 

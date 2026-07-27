@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Lines of Code](https://img.shields.io/badge/code-~60,000%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.2.8-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.2.9-blue)](CHANGELOG.md)
 
 **100%自研实现** | 无 Linux 内核代码 | 参考 Minix/Linux/CoolPotOS 设计理念  /* FIXED (v4.2.8): DOC-100% SELF-DEVELOPED */
 
@@ -246,7 +246,7 @@ AuroraOS
 - **Slab 分配器**: 8 个大小类（32B–4096B），小对象高效复用
 - **E820 解析**: 支持 Multiboot1 和 Multiboot2 内存信息
 - **COW**: 写时复制页面克隆，按需分配
-- **ASLR**: 栈地址空间布局随机化（xorshift64 PRNG）
+- **ASLR**: 栈地址空间布局随机化（ChaCha20 CSPRNG） /* FIXED (v4.2.9): DOC-ASLR-PRNG */
 
 ### 进程管理
 - **五状态模型**: RUNNING → READY → BLOCKED → ZOMBIE → DEAD
@@ -254,7 +254,7 @@ AuroraOS
 - **进程树**: 父子进程链表 + init 收养孤儿
 - **阻塞 waitpid**: 真正阻塞等待，子进程退出时唤醒父进程
 - **Fork**: COW 页面克隆 + 完整寄存器状态复制
-- **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列，负载均衡
+- **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列 /* FIXED (v4.2.9): DOC-SMP — AP cores idle, only CPU0 runs scheduler; load balancing is dead code */
 
 ### 系统调用（110 个）
 
@@ -285,7 +285,7 @@ AuroraOS
   - `/dev/tty` - 当前终端
   - `/dev/random` - 硬件随机数（RDRAND，阻塞）
   - `/dev/urandom` - 硬件随机数（RDRAND，非阻塞）
-  - `/dev/usb/` - USB 设备节点（v4.2.7）
+  /* FIXED (v4.2.9): DOC-DEV-USB — /dev/usb/ device nodes are planned but not yet created by the USB subsystem */
 - **procfs**: 虚拟文件系统（受 CoolPotOS 启发）
   - `/proc/cpuinfo` - CPU 信息
   - `/proc/meminfo` - 内存统计

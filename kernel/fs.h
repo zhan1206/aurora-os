@@ -43,6 +43,8 @@ struct inode {
     uint32_t         ino;    /* inode number */
     /* FIXED (v4.2.8): SEC-CHMOD — file permission mode (owner/group/other rwx) */
     int              mode;   /* file permission bits (e.g., 0644, 0755) */
+    /* FIXED (v4.2.9): BUG-SYMLINK — symlink target path stored in inode */
+    char            *symlink_target; /* target path for symlinks (NULL if not a symlink) */
 };
 
 /* Dentry: directory entry cache */

@@ -154,6 +154,14 @@ int http_get(const char *url, char *response_buf, size_t buf_size) {
     int header_done = 0;
     int retry;
 
+    /* FIXED (v4.2.9): BUG-HTTP-HEADER — Accumulate data across multiple
+     * recv() calls so that the \r\n\r\n header delimiter is found even
+     * when it spans recv boundaries.  The old code only searched within
+     * a single tmp[] buffer. */
+    static char http_buf[4096];
+    static int http_buf_len = 0;
+    http_buf_len = 0;
+
     for (retry = 0; retry < 200; retry++) {
         net_poll();
 
@@ -165,13 +173,22 @@ int http_get(const char *url, char *response_buf, size_t buf_size) {
             continue;
         }
 
+        /* Accumulate into http_buf */
+        if (http_buf_len + n < (int)sizeof(http_buf)) {
+            memcpy(http_buf + http_buf_len, tmp, (size_t)n);
+            http_buf_len += n;
+        } else {
+            /* Buffer overflow — truncate */
+            http_buf_len = (int)sizeof(http_buf);
+        }
+
         if (!header_done) {
-            /* Find end of headers (\r\n\r\n) */
+            /* Find end of headers (\r\n\r\n) in accumulated buffer */
             int i;
             int header_end = -1;
-            for (i = 0; i < n - 3; i++) {
-                if (tmp[i] == '\r' && tmp[i + 1] == '\n' &&
-                    tmp[i + 2] == '\r' && tmp[i + 3] == '\n') {
+            for (i = 0; i < http_buf_len - 3; i++) {
+                if (http_buf[i] == '\r' && http_buf[i + 1] == '\n' &&
+                    http_buf[i + 2] == '\r' && http_buf[i + 3] == '\n') {
                     header_end = i + 4;
                     break;
                 }
@@ -181,11 +198,11 @@ int http_get(const char *url, char *response_buf, size_t buf_size) {
                 /* Copy body after headers */
                 header_done = 1;
                 int body_start = header_end;
-                int body_len = n - body_start;
+                int body_len = http_buf_len - body_start;
                 if (body_len > 0 && total < buf_size) {
                     size_t copy = (size_t)body_len;
                     if (total + copy > buf_size) copy = buf_size - total;
-                    memcpy(response_buf + total, tmp + body_start, copy);
+                    memcpy(response_buf + total, http_buf + body_start, copy);
                     total += copy;
                 }
             }

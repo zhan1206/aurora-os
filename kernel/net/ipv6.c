@@ -288,6 +288,26 @@ int ndp_lookup(const ipv6_addr_t *ip, uint8_t mac_out[6]) {
 }
 
 /* ================================================================
+ * FIXED (v4.2.9): BUG-IPV6-NEIGH — IPv6 Neighbor Cache Aging
+ *
+ * Stale neighbor cache entries were never removed, causing the cache
+ * to fill up with outdated entries and preventing new entries from
+ * being added.  This function is called from the timer interrupt
+ * (via net_poll) to age out entries older than 300 poll cycles.
+ * ================================================================ */
+void ipv6_neighbor_age(void) {
+    spin_lock(&ipv6_neighbor_lock);
+    int i;
+    for (i = 0; i < IPV6_NEIGHBOR_CACHE_SIZE; i++) {
+        if (ipv6_neighbor_cache[i].valid &&
+            (ipv6_neighbor_age - ipv6_neighbor_cache[i].age) > 300) {
+            ipv6_neighbor_cache[i].valid = 0;
+        }
+    }
+    spin_unlock(&ipv6_neighbor_lock);
+}
+
+/* ================================================================
  * NDP: Neighbor Solicitation
  * ================================================================ */
 int ndp_send_solicitation(const ipv6_addr_t *target) {
