@@ -226,6 +226,9 @@ void lapic_send_ipi(int lapic_id, int vector) {
      */
     /* Set destination in ICR high */
     lapic_write(LAPIC_ICR_HI, (uint32_t)lapic_id << 24);
+    /* FIXED (v4.3.0): NEW-29 ICR-ATOMIC — ensure ICR high write is
+     * globally visible before ICR low write triggers the IPI. */
+    __asm__ volatile("sfence" ::: "memory");
 
     /* Write ICR low: fixed delivery, physical destination, edge,
      * assert, no shorthand, vector */

@@ -3034,7 +3034,8 @@ static long sys_getdents64(unsigned int fd, struct linux_dirent64 *dirp,
  * ACPI (v4.2.6)
  * ================================================================ */
 static long sys_acpi_shutdown(void) {
-    /* Only allow root (uid 0) to shutdown */
+    /* FIXED (v4.3.0): NEW-6 ACPI-UID */
+    if (current->uid != 0) { current->t_errno = EPERM; return -1; }
     int ret = acpi_shutdown();
     if (ret < 0) {
         current->t_errno = EIO;
@@ -3049,6 +3050,8 @@ static long sys_acpi_shutdown(void) {
  * ACPI (v4.2.6)
  * ================================================================ */
 static long sys_acpi_reboot(void) {
+    /* FIXED (v4.3.0): NEW-6 ACPI-UID */
+    if (current->uid != 0) { current->t_errno = EPERM; return -1; }
     acpi_reboot();
     /* Should never return */
     return 0;
@@ -3117,6 +3120,11 @@ static long sys_getresgid(int *rgid, int *egid, int *sgid) {
  * POSIX (v4.2.6): SYS_SETRESUID — Set real, effective, saved UID
  * ================================================================ */
 static long sys_setresuid(int ruid, int euid, int suid) {
+    /* FIXED (v4.3.0): NEW-19 SETRESUID-RANGE — reject negative UID values. */
+    if (ruid < 0 || euid < 0 || suid < 0) {
+        current->t_errno = EINVAL;
+        return -1;
+    }
     (void)ruid; (void)euid; (void)suid;
     /* Single-user OS: always allowed */
     return 0;
@@ -3126,6 +3134,11 @@ static long sys_setresuid(int ruid, int euid, int suid) {
  * POSIX (v4.2.6): SYS_SETRESGID — Set real, effective, saved GID
  * ================================================================ */
 static long sys_setresgid(int rgid, int egid, int sgid) {
+    /* FIXED (v4.3.0): NEW-19 SETRESGID-RANGE — reject negative GID values. */
+    if (rgid < 0 || egid < 0 || sgid < 0) {
+        current->t_errno = EINVAL;
+        return -1;
+    }
     (void)rgid; (void)egid; (void)sgid;
     /* Single-user OS: always allowed */
     return 0;

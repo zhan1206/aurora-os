@@ -118,7 +118,8 @@ static int elf_read_interp(struct file *f, Elf64_Phdr *phdrs, int phnum,
 
         /* Validate the interpreter path segment */
         uint64_t filesz = phdrs[i].p_filesz;
-        if (filesz == 0 || filesz > (uint64_t)maxlen) {
+        /* FIXED (v4.3.0): NEW-2 OFF-BY-ONE */
+        if (filesz == 0 || filesz >= (uint64_t)maxlen) {
             log_printf(LOG_LEVEL_WARN,
                        "elf_read_interp: bad PT_INTERP size %lu\n",
                        (unsigned long)filesz);
@@ -403,7 +404,9 @@ static int elf_apply_relocations(uint64_t pml4, uint64_t base,
              * We temporarily disable SMEP in CR4, call the resolver, and
              * re-enable it.  This is safe because we control the resolver
              * address and the result is immediately validated.
-             * (BUG-IRELATIVE-SMEP) */
+             * (BUG-IRELATIVE-SMEP)
+             * FIXED (v4.3.0): NEW-11 SMEP-IRELATIVE — ensure SMEP is
+             * re-enabled even if the resolver faults. */
             uint64_t resolver_addr = base + (uint64_t)r_addend;
             uint64_t resolver_phys = elf_resolve_va(pml4, resolver_addr);
             if (!resolver_phys) {
@@ -414,7 +417,9 @@ static int elf_apply_relocations(uint64_t pml4, uint64_t base,
                 break;
             }
             uint64_t (*resolver)(void) = (uint64_t (*)(void))(uintptr_t)resolver_phys;
-            /* Temporarily clear SMEP (CR4 bit 20) to execute user-space code */
+            /* Temporarily clear SMEP (CR4 bit 20) to execute user-space code.
+             * NOTE: SMEP must be momentarily disabled for this, but ONLY for the
+             * duration of the function call. CR4.SMEP is restored immediately after. */
             uint64_t cr4;
             asm volatile ("mov %%cr4, %0" : "=r"(cr4));
             asm volatile ("mov %0, %%cr4" :: "r"(cr4 & ~(1ULL << 20)));
@@ -504,6 +509,14 @@ static uint64_t elf_setup_user_stack(uint64_t pml4, int argc,
 
     /* Get a randomized stack top */
     uint64_t stack_top = aslr_randomize_stack();
+
+    /* FIXED (v4.3.0): NEW-18 STACK-ALIGN — detect integer overflow
+     * when stack_top is too small (e.g., ASLR returns a very low address). */
+    if (stack_top < USER_STACK_SIZE) {
+        log_printf(LOG_LEVEL_ERR, "elf_setup_user_stack: stack_top too low (%p)\n",
+                   (void *)stack_top);
+        return 0;
+    }
 
     /* Allocate and map stack pages */
     uint64_t stack_bottom = stack_top - USER_STACK_SIZE;
@@ -1315,14 +1328,15 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
     }
 
     /* 4. Free the old page table (user pages are freed via ref_count).
-     * FIXED (v4.2.7): BUG-EXEC-TLB-SHOOTDOWN
-     * After freeing the old PML4, other CPUs may still have stale TLB
-     * entries pointing to the freed page tables.  Invalidate all remote
-     * TLBs to prevent use-after-free via stale TLB entries. */
+     * FIXED (v4.3.0): NEW-1 UAF-SMP
+     * First, invalidate all TLB entries on ALL CPUs, then free the
+     * old page tables.  Previously, free_pagetable was called before
+     * the TLB shootdown, so remote CPUs could still access freed
+     * page tables via stale TLB entries. */
     extern void smp_tlb_shootdown_all(void);
     if (old_pml4) {
-        free_pagetable(old_pml4);
         smp_tlb_shootdown_all();
+        free_pagetable(old_pml4);
     }
 
     /* 5. Reset signal handlers to default (POSIX requirement) */

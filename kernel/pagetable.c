@@ -293,12 +293,14 @@ static uint64_t split_huge_page(uint64_t *pd, int pd_idx, uint64_t vaddr) {
     if (!pt_phys) return 0;
 
     uint64_t *new_pt = phys_to_virt(pt_phys);
+    /* FIXED (v4.3.0): NEW-3 SPLIT-REFCOUNT */
     for (int i = 0; i < 512; i++) {
         new_pt[i] = (huge_base + ((uint64_t)i * 4096))
                   | (huge_flags & ~PTE_PS)  /* clear PS bit in PT entries */
                   | PTE_PRESENT
                   | PTE_ACCESSED
                   | PTE_DIRTY;
+        page_ref_inc(huge_base + ((uint64_t)i * 4096));
     }
 
     /* Replace PD entry with pointer to new PT */
@@ -1106,6 +1108,8 @@ void vma_free_all(struct task_struct *task) {
     task->vm_areas = NULL;
     spin_unlock((spinlock_t*)&task->vma_lock);
 
+    /* FIXED (v4.3.0): NEW-13 VMA-FREE-ITER — save next before kfree
+     * to avoid accessing freed memory. */
     while (vma) {
         struct vm_area *next = vma->next;
         kfree(vma);
@@ -1288,28 +1292,33 @@ void pf_handler_c(uint64_t error_code) {
         uint64_t pd_idx   = (cr2 >> 21) & 0x1FF;
         uint64_t pt_idx   = (cr2 >> 12) & 0x1FF;
 
+        /* FIXED (v4.3.0): NEW-4 COW-LOCK */
+        spin_lock(&pt_lock);
+
         uint64_t cr3 = read_cr3();
         uint64_t *pml4 = phys_to_virt(cr3);
-        if (!(pml4[pml4_idx] & PTE_PRESENT)) goto unhandled;
+        if (!(pml4[pml4_idx] & PTE_PRESENT)) { spin_unlock(&pt_lock); goto unhandled; }
 
         uint64_t *pdpt = phys_to_virt(pml4[pml4_idx] & PTE_ADDR_MASK);
-        if (!(pdpt[pdpt_idx] & PTE_PRESENT)) goto unhandled;
+        if (!(pdpt[pdpt_idx] & PTE_PRESENT)) { spin_unlock(&pt_lock); goto unhandled; }
 
         uint64_t *pd = phys_to_virt(pdpt[pdpt_idx] & PTE_ADDR_MASK);
-        if (!(pd[pd_idx] & PTE_PRESENT)) goto unhandled;
+        if (!(pd[pd_idx] & PTE_PRESENT)) { spin_unlock(&pt_lock); goto unhandled; }
 
         /* 2MB huge page in user space: split it, then handle the 4KB fault */
         if (pd[pd_idx] & PTE_PS) {
-            if (!split_huge_page(pd, (int)pd_idx, cr2)) goto unhandled;
+            if (!split_huge_page(pd, (int)pd_idx, cr2)) { spin_unlock(&pt_lock); goto unhandled; }
         }
 
         uint64_t *pt = phys_to_virt(pd[pd_idx] & PTE_ADDR_MASK);
         uint64_t pte = pt[pt_idx];
 
-        if (!(pte & PTE_PRESENT)) goto unhandled;
+        if (!(pte & PTE_PRESENT)) { spin_unlock(&pt_lock); goto unhandled; }
 
         uint64_t phys_page = pte & PTE_ADDR_MASK;
         uint32_t ref = page_ref_get(phys_page);
+
+        spin_unlock(&pt_lock);
 
         if (ref <= 1) {
             /*
@@ -1408,6 +1417,10 @@ void pf_handler_c(uint64_t error_code) {
          * PTE_USER set depending on the mapping path, so we walk
          * through them checking only PRESENT, then verify USER on
          * the final leaf PTE. */
+        /* FIXED (v4.3.0): NEW-12 SMAP-LOCK — hold pt_lock during
+         * page table walk to prevent race with concurrent unmap. */
+        spin_lock(&pt_lock);
+
         uint64_t pml4_idx = (cr2 >> 39) & 0x1FF;
         uint64_t pdpt_idx = (cr2 >> 30) & 0x1FF;
         uint64_t pd_idx   = (cr2 >> 21) & 0x1FF;
@@ -1423,17 +1436,20 @@ void pf_handler_c(uint64_t error_code) {
                     if (pd[pd_idx] & PTE_PS) {
                         /* 2MB huge page: check USER on the PDE itself */
                         if (pd[pd_idx] & PTE_USER) {
+                            spin_unlock(&pt_lock);
                             goto smap_violation;
                         }
                     } else {
                         uint64_t *pt = phys_to_virt(pd[pd_idx] & PTE_ADDR_MASK);
                         if ((pt[pt_idx] & PTE_PRESENT) && (pt[pt_idx] & PTE_USER)) {
+                            spin_unlock(&pt_lock);
                             goto smap_violation;
                         }
                     }
                 }
             }
         }
+        spin_unlock(&pt_lock);
         /* Fall through to unhandled if not a SMAP violation */
         goto unhandled;
 

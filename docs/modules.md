@@ -186,7 +186,7 @@ switch(num) → sys_read/sys_write/sys_fork/...
 返回用户空间
 ```
 
-/* FIXED (v4.2.9): DOC-MODULES-SYSCALL — corrected from 77 to 110 */
+<!-- FIXED (v4.3.0): DOC-SYSCALL-COUNT -->
 **支持的完整系统调用列表（110个）**:
 - I/O: read, write, open, close, stat, fstat, poll, lseek, ioctl, access, getdents
 - 进程: fork, execve, exit, getpid, waitpid, getppid, nice, sched_yield, brk, sbrk

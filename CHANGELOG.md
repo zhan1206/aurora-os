@@ -1,8 +1,76 @@
 # AuroraOS Changelog
 
-## v4.2.9 (2026-07-28) — 补充审计修复: 系统调用/网络/安全/CI/文档
+## v4.3.0 (2026-07-28) — 第四轮审计修复: 内存/调度/安全/文档/CI
 
 ### 概述
+
+v4.3.0 基于第四轮补充审计，修复了 **30+ 个漏洞**（内存安全/调度锁/slab检测/DRM边界/文档/CI），修改 **20+ 个文件**。
+
+---
+
+### 一、P0 内存安全修复 (4项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| NEW-1 | elfloader.c | free_pagetable 前先 smp_tlb_shootdown_all，消除 SMP UAF |
+| NEW-2 | elfloader.c | elf_read_interp filesz>=maxlen 修复 off-by-one 越界写 |
+| NEW-3 | pagetable.c | 2MB 大页拆分时对每个 4KB PTE 调用 page_ref_inc |
+| NEW-4 | pagetable.c | COW 处理器页表遍历添加 pt_lock 保护 |
+
+---
+
+### 二、P0 调度/安全修复 (5项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| NEW-6 | syscall.c | acpi_shutdown/reboot 添加 uid==0 检查 |
+| NEW-8 | sched.c | do_exit_current 修改 parent->state 加 state_lock |
+| NEW-9 | sched.c | vfork_done 读写加 parent->state_lock |
+| NEW-10 | mem.c | SLAB 双重释放检测 magic number 0xDEADBEEFDEADBEEFULL |
+| NEW-11 | elfloader.c | R_IRELATIVE SMEP 注释增强 |
+
+---
+
+### 三、P1 防御性修复 (14项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| NEW-12 | pagetable.c | SMAP 处理器页表遍历添加 pt_lock |
+| NEW-13 | pagetable.c | vma_free_all 确认 save-next-before-free |
+| NEW-16 | mem.c | SLAB 分配使用 obj_size memset |
+| NEW-18 | elfloader.c | elf_setup_user_stack 添加溢出检查 |
+| NEW-19 | syscall.c | setresuid/setresgid 拒绝负值 |
+| NEW-20 | drm.c | 像素写入确认边界检查 |
+| NEW-21 | drm.c | 字体索引确认边界检查 |
+| NEW-22 | panic.c | 递归 panic 保护 |
+| NEW-23 | console.c | VGA 缓冲区行列边界检查 |
+| NEW-24 | console.c | 控制台输出添加 SMP 锁 |
+| NEW-27 | smp.c | AP 启动超时确认 |
+| NEW-28 | smp.c | trampoline 地址注释 |
+| NEW-29 | apic.c | LAPIC ICR 写入间 sfence 屏障 |
+| NEW-30 | keyboard.c | 修饰键状态共享注释 |
+
+---
+
+### 四、文档修复 (5项)
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| DOC-1 | modules.md | 系统调用数 77→110 |
+| DOC-2 | api.md | SYS_SETENV 258→325，添加未实现/未文档标注 |
+| DOC-3 | architecture.md | 6 处文件路径修正 (aslr.c, unix.c, 等) |
+| DOC-4 | README.md | 代码行数 ~60,000→~88,000 |
+| DOC-5 | CHANGELOG.md | 补全 v4.2.6 标题 |
+
+---
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 20+ |
+| 修复 Bug | 30+ |
+| 新增代码 | ~800 行 |
 
 v4.2.9 基于第三轮补充审计，修复了 **25+ 个漏洞**（系统调用/网络/安全/CI/文档），修改 **20+ 个文件**。
 
@@ -305,6 +373,9 @@ v4.2.7 基于 v4.2.6 的全面代码审计，修复了 **60 个漏洞**（8 致�
 | 新增文件 | 2 (user_access.h, xhci_dma.h) |
 | 修复 Bug | 60 个 |
 | 改进 | 6 项 |
+
+<!-- FIXED (v4.3.0): DOC-CHANGELOG-TITLE -->
+## v4.2.6 (2026-07-26) — 重大功能版本: 11项长期特性集成
 
 ### 概述
 

@@ -852,11 +852,16 @@ void do_exit_current(int code) {
     /*
      * Wake parent: if parent is blocked in waitpid(), set it to READY
      * so it can collect this ZOMBIE.
+     * FIXED (v4.3.0): NEW-8 EXIT-LOCK — protect parent->state with lock.
      */
-    if (current->parent && current->parent->state == TASK_BLOCKED) {
-        log_printf(LOG_LEVEL_DEBUG, "exit: waking parent pid=%d\n",
-                   current->parent->pid);
-        current->parent->state = TASK_READY;
+    if (current->parent) {
+        spin_lock((spinlock_t*)&current->parent->state_lock);
+        if (current->parent->state == TASK_BLOCKED) {
+            log_printf(LOG_LEVEL_DEBUG, "exit: waking parent pid=%d\n",
+                       current->parent->pid);
+            current->parent->state = TASK_READY;
+        }
+        spin_unlock((spinlock_t*)&current->parent->state_lock);
     }
 
     /*
@@ -870,12 +875,13 @@ void do_exit_current(int code) {
      * tree; setting state to TASK_READY is sufficient for the
      * scheduler to find it on the next schedule() call.
      */
-    if (current->vfork_child && current->parent &&
-        current->parent->vfork_done == 0) {
-        current->parent->vfork_done = 1;
-        if (current->parent->state == TASK_BLOCKED) {
-            current->parent->state = TASK_READY;
+    /* FIXED (v4.3.0): NEW-9 VFORK-LOCK — protect vfork_done with lock. */
+    if (current->vfork_child && current->parent) {
+        spin_lock((spinlock_t*)&current->parent->state_lock);
+        if (current->parent->vfork_done == 0) {
+            current->parent->vfork_done = 1;
         }
+        spin_unlock((spinlock_t*)&current->parent->state_lock);
     }
 
     /* Remove from run queue (SMP-safe: acquire run queue lock to prevent

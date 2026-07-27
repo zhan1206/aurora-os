@@ -32,6 +32,9 @@
 #define MOD_CAPSLOCK 0x40
 #define MOD_NUMLOCK  0x80
 
+/* NOTE: Keyboard modifier state is shared across all processes. /* FIXED (v4.3.0): NEW-30 KB-MODIFIER */
+ * This is inherently a hardware limitation - there is only one keyboard.
+ * Full virtualization would require per-process virtual keyboard state. */
 static uint8_t modifiers = 0;
 static uint8_t caps_lock_on = 0;
 

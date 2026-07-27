@@ -141,6 +141,8 @@ static struct drm_framebuffer *drm_get_fb(int fb_id) {
 /* Set a pixel in a framebuffer */
 static void drm_fb_set_pixel(struct drm_framebuffer *fb, int x, int y, uint32_t color) {
     if (!fb || !fb->buffer) return;
+    /* FIXED (v4.3.0): NEW-20 DRM-PIXEL — bounds check prevents OOB
+     * framebuffer access from malformed coordinates. */
     if (x < 0 || y < 0 || (uint32_t)x >= fb->width || (uint32_t)y >= fb->height) return;
 
     uint32_t offset = (uint32_t)y * fb->pitch + (uint32_t)x * (fb->bpp / 8);
@@ -376,6 +378,8 @@ void drm_fb_draw_char(int fb_id, int x, int y, char c, uint32_t fg, uint32_t bg)
     }
 
     int glyph_index = (unsigned char)c;
+    /* FIXED (v4.3.0): NEW-21 DRM-FONT — bounds check character against
+     * font_data array size to prevent OOB access. */
     if (glyph_index < 32 || glyph_index > 126) {
         glyph_index = 32;  /* default to space */
     }

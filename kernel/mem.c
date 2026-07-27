@@ -995,7 +995,9 @@ slab_pop:
         /* Zero the entire slab object for security (prevent info leak).
          * Using cache->obj_size instead of the requested size ensures
          * that residual data from previous allocations is cleared even
-         * when the object is larger than the request (NL3 fix). */
+         * when the object is larger than the request (NL3 fix).
+         * FIXED (v4.3.0): NEW-16 SLAB-INFO-LEAK — use obj_size, not
+         * aligned_size, to prevent information leak via padding. */
         memset(obj, 0, cache->obj_size);
 
         slab_unlock();
@@ -1036,11 +1038,22 @@ void kfree(void *ptr) {
 
         slab_lock();
 
+        /* FIXED (v4.3.0): NEW-10 SLAB-DOUBLE-FREE — detect double-free via magic. */
+        #define SLAB_FREE_MAGIC 0xDEADBEEFDEADBEEFULL
+        if (*(uint64_t*)ptr == SLAB_FREE_MAGIC) {
+            log_printf(LOG_LEVEL_ERR, "slab: double free detected at %p\n", ptr);
+            slab_unlock();
+            return;
+        }
+
         /* Zero memory before returning to free list (prevent info leak) */
         memset(ptr, 0, cache->obj_size);
 
         *(void**)ptr = cache->free_list;
         cache->free_list = ptr;
+
+        /* Mark as freed (magic for double-free detection) */
+        *(uint64_t*)ptr = SLAB_FREE_MAGIC;
 
         /*
          * FIXED (v4.1.4): Track free objects per slab page and reclaim

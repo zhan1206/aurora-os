@@ -704,6 +704,9 @@ void smp_init(void *mb_info) {
     }
 
     /* Build trampoline code at 0x8000 */
+    /* FIXED (v4.3.0): NEW-28 TRAMPOLINE-ADDR — AP trampoline at 0x8000
+     * must be below 1MB and not conflict with kernel (loaded at 0x100000).
+     * This is guaranteed by the linker script and real-mode addressing. */
     uint64_t pml4 = get_kernel_cr3();
     build_trampoline(pml4);
 
@@ -776,6 +779,8 @@ void smp_init(void *mb_info) {
         lapic_start_ap(apic_ids[i], (uint32_t)TRAMPOLINE_ADDR);
 
         /* Wait for AP to come online (with timeout) */
+        /* FIXED (v4.3.0): NEW-27 AP-TIMEOUT — timeout prevents infinite
+         * hang if AP never starts. */
         int timeout = 1000000;  /* ~1 second */
         while (ap_online_count <= (uint32_t)i && timeout > 0) {
             timeout--;

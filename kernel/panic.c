@@ -77,7 +77,16 @@ static void reg_line(const char *name, uint64_t val) {
 /* ================================================================
  * panic() — Emergency display
  * ================================================================ */
+/* FIXED (v4.3.0): NEW-22 PANIC-RECURSE — prevent infinite recursion
+ * if panic() is called again from within a panic handler. */
+static int panicking = 0;
+
 void panic(const char *fmt, ...) {
+    /* If already panicking, just halt to avoid infinite recursion. */
+    if (__sync_fetch_and_add(&panicking, 1) > 0) {
+        while (1) __asm__ volatile("hlt");
+    }
+
     va_list ap;
     asm volatile ("cli");
 

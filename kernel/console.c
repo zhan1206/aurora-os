@@ -340,6 +340,10 @@ static inline void console_out_lock_release(void) {
  * Cell operations
  * ================================================================ */
 static void put_cell_raw(int r, int c, char ch, uint8_t attr) {
+    /* FIXED (v4.3.0): NEW-23 VGA-BOUNDS — bounds check cursor position
+     * before writing to VGA buffer to prevent buffer overflow. */
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+
     console_out_lock_acquire();
     if (g_use_fb) {
         /* Convert VGA attribute to framebuffer colors */
@@ -537,8 +541,15 @@ void console_putc(char c) {
     if (cursor_visible) update_hw_cursor();
 }
 
+/* FIXED (v4.3.0): NEW-24 CONSOLE-LOCK — separate lock for console_write
+ * to prevent interleaved SMP console output without deadlocking with
+ * the per-cell console_out_lock used by put_cell_raw. */
+static spinlock_t console_write_lock = {0};
+
 void console_write(const char *s) {
+    spin_lock(&console_write_lock);
     for (size_t i = 0; s && s[i]; ++i) console_putc(s[i]);
+    spin_unlock(&console_write_lock);
 }
 
 /* ================================================================
