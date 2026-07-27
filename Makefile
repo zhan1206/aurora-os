@@ -267,6 +267,7 @@ MODULE_CFLAGS := -ffreestanding -Wall -Wextra -fno-pic -fno-stack-protector \
                  -mno-sse -mgeneral-regs-only -mno-red-zone \
                  -std=gnu17 -O2 -DNDEBUG
 
+# FIXED (v4.3.1): MOD-002 — mod_sample.c is wired into the module build system
 MODULE_SRCS := userspace/mod_sample.c
 MODULE_OBJS := $(patsubst userspace/%.c,$(BUILDDIR)/modules/%.o,$(MODULE_SRCS))
 MODULE_KOS  := $(patsubst userspace/%.c,$(BUILDDIR)/modules/%.ko,$(MODULE_SRCS))

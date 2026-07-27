@@ -36,6 +36,13 @@
 
 static uint64_t kernel_cr3 = 0;
 
+/* FIXED (v4.3.1): CRT-001 — Detect BSS corruption of kernel_cr3.
+ * BSS variables can be silently zeroed by stack overflow, DMA overrun,
+ * or other memory corruption.  This guard value is initialized at link
+ * time and checked on every call to get_kernel_cr3().  If the guard is
+ * corrupted, we re-read CR3 directly from the hardware register. */
+static uint64_t kernel_cr3_guard = 0xDEADBEEFCAFECR3EULL;
+
 /*
  * FIXED (v4.1.4): Global page table lock for SMP safety.
  * Protects map_page, unmap_page, and clone_current_pml4 from
@@ -145,6 +152,14 @@ void page_table_init(void) {
 }
 
 uint64_t get_kernel_cr3(void) {
+    /* FIXED (v4.3.1): CRT-001 — Detect BSS corruption of kernel_cr3 */
+    if (kernel_cr3_guard != 0xDEADBEEFCAFECR3EULL) {
+        log_printf(LOG_LEVEL_ERR, "pagetable: BSS corruption detected! kernel_cr3_guard=%p\n",
+                   (void*)kernel_cr3_guard);
+        /* Re-read CR3 directly */
+        asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
+        kernel_cr3_guard = 0xDEADBEEFCAFECR3EULL;
+    }
     return kernel_cr3;
 }
 

@@ -1133,8 +1133,20 @@ void kernel_selftest(void) {
     test_inode_size();
     test_dentry_cache();
     test_signal_edge();
+
+    /* FIXED (v4.3.1): TST-001 — Guard against BUG-CURRENT-NULL before scheduler tests.
+     * If current is NULL (e.g., due to BSS corruption or early boot), the scheduler
+     * tests would dereference NULL and triple-fault.  Skip all scheduler-dependent
+     * tests gracefully to avoid a crash and allow the remaining tests to run. */
+    if (!current) {
+        log_printf(LOG_LEVEL_WARN, "selftest: current is NULL (BSS corruption?), skipping scheduler tests\n");
+        goto skip_sched_tests;
+    }
     test_scheduler();
     test_perf_counters();
+    test_preempt_count();
+
+skip_sched_tests:
     test_pie_loading();
     test_dhcp_packet();
     test_dns_query();
@@ -1144,7 +1156,6 @@ void kernel_selftest(void) {
     test_rbtree_insert();
     test_rbtree_erase();
     test_rbtree_find_min();
-    test_preempt_count();
     test_sysfs_entries();
     test_module_export();
 

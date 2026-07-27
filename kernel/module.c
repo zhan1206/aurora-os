@@ -737,10 +737,13 @@ int module_unload(const char *name) {
         }
     }
 
-    /* Check reference count */
+    /* FIXED (v4.3.1): MOD-001 — Check module reference count before unload.
+     * Return -EBUSY instead of -1 so callers can distinguish "busy" from
+     * other failure modes.  Module unloading depends on refcount tracking
+     * to ensure no code is still executing within the module. */
     if (mod->refcount > 0) {
-        log_printf(LOG_LEVEL_WARN, "module_unload: %s has refcount %d\n", name, mod->refcount);
-        return -1;
+        log_printf(LOG_LEVEL_WARN, "module: %s refcount=%d, cannot unload\n", name, mod->refcount);
+        return -EBUSY;
     }
 
     mod->state = MODULE_UNLOADING;

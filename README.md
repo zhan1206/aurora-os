@@ -5,9 +5,12 @@
 <!-- FIXED (v4.3.0): DOC-README-COUNT -->
 [![Lines of Code](https://img.shields.io/badge/code-~88,000%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.3.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.3.1-blue)](CHANGELOG.md)
 
 **100%自研实现** | 无 Linux 内核代码 | 参考 Minix/Linux/CoolPotOS 设计理念  /* FIXED (v4.2.8): DOC-100% SELF-DEVELOPED */
+
+> <!-- FIXED (v4.3.1): DOC-HONEST — 诚实标注项目状态 -->
+> **注意**: 本项目为 hobby OS，许多功能为框架/骨架实现。已知问题包括 BUG-CURRENT-NULL、BUG-CR3-CACHE。完整限制列表见 [LIMITATIONS.md](LIMITATIONS.md)。
 
 一个完全从零构建的 x86_64 hobby 操作系统，涵盖引导、分页、进程管理、系统调用、VFS、信号、管道等核心子系统。
 
@@ -302,8 +305,8 @@ AuroraOS
   - `/proc/self/cmdline` - 当前进程命令行
 - **管道**: 匿名管道，环形缓冲区（4096 字节）
 
-### 网络栈
-- **TCP/IP 协议栈**: TCP/UDP/ARP/DHCP/DNS/ICMP 基础实现（不含 TLS/SACK/高级拥塞控制）  /* FIXED (v4.2.8): DOC-TCPIP */
+### 网络栈 <!-- FIXED (v4.3.1): DOC-HONEST -->
+- **TCP/IP 协议栈**: TCP/UDP/ARP/DHCP/DNS/ICMP 基础实现(骨架)（不含 TLS/SACK/高级拥塞控制）  /* FIXED (v4.2.8): DOC-TCPIP */
   - ARP（地址解析协议）
   - IPv4（互联网协议）
   - ICMP（互联网控制消息协议，含 ping 支持）
@@ -312,12 +315,12 @@ AuroraOS
 - **Socket API**: 11 个 Berkeley 风格 socket 系统调用
 - **VirtIO 网络驱动**: 支持 QEMU VirtIO 网络设备
 
-### 信号
-- **信号类型**: SIGINT(2), SIGKILL(9), SIGSEGV(11), SIGTERM(15), SIGCHLD(17)
+### 信号 <!-- FIXED (v4.3.1): DOC-HONEST — 框架级实现 -->
+- **信号类型**: SIGINT(2), SIGKILL(9), SIGSEGV(11), SIGTERM(15), SIGCHLD(17) (框架)
 - **用户态 handler**: sigframe 压栈 + 跳板代码 + sigreturn 恢复
 - **默认动作**: 终止/忽略/核心转储
 
-### 安全机制
+### 安全机制 <!-- FIXED (v4.3.1): DOC-HONEST — 部分为框架/占位实现 -->
 - **ASLR**: 栈随机化（已启用）；mmap 随机化（已实现，未接入 sys_mmap 调用路径）
 - **Stack Protector**: 栈溢出保护（canary 检查）
 - **SMAP/SMEP**: 内核访问/执行用户空间内存保护（已启用，CR4.SMEP/CR4.SMAP 已设置，STAC/CLAC 已集成，user_access.h 集中化管理 v4.2.7）
@@ -333,7 +336,7 @@ AuroraOS
 - **TSC 校准**: 基于 PIT 的高精度时间戳计数器校准
 - **内核日志环形缓冲**: 持久化日志存储，支持 /proc/kmsg 导出
 
-### 内核模块系统
+### 内核模块系统 <!-- FIXED (v4.3.1): DOC-HONEST — 签名占位、框架级实现 -->
 - **ELF 可重定位模块加载**: 支持 .ko 文件动态加载
 - **符号解析**: 内核符号表 + 模块间符号引用
 - **x86_64 重定位**: R_X86_64_64/PC32/32/32S/RELATIVE

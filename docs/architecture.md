@@ -1,8 +1,8 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# AuroraOS 系统架构设计文档
 
 ## 1. 概述
 
-AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用混合内核（Hybrid Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载、硬件性能监控、USB 3.x 设备栈、ACPI 电源管理、KGDB 内核调试、KASLR 内核随机化、AF_UNIX 域套接字、动态链接器（ld.so）、GUI/DRM 显示框架、devtmpfs 设备文件系统和 sysfs 内核对象导出。
+AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用混合内核（Hybrid Kernel）设计，支持多任务调度、虚拟内存管理、虚拟文件系统、POSIX 信号机制、ELF 可执行文件加载、SMP 多核、动态模块加载、硬件性能监控、USB 3.x 设备栈、ACPI 电源管理、KGDB 内核调试、KASLR 内核随机化、AF_UNIX 域套接字、动态链接器（ld.so）[计划中]、GUI/DRM 显示框架(compositor [计划中])、devtmpfs 设备文件系统和 sysfs 内核对象导出。 <!-- FIXED (v4.3.1): compositor.c 标注为计划中 -->
 
 - **版本**: 4.2.8
 - **目标架构**: x86_64 (AMD64)
@@ -303,7 +303,7 @@ AuroraOS 是一个基于 x86_64 架构的自主研发操作系统内核，采用
 |------|------|------|
 | DRM/KMS 核心 | `drm.c` | 帧缓冲管理、双缓冲 flip、GOP 集成、8×16 字体渲染 |
 <!-- FIXED (v4.3.0): DOC-ARCH-PATH (planned, not yet implemented) -->
-| GUI 合成器 | `compositor.c` | [计划中] 窗口管理、输入事件路由、表面合成 |
+| GUI 合成器 | `compositor.c` | [计划中] 窗口管理、输入事件路由、表面合成 | <!-- FIXED (v4.3.1): compositor.c 已确认标记为 [计划中] -->
 | 显示头文件 | `drm.h`, `compositor.h` | [计划中] 显示模式、缓冲区、窗口结构体定义 |
 
 ### 3.24 用户空间安全访问（v4.2.7 新增）

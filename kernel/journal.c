@@ -181,7 +181,19 @@ int journal_init(struct block_device *bdev, uint64_t journal_start,
                    (unsigned long long)g_journal.tail,
                    g_journal.dirty);
 
-        if (g_journal.dirty) {
+        /* FIXED (v4.3.1): JRNL-001 — Add checksum verification before journal replay.
+         * If the superblock checksum is corrupt, force the journal clean and
+         * skip recovery rather than replaying potentially corrupt transactions.
+         * LIMITATION: This only validates the superblock checksum.  Individual
+         * transaction block checksums are verified during replay, but a
+         * physically corrupt journal may still cause data loss.  A future
+         * improvement would add a panic() fallback for unrecoverable corruption. */
+        if (jsb->jsb_checksum != calc_checksum(jsb, offsetof(struct journal_superblock, jsb_checksum))) {
+            log_printf(LOG_LEVEL_WARN, "journal: superblock checksum mismatch, forcing clean\n");
+            g_journal.dirty = 0;
+            write_jsb();
+            log_printf(LOG_LEVEL_INFO, "journal: recovery skipped (checksum mismatch)\n");
+        } else if (g_journal.dirty) {
             log_printf(LOG_LEVEL_WARN, "journal: dirty — attempting recovery\n");
             kfree(io_buf);
             if (journal_recover() < 0) {
@@ -189,9 +201,8 @@ int journal_init(struct block_device *bdev, uint64_t journal_start,
                 return -1;
             }
             log_printf(LOG_LEVEL_INFO, "journal: recovery complete\n");
-        } else {
-            kfree(io_buf);
         }
+        kfree(io_buf);
     } else {
         kfree(io_buf);
         /* Create new journal */
