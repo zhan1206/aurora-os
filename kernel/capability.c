@@ -208,6 +208,15 @@ int cap_can_chown(struct task_struct *caller, const char *path, int uid, int gid
     return 1;
 }
 
+/* FIXED (v4.3.2): CAP-001 — Check if current task has a capability.
+ * Returns 1 if the task has the capability, 0 otherwise. */
+int cap_has_capability(int cap) {
+    if (!current) return 0;
+    if (current->cap_effective & (1ULL << cap)) return 1;
+    if (current->cap_permitted & (1ULL << cap)) return 1;
+    return 0;
+}
+
 int fd_check_cap(int fd, uint32_t required) {
     struct cap_entry *entry = cap_get(current, fd);
     if (!entry) return -1;

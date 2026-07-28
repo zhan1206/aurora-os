@@ -21,6 +21,20 @@
 #include "mem.h"
 #include "smp.h"
 
+/* FIXED (v4.3.2): FAT-001 — Cluster chain validation to prevent infinite loops.
+ * FAT32 clusters 0x0FFFFFF8-0x0FFFFFFF are EOC markers.
+ * Clusters 0x00000000 and 0x00000001 are reserved.
+ * We track visited clusters to detect cycles. */
+#define FAT32_MAX_CLUSTER_CHAIN 4096  /* safety limit */
+
+static int fat32_valid_cluster(uint32_t cluster) {
+    if (cluster == 0) return 0;           /* free cluster */
+    if (cluster == 1) return 0;           /* reserved */
+    if (cluster >= 0x0FFFFFF8) return 0;  /* EOC */
+    if (cluster >= 0x0FFFFFF0) return 0;  /* reserved range */
+    return 1;
+}
+
 /* Forward declarations for file_ops tables (referenced before definition) */
 static struct file_ops fat32_file_ops;
 static struct file_ops fat32_dir_ops;
@@ -269,10 +283,17 @@ int fat32_free_cluster_chain(struct fat32_sb_info *sbi,
      * modification against concurrent access.  (BUG-FAT32-LOCK) */
     fat32_chain_lock_acq();
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && max_steps-- > 0) {
+    /* FIXED (v4.3.2): FAT-001 — Use fat32_valid_cluster for validation */
+    int chain_count = 0;
+    while (fat32_valid_cluster(cluster) && max_steps-- > 0) {
+        if (++chain_count > FAT32_MAX_CLUSTER_CHAIN) {
+            log_printf(LOG_LEVEL_ERR, "fat32: cluster chain too long, possible corruption\n");
+            fat32_chain_lock_rel();
+            return -EIO;
+        }
         uint32_t next = fat32_get_cluster(sbi, cluster);
         fat32_set_cluster(sbi, cluster, FAT32_CLUSTER_FREE);
-        if (next >= FAT32_CLUSTER_EOC_MIN)
+        if (!fat32_valid_cluster(next))
             break;
         cluster = next;
     }
@@ -307,13 +328,19 @@ static ssize_t fat32_transfer_file(struct fat32_sb_info *sbi,
 
     /* Count clusters in chain.
      * FIXED (v4.1.8): Loop counter prevents infinite loop on
-     * corrupted FAT (M-12). */
+     * corrupted FAT (M-12).
+     * FIXED (v4.3.2): FAT-001 — chain_count double-check */
     cluster = start_cluster;
     int fat_steps = (int)(sbi->total_clusters + 2);
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
+    int chain_count = 0;
+    while (cluster && fat32_valid_cluster(cluster) && fat_steps-- > 0) {
+        if (++chain_count > FAT32_MAX_CLUSTER_CHAIN) {
+            log_printf(LOG_LEVEL_ERR, "fat32: cluster chain too long, possible corruption\n");
+            return -EIO;
+        }
         clusters_per_chain++;
         uint32_t next = fat32_get_cluster(sbi, cluster);
-        if (next >= FAT32_CLUSTER_EOC_MIN) break;
+        if (!fat32_valid_cluster(next)) break;
         cluster = next;
     }
 
@@ -331,13 +358,19 @@ static ssize_t fat32_transfer_file(struct fat32_sb_info *sbi,
                                               cluster_size);
         uint32_t last_cluster = start_cluster;
         /* Find last cluster in chain.
-         * FIXED (v4.1.8): Loop counter prevents infinite loop (M-12). */
+         * FIXED (v4.1.8): Loop counter prevents infinite loop (M-12).
+         * FIXED (v4.3.2): FAT-001 — chain_count double-check */
         cluster = start_cluster;
         int fat_steps2 = (int)(sbi->total_clusters + 2);
-        while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps2-- > 0) {
+        int chain_count2 = 0;
+        while (cluster && fat32_valid_cluster(cluster) && fat_steps2-- > 0) {
+            if (++chain_count2 > FAT32_MAX_CLUSTER_CHAIN) {
+                log_printf(LOG_LEVEL_ERR, "fat32: cluster chain too long, possible corruption\n");
+                return -EIO;
+            }
             last_cluster = cluster;
             uint32_t next = fat32_get_cluster(sbi, cluster);
-            if (next >= FAT32_CLUSTER_EOC_MIN) break;
+            if (!fat32_valid_cluster(next)) break;
             cluster = next;
         }
         while (clusters_per_chain < needed_clusters) {
@@ -621,8 +654,15 @@ static int fat32_find_entry(struct fat32_sb_info *sbi,
     uint32_t entry_idx = 0;
     /* FIXED (v4.1.8): Loop counter prevents infinite loop on corrupted FAT (M-12) */
     int fat_steps = (int)(sbi->total_clusters + 2);
+    /* FIXED (v4.3.2): FAT-001 — chain_count double-check against FAT32_MAX_CLUSTER_CHAIN */
+    int chain_count = 0;
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
+    while (cluster && fat32_valid_cluster(cluster) && fat_steps-- > 0) {
+        if (++chain_count > FAT32_MAX_CLUSTER_CHAIN) {
+            log_printf(LOG_LEVEL_ERR, "fat32: cluster chain too long, possible corruption\n");
+            kfree(cluster_buf);
+            return -EIO;
+        }
 
         if (read_cluster(sbi, cluster, cluster_buf) < 0) {
             kfree(cluster_buf);
@@ -748,8 +788,15 @@ static int fat32_find_free_slot(struct fat32_sb_info *sbi,
     uint32_t cluster = dir_cluster;
     /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
     int fat_steps = (int)(sbi->total_clusters + 2);
+    /* FIXED (v4.3.2): FAT-001 — chain_count double-check */
+    int chain_count = 0;
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
+    while (cluster && fat32_valid_cluster(cluster) && fat_steps-- > 0) {
+        if (++chain_count > FAT32_MAX_CLUSTER_CHAIN) {
+            log_printf(LOG_LEVEL_ERR, "fat32: cluster chain too long, possible corruption\n");
+            kfree(cluster_buf);
+            return -EIO;
+        }
         if (read_cluster(sbi, cluster, cluster_buf) < 0) {
             kfree(cluster_buf);
             return -EIO;
@@ -804,8 +851,14 @@ static uint64_t fat32_get_dir_size(struct fat32_sb_info *sbi,
     uint32_t cluster = dir_cluster;
     /* FIXED (v4.1.8): Loop counter prevents infinite loop (M-12) */
     int fat_steps = (int)(sbi->total_clusters + 2);
+    /* FIXED (v4.3.2): FAT-001 — chain_count double-check */
+    int chain_count = 0;
 
-    while (cluster >= 2 && cluster < FAT32_CLUSTER_EOC_MIN && fat_steps-- > 0) {
+    while (cluster && fat32_valid_cluster(cluster) && fat_steps-- > 0) {
+        if (++chain_count > FAT32_MAX_CLUSTER_CHAIN) {
+            log_printf(LOG_LEVEL_ERR, "fat32: cluster chain too long, possible corruption\n");
+            return total_size;
+        }
         total_size += cluster_size;
         uint32_t next = fat32_get_cluster(sbi, cluster);
         if (next >= FAT32_CLUSTER_EOC_MIN) break;

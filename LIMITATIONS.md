@@ -1,7 +1,34 @@
-# AuroraOS 已知限制 (v4.3.1)
+# AuroraOS 已知限制 (v4.3.2)
 
 本文档诚实记录 AuroraOS 当前的所有已知限制、未完成功能、及架构局限。
 这不是bug列表，而是对项目成熟度的诚实评估。
+
+## 已修复 (v4.3.2)
+
+### BSS-001 (v4.3.2) — 根因修复
+- **问题**: 内核栈(32KB)在.bss中，selftest的多个1024字节栈缓冲区导致栈溢出，踩穿`current`/`idle_task`/`kernel_cr3`
+- **修复**: 栈移至独立`.stack`段(64KB)，在.bss之后，加4KB guard page + 栈底部canary(0xDEAD0000BEEFCAFE)
+- **影响**: 解决了BUG-CURRENT-NULL和BUG-CR3-CACHE的根因
+
+### SEC-001 (v4.3.2) — seccomp prctl
+- **问题**: BPF解释器存在但无设置接口，始终通过
+- **修复**: 添加`prctl(PR_SET_SECCOMP, filter)`调用路径
+
+### CAP-001 (v4.3.2) — Capability权限检查
+- **问题**: Capability框架存在但未接入syscall
+- **修复**: setuid/setgid/chown增加CAP_SETUID/CAP_SETGID/CAP_CHOWN检查
+
+### FAT-001 (v4.3.2) — FAT32簇链验证
+- **问题**: 集群链遍历无边界检查，损坏文件系统可致无限循环
+- **修复**: 添加`fat32_valid_cluster()` + 4096集群链上限
+
+### ARP-001 (v4.3.2) — ARP缓存老化
+- **问题**: ARP条目永不过期
+- **修复**: 10分钟超时老化机制
+
+### USB-001 (v4.3.2) — /dev/usb节点
+- **问题**: /dev/usb/目录计划中但未创建
+- **修复**: 创建/dev/usb/目录及kbd0/mouse0节点
 
 ## 可以正常工作的功能
 

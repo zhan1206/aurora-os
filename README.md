@@ -5,7 +5,7 @@
 <!-- FIXED (v4.3.0): DOC-README-COUNT -->
 [![Lines of Code](https://img.shields.io/badge/code-~88,000%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.3.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.3.2-blue)](CHANGELOG.md)
 
 **100%自研实现** | 无 Linux 内核代码 | 参考 Minix/Linux/CoolPotOS 设计理念  /* FIXED (v4.2.8): DOC-100% SELF-DEVELOPED */
 

@@ -158,7 +158,16 @@ long_mode_start:
 2:
 
     /* Set up 64-bit stack */
-    movabs $stack_top, %rsp
+    movabs $__stack_top, %rsp
+
+    /* FIXED (v4.3.2): BSS-001 — Write stack canary at bottom of kernel stack.
+     * __stack_bottom is a linker-defined symbol at the bottom of the .stack
+     * section.  We write a magic value there so that sched_init() can detect
+     * stack overflow.  If the canary is ever overwritten, we know the stack
+     * overflowed past its 64KB boundary. */
+    movabs $__stack_bottom, %rdi
+    movabs $0xDEAD0000BEEFCAFE, %rax
+    mov %rax, (%rdi)
 
     /* Zero-extend saved 32-bit values */
     mov %esi, %esi               /* magic */
@@ -195,18 +204,13 @@ gdt64_desc:
     .quad gdt64
 
 .section .bss
-.align 16
-stack_bottom:
-    .space 32768
-    .global stack_top
-stack_top:
-
 .global bss_start, bss_end
-/* FIXED (v4.1.8): bss_start and bss_end are now defined in linker.ld.
- * The old assembly-level labels pointed to the same address because
- * nothing was between them.  BSS is now cleared in long_mode_start
- * using the linker-defined __bss_start and __bss_end symbols.
- * (BUG C-17 / H-4) */
+/* FIXED (v4.3.2): BSS-001 — Stack moved to linker-defined .stack section.
+ * The old 32KB stack allocation in .bss has been removed.  Stack is now
+ * defined in linker.ld as a 64KB .stack section AFTER .bss with a guard
+ * page.  This prevents stack overflow from corrupting BSS globals.
+ * bss_start/bss_end are kept for backward compatibility (they were
+ * already unused after v4.1.8). */
 bss_start:
 bss_end:
 

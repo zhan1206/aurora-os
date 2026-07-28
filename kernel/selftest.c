@@ -1121,6 +1121,24 @@ static void test_module_export(void) {
 void kernel_selftest(void) {
     log_printf(LOG_LEVEL_INFO, "\n======== Kernel Self-Test ========\n");
 
+    /*
+     * FIXED (v4.3.2): BSS-001 — Check stack canary BEFORE running selftest.
+     * The kernel stack is now 64KB in a separate .stack section.  If the
+     * canary at __stack_bottom is corrupted, the stack overflowed during
+     * boot, and BSS may be unreliable.  We log a warning and restore the
+     * canary so we can detect if selftest itself causes further overflow.
+     */
+    {
+        extern uint64_t __stack_bottom;
+        volatile uint64_t *canary = (volatile uint64_t *)&__stack_bottom;
+        if (*canary != 0xDEAD0000BEEFCAFEULL) {
+            log_printf(LOG_LEVEL_ERR, "selftest: STACK CANARY CORRUPTED BEFORE TESTS! "
+                       "canary=%p (expected 0xDEAD0000BEEFCAFE)\n", (void*)*canary);
+            log_printf(LOG_LEVEL_ERR, "selftest: Stack overflow detected. BSS may be unreliable.\n");
+            *canary = 0xDEAD0000BEEFCAFEULL;
+        }
+    }
+
     test_buddy();
     test_slab();
     test_pagetable();
@@ -1158,6 +1176,27 @@ skip_sched_tests:
     test_rbtree_find_min();
     test_sysfs_entries();
     test_module_export();
+
+    /*
+     * FIXED (v4.3.2): BSS-001 — Check stack canary AFTER all tests.
+     * If any test overflowed the stack, the canary will be corrupted.
+     * This confirms BSS-001 is the root cause of BUG-CURRENT-NULL and
+     * BUG-CR3-CACHE: the 32KB stack in .bss overflowed during selftest
+     * (which has multiple 1024-byte local buffers), corrupting BSS globals.
+     */
+    {
+        extern uint64_t __stack_bottom;
+        volatile uint64_t *canary = (volatile uint64_t *)&__stack_bottom;
+        if (*canary != 0xDEAD0000BEEFCAFEULL) {
+            log_printf(LOG_LEVEL_ERR, "selftest: STACK CANARY CORRUPTED AFTER TESTS! "
+                       "canary=%p\n", (void*)*canary);
+            log_printf(LOG_LEVEL_ERR, "selftest: CONFIRMED: stack overflow during selftest.\n");
+            log_printf(LOG_LEVEL_ERR, "selftest: Root cause of BUG-CURRENT-NULL and BUG-CR3-CACHE.\n");
+            log_printf(LOG_LEVEL_ERR, "selftest: Stack=64KB, consider reducing stack buffers or "
+                       "increasing stack size.\n");
+            *canary = 0xDEAD0000BEEFCAFEULL;
+        }
+    }
 
     log_printf(LOG_LEVEL_INFO, "======== All Tests Passed ========\n\n");
 }

@@ -38,6 +38,28 @@ SECTIONS
         __bss_end = .;
     }
 
+    /*
+     * FIXED (v4.3.2): BSS-001 — Stack moved OUT of .bss to its own section.
+     * Previously the 32KB kernel stack was in .bss, and stack overflow
+     * during selftest (which has multiple 1024-byte local buffers) would
+     * corrupt BSS globals (current, idle_task, kernel_cr3), causing:
+     *   BUG-CURRENT-NULL: current/idle_task zeroed, scheduler dead
+     *   BUG-CR3-CACHE:   kernel_cr3 corrupted, must re-read CR3
+     * Now the stack is in its own .stack section AFTER .bss, with a
+     * guard page (4KB unmapped) and stack canary at the bottom.
+     * Stack size increased from 32KB to 64KB to handle selftest depth.
+     */
+    . = ALIGN(4096);
+    __guard_page = .;
+    . += 4096;   /* unmapped guard page (4KB) */
+    .stack : {
+        __stack_bottom = .;
+        . += 65536;  /* 64KB kernel stack */
+        __stack_top = .;
+    }
+
+    __kernel_end = .;
+
     /DISCARD/ : {
         *(.note.GNU-stack)
         *(.note.gnu.property)

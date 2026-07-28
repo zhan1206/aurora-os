@@ -33,6 +33,9 @@
 #define CAP_SEND    (1U << 3)
 #define CAP_SEEK    (1U << 4)
 #define CAP_IOCTL   (1U << 5)
+#define CAP_SETUID  6   /* FIXED (v4.3.2): CAP-001 */
+#define CAP_SETGID  7   /* FIXED (v4.3.2): CAP-001 */
+#define CAP_CHOWN   8   /* FIXED (v4.3.2): CAP-001 */
 
 /* Common combinations */
 #define CAP_RW       (CAP_READ | CAP_WRITE)
@@ -83,5 +86,9 @@ int fd_check_cap(int fd, uint32_t required);
 int cap_can_kill(struct task_struct *caller, int target_pid);
 int cap_can_setuid(struct task_struct *caller, int new_uid);
 int cap_can_chown(struct task_struct *caller, const char *path, int uid, int gid);
+
+/* FIXED (v4.3.2): CAP-001 — Check if current task has a capability.
+ * Returns 1 if the task has the capability, 0 otherwise. */
+int cap_has_capability(int cap);
 
 #endif /* CAPABILITY_H */

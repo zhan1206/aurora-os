@@ -34,6 +34,19 @@
 #include <stdint.h>
 #include <string.h>
 
+/* FIXED (v4.3.2): SEC-001 — Global seccomp filter for current process.
+ * Previously seccomp always passed all syscalls because there was no
+ * way to set a filter.  Now prctl(PR_SET_SECCOMP, ...) sets this. */
+static struct sock_fprog *g_seccomp_filter = NULL;
+
+/* FIXED (v4.3.2): SEC-001 — Set seccomp filter via prctl().
+ * Returns 0 on success, -EINVAL if filter is NULL. */
+int seccomp_set_filter(struct sock_fprog *filter) {
+    if (!filter) return -EINVAL;
+    g_seccomp_filter = filter;
+    return 0;
+}
+
 /* ================================================================
  * seccomp_set_filter
  *

@@ -1,5 +1,59 @@
 # AuroraOS Changelog
 
+## v4.3.2 (2026-07-29) — 根因修复: BSS栈溢出 + 安全/FS/网络全量修复
+
+### 概述
+
+v4.3.2 定位并修复了 BUG-CURRENT-NULL 和 BUG-CR3-CACHE 的根因（内核栈在BSS中溢出），同时修复了 seccomp、Capability、FAT32、ARP、/dev/usb 等所有可修复的代码Bug。
+
+---
+
+### 一、根因修复 (BSS-001)
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| BUG-CURRENT-NULL | 内核栈(32KB)在.bss中，selftest 1024B栈缓冲溢出，踩穿`current` | 栈移至独立`.stack`段(64KB)，在.bss之后 |
+| BUG-CR3-CACHE | 栈溢出踩穿`kernel_cr3` | 4KB guard page + 栈底部canary |
+| BSS段溢出 | 栈溢出影响所有BSS变量 | 栈完全移出BSS，不再互扰 |
+
+**涉及文件**: `linker.ld`, `kernel/entry.S`, `kernel/sched.c`, `kernel/selftest.c`
+
+---
+
+### 二、安全子系统修复 (2项)
+
+| Bug | 修复 |
+|-----|------|
+| SEC-001 | seccomp: 添加`prctl(PR_SET_SECCOMP, filter)`设置接口 |
+| CAP-001 | Capability: setuid/setgid/chown增加CAP_SETUID/CAP_SETGID/CAP_CHOWN检查 |
+
+**涉及文件**: `kernel/seccomp.c`, `kernel/seccomp.h`, `kernel/syscall.c`, `kernel/syscall.h`, `kernel/capability.c`, `kernel/capability.h`, `kernel/sched.c`, `kernel/sched.h`
+
+---
+
+### 三、文件系统/网络/设备修复 (3项)
+
+| Bug | 修复 |
+|-----|------|
+| FAT-001 | FAT32: 添加`fat32_valid_cluster()` + 4096集群链上限 |
+| ARP-001 | ARP: 10分钟超时老化机制 |
+| USB-001 | /dev/usb: 创建目录及kbd0/mouse0设备节点 |
+
+**涉及文件**: `kernel/fat32.c`, `kernel/net/net.c`, `kernel/devtmpfs.c`, `kernel/devtmpfs.h`
+
+---
+
+### 四、变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 16 |
+| 修复 Bug | 6 (BSS-001, SEC-001, CAP-001, FAT-001, ARP-001, USB-001) |
+| 根因解决 | BUG-CURRENT-NULL, BUG-CR3-CACHE, BSS段溢出 |
+| 新增代码 | ~350 行 |
+
+---
+
 ## v4.3.1 (2026-07-28) — 诚实文档与根因级修复: 77项审计全量映射
 
 ### 概述

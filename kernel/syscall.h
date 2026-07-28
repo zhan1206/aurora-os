@@ -128,6 +128,9 @@ enum {
     SYS_ACPI_REBOOT   = 320,
 };
 
+/* FIXED (v4.3.2): SEC-001 — prctl options */
+#define PR_SET_SECCOMP      22
+
 /* struct utsname — POSIX uname structure */
 struct utsname {
     char sysname[65];

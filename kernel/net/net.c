@@ -10,6 +10,7 @@
 #include "../netdev.h"
 #include "../smp.h"
 #include "../mem.h"
+#include "../perf.h"       /* FIXED (v4.3.2): ARP-001 — get_uptime_ms() */
 #include "unix.h"        /* AF_UNIX (v4.2.6) */
 #include <stdint.h>
 
@@ -184,11 +185,19 @@ static int eth_recv(struct net_device *netdev, void *buf, int max_len) {
  * ARP Cache
  * ================================================================ */
 #define ARP_CACHE_SIZE 16
+
+/* FIXED (v4.3.2): ARP-001 — get_uptime_ms() helper for time-based aging.
+ * PIT timer runs at 100 Hz, so each tick = 10 ms. */
+static inline uint64_t get_uptime_ms(void) {
+    return perf_get_ticks() * 10;
+}
+
 struct arp_entry {
     uint8_t ip[4];
     uint8_t mac[6];
     int     age;
     int     valid;
+    uint64_t age_ms;  /* FIXED (v4.3.2): ARP-001 — time-based aging */
 };
 
 static struct arp_entry arp_cache[ARP_CACHE_SIZE];
@@ -209,6 +218,7 @@ static int arp_cache_find(const uint8_t ip[4], uint8_t mac_out[6]) {
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && memcmp(arp_cache[i].ip, ip, 4) == 0) {
             arp_cache[i].age = ++arp_age_counter;
+            arp_cache[i].age_ms = get_uptime_ms();  /* FIXED (v4.3.2): ARP-001 */
             memcpy(mac_out, arp_cache[i].mac, 6);
             spin_unlock(&arp_lock);
             return 0;
@@ -247,6 +257,7 @@ static void arp_cache_add(const uint8_t ip[4],
     memcpy(arp_cache[target].ip, ip, 4);
     memcpy(arp_cache[target].mac, mac, 6);
     arp_cache[target].age = ++arp_age_counter;
+    arp_cache[target].age_ms = get_uptime_ms();  /* FIXED (v4.3.2): ARP-001 */
     arp_cache[target].valid = 1;
     spin_unlock(&arp_lock);
 }
@@ -255,17 +266,26 @@ static void arp_cache_add(const uint8_t ip[4],
  * FIXED (v4.1.8): Age out ARP cache entries that haven't been refreshed.
  * Entries older than ARP_CACHE_AGE_THRESHOLD are invalidated.
  * (H-20: ARP cache no aging, stale MACs persist forever)
+ *
+ * FIXED (v4.3.2): ARP-001 — Time-based ARP cache aging.
+ * Entries older than ARP_ENTRY_TIMEOUT_MS (10 minutes) are removed.
+ * Called from net_poll() on each poll cycle.
  */
 #define ARP_CACHE_AGE_THRESHOLD 300  /* ~5 minutes at 1 poll/sec */
+#define ARP_ENTRY_TIMEOUT_MS 600000  /* FIXED (v4.3.2): ARP-001 — 10 minutes */
 
 static void arp_cache_age(void) {
     int i;
+    uint64_t now = get_uptime_ms();
     /* FIXED (v4.2.1): Protect with arp_lock (BUG-NET-M6) */
     spin_lock(&arp_lock);
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
-        if (arp_cache[i].valid &&
-            (arp_age_counter - arp_cache[i].age) > ARP_CACHE_AGE_THRESHOLD) {
-            arp_cache[i].valid = 0;
+        if (arp_cache[i].valid && arp_cache[i].age_ms &&
+            (now - arp_cache[i].age_ms) > ARP_ENTRY_TIMEOUT_MS) {
+            log_printf(LOG_LEVEL_DEBUG, "arp: aging entry %d.%d.%d.%d\n",
+                       arp_cache[i].ip[0], arp_cache[i].ip[1],
+                       arp_cache[i].ip[2], arp_cache[i].ip[3]);
+            memset(&arp_cache[i], 0, sizeof(arp_cache[i]));
         }
     }
     spin_unlock(&arp_lock);

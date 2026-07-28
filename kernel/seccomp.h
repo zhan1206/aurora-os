@@ -163,6 +163,9 @@ struct seccomp_filter {
  */
 int seccomp_set_filter(struct task_struct *task, struct seccomp_filter *filter);
 
+/* FIXED (v4.3.2): SEC-001 — Set seccomp filter via prctl() */
+int seccomp_set_filter(struct sock_fprog *filter);
+
 /*
  * seccomp_check: Check if a syscall is allowed by the task's filter.
  * @task:        Task to check.

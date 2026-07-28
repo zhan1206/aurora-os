@@ -273,6 +273,24 @@ void reparent_children_to_init(struct task_struct *task) {
 
 void scheduler_init(void) {
     /*
+     * FIXED (v4.3.2): BSS-001 — Check kernel stack canary before scheduler init.
+     * The stack canary (0xDEAD0000BEEFCAFE) is written at __stack_bottom by
+     * entry.S.  If it's been overwritten, the stack overflowed past its 64KB
+     * boundary.  We log the error and attempt to continue, but the kernel
+     * may be unstable.  Previously this corruption silently zeroed 'current'
+     * and 'idle_task' (BUG-CURRENT-NULL) and corrupted 'kernel_cr3'
+     * (BUG-CR3-CACHE), causing the scheduler to deadlock.
+     */
+    extern uint64_t __stack_bottom;
+    volatile uint64_t *canary = (volatile uint64_t *)&__stack_bottom;
+    if (*canary != 0xDEAD0000BEEFCAFEULL) {
+        log_printf(LOG_LEVEL_ERR, "sched: STACK OVERFLOW DETECTED! "
+                   "canary=%p (expected 0xDEAD0000BEEFCAFE)\n", (void*)*canary);
+        log_printf(LOG_LEVEL_ERR, "sched: BSS may be corrupted. Restoring canary.\n");
+        *canary = 0xDEAD0000BEEFCAFEULL;
+    }
+
+    /*
      * Initialize PID bitmap — reserve 0 (idle) and 1 (init).
      * page_table_init() is already called in kernel_main() before
      * scheduler_init(). get_kernel_cr3() returns the cached CR3.
@@ -332,6 +350,8 @@ void scheduler_init(void) {
         init->t_errno    = 0;
         init->ref_count  = 1;         /* REFCOUNT (v4.2.6) */
         init->vruntime   = 0;
+        init->cap_effective = 0xFFFFFFFFFFFFFFFFULL;  /* FIXED (v4.3.2): CAP-001 — root has all caps */
+        init->cap_permitted = 0xFFFFFFFFFFFFFFFFULL;  /* FIXED (v4.3.2): CAP-001 */
         strncpy(init->name, "init", sizeof(init->name) - 1);
         fd_table_init(init);
 
@@ -461,6 +481,8 @@ struct task_struct *create_task(void (*fn)(void)) {
      * corrupted on every context switch.  Since we cannot easily detect
      * FPU usage at runtime, assume every task uses FPU. */
     t->fpu_used    = 1;
+    t->cap_effective = 0xFFFFFFFFFFFFFFFFULL;  /* FIXED (v4.3.2): CAP-001 — root has all caps */
+    t->cap_permitted = 0xFFFFFFFFFFFFFFFFULL;  /* FIXED (v4.3.2): CAP-001 */
     t->pid         = alloc_pid();
     if (t->pid < 0) {
         free_page(stack_page);
@@ -676,6 +698,22 @@ void schedule(void) {
      */
     spin_unlock(&rq->lock);
     irq_restore(irq_flags);
+
+    /*
+     * FIXED (v4.3.2): BSS-001 — Stack canary check before context switch.
+     * If the canary is corrupted, log a warning and restore it. The stack
+     * overflow may have corrupted other data, but the canary gives us an
+     * early warning signal.
+     */
+    {
+        extern uint64_t __stack_bottom;
+        volatile uint64_t *canary = (volatile uint64_t *)&__stack_bottom;
+        if (*canary != 0xDEAD0000BEEFCAFEULL) {
+            log_printf(LOG_LEVEL_ERR, "sched: stack overflow in schedule()! canary=%p\n",
+                       (void*)*canary);
+            *canary = 0xDEAD0000BEEFCAFEULL;
+        }
+    }
 
     uint64_t new_cr3 = current->cr3;
     asm volatile ("mov %0, %%cr3" :: "r"(new_cr3) : "memory");

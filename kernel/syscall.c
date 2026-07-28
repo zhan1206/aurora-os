@@ -2039,6 +2039,11 @@ static long sys_getegid(void) {
  * SYS_SETUID — Set user ID (simplified)
  * ================================================================ */
 static long sys_setuid(int uid) {
+    /* FIXED (v4.3.2): CAP-001 — Require CAP_SETUID to change UID */
+    if (!cap_has_capability(CAP_SETUID)) {
+        current->t_errno = EPERM;
+        return -1;
+    }
     /* STUB (v4.2.8): Capability check before UID change. */
     if (!cap_can_setuid(current, uid)) {
         current->t_errno = EPERM;
@@ -2052,6 +2057,11 @@ static long sys_setuid(int uid) {
  * SYS_SETGID — Set group ID (simplified)
  * ================================================================ */
 static long sys_setgid(int gid) {
+    /* FIXED (v4.3.2): CAP-001 — Require CAP_SETGID to change GID */
+    if (!cap_has_capability(CAP_SETGID)) {
+        current->t_errno = EPERM;
+        return -1;
+    }
     (void)gid;
     return 0;  /* single-user OS, always allowed */
 }
@@ -2388,6 +2398,12 @@ static long sys_chown(const char *path, int uid, int gid) {
     int len = strncpy_from_user(kpath, path, sizeof(kpath) - 1);
     if (len < 0) { current->t_errno = EFAULT; return -1; }
     kpath[len] = '\0';
+
+    /* FIXED (v4.3.2): CAP-001 — Require CAP_CHOWN to change file ownership */
+    if (!cap_has_capability(CAP_CHOWN) && (uid != (int)-1 || gid != (int)-1)) {
+        current->t_errno = EPERM;
+        return -1;
+    }
 
     /* STUB (v4.2.8): Capability check before ownership change. */
     if (!cap_can_chown(current, kpath, uid, gid)) {
@@ -3508,30 +3524,14 @@ static long sys_name_to_handle_at(int dirfd, const char *path,
 }
 
 /* STUB (v4.2.8): SYS_PRCTL — basic process control (seccomp setup only) */
-#define PR_SET_SECCOMP      22
-#define SECCOMP_MODE_FILTER  2
-#define SECCOMP_MODE_STRICT  1
+#define PR_SET_SECCOMP      22  /* FIXED (v4.3.2): SEC-001 */
 
 static long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
                       unsigned long arg4, unsigned long arg5) {
     (void)arg3; (void)arg4; (void)arg5;
     switch (option) {
-    case PR_SET_SECCOMP: {
-        if (arg2 != SECCOMP_MODE_FILTER && arg2 != SECCOMP_MODE_STRICT) {
-            current->t_errno = EINVAL;
-            return -1;
-        }
-        /* STUB: Only SECCOMP_MODE_STRICT is a no-op for now.
-         * SECCOMP_MODE_FILTER requires a BPF program pointer in arg3,
-         * which needs user/kernel copy and validation — not yet implemented. */
-        if (arg2 == SECCOMP_MODE_FILTER) {
-            current->t_errno = ENOSYS;
-            return -1;
-        }
-        /* SECCOMP_MODE_STRICT: deny all syscalls except read, write, exit, sigreturn */
-        /* STUB: not yet enforced — always passes */
-        return 0;
-    }
+    case PR_SET_SECCOMP:  /* FIXED (v4.3.2): SEC-001 */
+        return seccomp_set_filter((struct sock_fprog *)arg2);
     default:
         current->t_errno = EINVAL;
         return -1;

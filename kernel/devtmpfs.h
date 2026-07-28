@@ -24,6 +24,9 @@ struct super_block;
 /* Initialize and mount devtmpfs at /dev */
 void devtmpfs_init(void);
 
+/* FIXED (v4.3.2): USB-001 — Create /dev/usb directory and device nodes */
+void devtmpfs_create_usb_nodes(void);
+
 /* Create the devtmpfs super block */
 struct super_block *devtmpfs_create(void);
 

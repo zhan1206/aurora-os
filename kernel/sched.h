@@ -179,6 +179,8 @@ struct task_struct {
     /* --- Security --- */
     struct seccomp_filter *seccomp;  /* syscall filter (NULL = all allowed) */
     int       seccomp_lock; /* spinlock for seccomp filter access (FIX: UAF race) */
+    uint64_t  cap_effective; /* FIXED (v4.3.2): CAP-001 — effective capability set */
+    uint64_t  cap_permitted; /* FIXED (v4.3.2): CAP-001 — permitted capability set */
 
     /* --- Child list protection --- */
     int       child_lock;      /* spinlock for children list (FIX: waitpid race) */
