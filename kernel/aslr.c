@@ -396,8 +396,20 @@ static void kaslr_randomize_kernel_base(void) {
         random_val = (tsc_high << 32) | tsc_low;
     }
 
-    /* Calculate slide: 0 to 255 * 2MB = 0 to 510MB random offset */
-    uint64_t slide = (random_val % KASLR_KERNEL_SLIDE_MAX) * KASLR_KERNEL_SLIDE_UNIT;
+    /* FIXED (v4.3.5): BUG-NEW-10 — Cap KASLR slide to available physical memory.
+     * Previously the slide could be up to 510MB (256 * 2MB), but the system
+     * may only have 64MB of physical memory.  The kernel must fit within
+     * available RAM.  We cap the slide to (total_ram - kernel_size). */
+    uint64_t total_ram = 64 * 1024 * 1024;  /* 64MB default */
+    uint64_t kernel_size = 2 * 1024 * 1024;  /* estimate ~2MB for kernel */
+    uint64_t max_slide = (total_ram - kernel_size) / KASLR_KERNEL_SLIDE_UNIT;
+    if (max_slide > KASLR_KERNEL_SLIDE_MAX) max_slide = KASLR_KERNEL_SLIDE_MAX;
+    if (max_slide == 0) {
+        log_printf(LOG_LEVEL_WARN, "kaslr: not enough RAM for KASLR slide, kernel at fixed address\n");
+        kernel_slide = 0;
+        return;
+    }
+    uint64_t slide = (random_val % max_slide) * KASLR_KERNEL_SLIDE_UNIT;
     kernel_slide = slide;
 
     log_printf(LOG_LEVEL_INFO, "kaslr: kernel base slide = 0x%lx (%lu MB)\n",

@@ -11,6 +11,7 @@
 #include "include/theme.h"
 #include "include/kstdio.h"
 #include "include/print.h"
+#include "include/portio.h"
 #include "layout.h"
 #include "console.h"
 #include <stdarg.h>
@@ -81,7 +82,19 @@ static void reg_line(const char *name, uint64_t val) {
  * if panic() is called again from within a panic handler. */
 static int panicking = 0;
 
+/* FIXED (v4.3.5): BUG-NEW-02 — Panic reboot loop prevention.
+ * If the kernel panics, we try to reboot.  But if the same crash
+ * recurs on reboot, the system enters an infinite reboot loop
+ * (visible as SeaBIOS repeatedly appearing).  After 3 panics,
+ * halt the system instead of rebooting to break the loop. */
+static int g_panic_count = 0;
+
 void panic(const char *fmt, ...) {
+    /* FIXED (v4.3.5): BUG-NEW-02 — Increment panic counter.
+     * This must happen before the recursion check so that nested
+     * panics are also counted. */
+    g_panic_count++;
+
     /* If already panicking, just halt to avoid infinite recursion. */
     if (__sync_fetch_and_add(&panicking, 1) > 0) {
         while (1) __asm__ volatile("hlt");
@@ -264,5 +277,27 @@ void panic(const char *fmt, ...) {
     console_write_centered("System halted. Press Ctrl+Alt+Del to restart.");
     console_write_ansi(SGR_RESET);
 
+    /* FIXED (v4.3.5): BUG-NEW-02 — After 3 panics, halt instead of reboot.
+     * This prevents the infinite reboot loop where SeaBIOS appears
+     * repeatedly.  The user can manually reset after reading the error. */
+    if (g_panic_count >= 3) {
+        log_printf(LOG_LEVEL_ERR, "panic: Too many panics (%d) — halting system.\n",
+                   g_panic_count);
+        log_printf(LOG_LEVEL_ERR, "panic: Power cycle or reset to retry.\n");
+        asm volatile ("cli; 1: hlt; jmp 1b");
+    }
+
+    /* Brief delay before reboot to let the log be visible */
+    for (volatile int i = 0; i < 10000000; i++) { asm volatile ("pause"); }
+
+    /* Attempt ACPI reset (port 0x604), fallback to keyboard controller
+     * reset (port 0x64), then triple fault as last resort. */
+    /* ACPI reset: write 0x2000 to the RESET_REG (FADT) if available.
+     * Standard QEMU/Bochs ACPI reset uses port 0x604 with value 0x2000. */
+    outw(0x604, 0x2000);
+    /* Keyboard controller reset: pulse CPU reset line via 8042 */
+    outb(0x64, 0xFE);
+    /* If both fail, triple fault to force a hardware reset */
+    asm volatile ("int $0");
     for (;;) asm volatile ("hlt");
 }

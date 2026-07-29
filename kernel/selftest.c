@@ -196,10 +196,18 @@ static void test_scheduler(void) {
     if (t->state != TASK_READY) TEST_FAIL("new task not READY");
     TEST_PASS("create_task");
 
-    /* Wait for it to exit (save pid before waitpid frees t) */
+    /* FIXED (v4.3.5): BUG-NEW-01 — Don't call waitpid from idle task.
+     * The idle task must not block in waitpid().  Instead, spin-wait
+     * for the child to become ZOMBIE, then collect it. */
     int saved_pid = t->pid;
     int status = -1;
-    int pid = waitpid(saved_pid, &status, 0);
+    int pid = -1;
+    for (int spin = 0; spin < 1000; spin++) {
+        /* Yield to let the child run and exit */
+        asm volatile("sti; nop; nop; cli");
+        pid = waitpid(saved_pid, &status, WNOHANG);
+        if (pid == saved_pid) break;
+    }
     if (pid != saved_pid) TEST_FAIL("waitpid returned wrong pid");
     if (status != 42) TEST_FAIL("waitpid returned wrong exit code");
     if (sched_test_done != 1) TEST_FAIL("test task did not run");
@@ -224,8 +232,14 @@ static void test_vfs(void) {
 
     /* Lookup non-existent file */
     struct inode *ghost = vfs_lookup("/nonexistent_file_xyz");
-    if (ghost) TEST_FAIL("vfs_lookup of nonexistent file succeeded");
-    TEST_PASS("vfs_lookup nonexistent returns NULL");
+    if (ghost) {
+        TEST_FAIL("vfs_lookup of nonexistent file succeeded");
+    } else {
+        /* FIXED (v4.3.5): BUG-NEW-05 — else guard prevents both PASS and FAIL
+         * from appearing simultaneously when vfs_lookup incorrectly
+         * returns a non-NULL inode for a nonexistent file. */
+        TEST_PASS("vfs_lookup nonexistent returns NULL");
+    }
 
     /* Open a known file */
     struct file *f = vfs_open("/test.txt", 0);
@@ -368,9 +382,12 @@ static void test_rtc_format(void) {
     char date_buf[48];
     ret = rtc_format_date(date_buf, sizeof(date_buf));
     if (ret == 0) {
-        /* Verify format: YYYY-MM-DD  DDD (16 chars + null minimum) */
+        /* FIXED (v4.3.5): BUG-NEW-06 — rtc_format_date returns "YYYY-MM-DD Day"
+         * which is 13 characters (e.g., "2026-07-28 Thu"), not 16.
+         * The test now expects ≥13 instead of ≥16. */
         size_t dlen = strlen(date_buf);
-        if (dlen < 16) TEST_FAIL("rtc_format_date length");
+        if (dlen < 13) TEST_FAIL("rtc_format_date length");
+        if (dlen > 32) TEST_FAIL("rtc_format_date length too long");
         if (date_buf[4] != '-' || date_buf[7] != '-') TEST_FAIL("rtc_format_date separators");
         TEST_PASS("rtc_format_date");
     } else {
@@ -446,10 +463,17 @@ static void test_signal_edge(void) {
     if (do_sys_kill(-1, SIGKILL) == 0) TEST_FAIL("kill with pid=-1 should fail");
     TEST_PASS("kill invalid args rejected");
 
-    /* kill with valid args to existing process */
-    if (do_sys_kill(1, SIGKILL) != 0) {
-        /* PID 1 (init) might not exist as a real task, this is OK */
-        log_printf(LOG_LEVEL_INFO, "  [INFO] kill(1, SIGKILL) returned error (expected if init has no sig)\n");
+    /* FIXED (v4.3.5): BUG-NEW-03 — Never send SIGKILL to init (pid=1).
+     * Killing init hangs the entire system.  Test with SIGUSR1 instead,
+     * which is harmless even if delivered.  Also test with a non-existent
+     * pid to verify error handling. */
+    if (do_sys_kill(1, SIGUSR1) != 0) {
+        /* PID 1 might not have a signal handler, this is fine */
+        log_printf(LOG_LEVEL_INFO, "  [INFO] kill(1, SIGUSR1) returned error (expected)\n");
+    }
+    /* Test with non-existent PID — should fail */
+    if (do_sys_kill(99999, SIGUSR1) == 0) {
+        TEST_FAIL("kill(nonexistent pid) should fail");
     }
     TEST_PASS("kill valid args accepted");
 }

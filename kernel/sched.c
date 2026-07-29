@@ -988,6 +988,15 @@ void do_exit_current(int code) {
 int waitpid(int pid, int *status, int options) {
     if (!current) return -1;
 
+    /* FIXED (v4.3.5): BUG-NEW-01 — Idle task must never block in waitpid.
+     * The idle task (pid=0) has no children and blocking here would
+     * deadlock the entire scheduler.  If WNOHANG is set, the idle task
+     * can scan for zombies without blocking; otherwise return -ECHILD. */
+    if (current->pid == 0 && !(options & WNOHANG)) {
+        log_printf(LOG_LEVEL_WARN, "waitpid: idle task cannot wait, returning -ECHILD\n");
+        return -ECHILD;
+    }
+
     for (;;) {
 retry:
         /* FIXED: acquire child_lock to prevent concurrent waitpid races */

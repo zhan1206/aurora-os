@@ -590,6 +590,16 @@ void dhcp_start(void) {
 
     log_printf(LOG_LEVEL_INFO, "dhcp: starting async discovery\n");
 
+    /* FIXED (v4.3.5): BUG-NEW-09 — Gracefully handle missing network interface.
+     * When no network interface is available (e.g., QEMU without -netdev),
+     * DHCP cannot send DISCOVER.  This is not a fatal error — the system
+     * can still boot and use loopback. */
+    if (!net_get_interface(0)) {
+        log_printf(LOG_LEVEL_INFO, "dhcp: no network interface available, skipping DHCP\n");
+        log_printf(LOG_LEVEL_INFO, "dhcp: use loopback (127.0.0.1) for local networking\n");
+        return;  /* FIXED (v4.3.5): BUG-NEW-09 — not a fatal error */
+    }
+
     if (dhcp_send_discover() < 0) {
         dhcp_state = DHCP_ERROR;
         dhcp_retry_count = 0;

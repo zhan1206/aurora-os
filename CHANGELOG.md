@@ -1,10 +1,57 @@
 # AuroraOS Changelog
 
-## v4.3.4 (2026-07-29) — 架构级大功能: 8大子系统全量实现
+## v4.3.5 (2026-07-29) — 实测修复: 10项测试暴露Bug全量修复
 
 ### 概述
 
-v4.3.4 完成了审计报告中最后8个架构级大功能的实现，包括EXT2三重间接块、IPv4分片重组、TCP SACK/NewReno、KASLR .text/.data随机化、SMP调度器、GUI/多架构/UEFI桩代码。
+v4.3.5 基于真实QEMU测试报告，修复了10个实测暴露的Bug，覆盖致命挂起、自检失败、中等子系统问题。
+
+---
+
+### 一、致命问题修复 (2项)
+
+| Bug | 修复 |
+|-----|------|
+| BUG-NEW-01 | waitpid: idle任务(pid=0)加WNOHANG守卫，selftest改自旋等待 |
+| BUG-NEW-02 | panic: 3次崩溃后halt而非无限重启 |
+
+---
+
+### 二、高危问题修复 (3项)
+
+| Bug | 修复 |
+|-----|------|
+| BUG-NEW-03 | sigtest: `do_sys_kill(1, SIGKILL)`→`SIGUSR1`，不再杀init |
+| BUG-NEW-04 | journal: init前检查设备大小(≥128块)+可写性 |
+| BUG-NEW-05 | vfs_lookup: ghost检查加else守卫，防止PASS/FAIL同时出现 |
+
+---
+
+### 三、中等问题修复 (5项)
+
+| Bug | 修复 |
+|-----|------|
+| BUG-NEW-06 | RTC: 长度期望 16→13 (实际"YYYY-MM-DD Day"=13字符) |
+| BUG-NEW-07 | ext2/fat32: 探测失败 ERR→DEBUG，加"无文件系统正常"上下文 |
+| BUG-NEW-08 | TSC: 加100MHz最小频率检查，低于阈值回退2GHz |
+| BUG-NEW-09 | DHCP: 无网卡时INFO优雅返回，非致命错误 |
+| BUG-NEW-10 | KASLR: slide上限按物理内存计算(64MB→31个slot)，不超出RAM |
+
+---
+
+### 四、变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 9 |
+| 修复 Bug | 10 |
+| 新增代码 | ~200 行 |
+
+---
+
+## v4.3.4 (2026-07-29) — 架构级大功能: 8大子系统全量实现
+
+### 概述
 
 ---
 

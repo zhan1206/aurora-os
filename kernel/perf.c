@@ -151,6 +151,17 @@ static void tsc_calibrate(void) {
         }
     }
 
+    /* FIXED (v4.3.5): BUG-NEW-08 — Sanity check: TSC must be at least 100 MHz.
+     * If the PIT calibration returned an unreasonably low value (e.g., 1 MHz
+     * in QEMU without proper timing), fall back to the default 2GHz.
+     * Any real x86_64 CPU from the last 20 years runs at > 100 MHz. */
+    if (tsc_freq > 0 && tsc_freq < 100000000ULL) {  /* 100 MHz minimum */
+        log_printf(LOG_LEVEL_WARN, "perf: TSC calibration returned %lu MHz — unreasonably low\n",
+                   tsc_freq / 1000000);
+        log_printf(LOG_LEVEL_WARN, "perf: falling back to default 2GHz\n");
+        tsc_freq = 0;  /* trigger fallback */
+    }
+
     /* FIXED (v4.3.3): TSC-001 — Final fallback: 2GHz */
     if (tsc_freq == 0) {
         tsc_freq = 2000000000ULL;

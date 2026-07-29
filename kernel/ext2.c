@@ -1615,11 +1615,15 @@ struct super_block *ext2_mount(struct block_device *bdev) {
     memcpy(sbi->sb_raw, sb_raw, sizeof(*sb_raw));
     kfree(sb_buf);
 
-    /* Verify magic */
+    /* FIXED (v4.3.5): BUG-NEW-07 — Clearer message when ext2 probe fails.
+     * A ramdisk without an ext2 filesystem is expected — this is not an error.
+     * Downgrade from LOG_LEVEL_ERR to LOG_LEVEL_DEBUG and add context. */
     if (sbi->sb_raw->s_magic != EXT2_SUPER_MAGIC) {
-        log_printf(LOG_LEVEL_ERR,
-                   "ext2: bad magic 0x%04x (expected 0x%04x)\n",
+        log_printf(LOG_LEVEL_DEBUG,
+                   "ext2: no filesystem found (magic=0x%04x, expected 0x%04x)\n",
                    sbi->sb_raw->s_magic, EXT2_SUPER_MAGIC);
+        log_printf(LOG_LEVEL_DEBUG,
+                   "ext2: this is normal if the device is not ext2-formatted\n");
         kfree(sbi->sb_raw);
         kfree(sbi);
         return NULL;

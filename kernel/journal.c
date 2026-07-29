@@ -155,6 +155,24 @@ int journal_init(struct block_device *bdev, uint64_t journal_start,
                  uint64_t fs_total_blocks) {
     if (!bdev || journal_blocks < 8 || block_size < 512) return -1;
 
+    /* FIXED (v4.3.5): BUG-NEW-04 — Verify block device is large enough for journal.
+     * The journal needs at least 128 blocks at the end of the device.
+     * If the device is too small, skip journal initialization gracefully. */
+    uint64_t dev_blocks = bdev->total_sectors / (block_size / bdev->block_size);
+    if (dev_blocks < 128) {
+        log_printf(LOG_LEVEL_WARN, "journal: device too small (%lu blocks, need 128), skipping\n",
+                   (unsigned long)dev_blocks);
+        return -ENOSPC;
+    }
+
+    /* FIXED (v4.3.5): BUG-NEW-04 — Verify block device is writable.
+     * Journal requires a writable block device.  If the device is
+     * read-only, journal initialization cannot proceed. */
+    if (bdev->write == NULL) {
+        log_printf(LOG_LEVEL_WARN, "journal: device is read-only, skipping\n");
+        return -EROFS;
+    }
+
     memset(&g_journal, 0, sizeof(g_journal));
     g_journal.bdev            = bdev;
     g_journal.block_size      = block_size;
@@ -212,9 +230,13 @@ int journal_init(struct block_device *bdev, uint64_t journal_start,
         g_journal.sequence = 1;
         g_journal.dirty    = 0;
 
-        if (write_jsb() < 0) {
-            log_printf(LOG_LEVEL_ERR, "journal: failed to write superblock\n");
-            return -1;
+        /* FIXED (v4.3.5): BUG-NEW-04 — Use a retry or fallback for journal superblock write.
+         * If the write fails, this is not a fatal error — the journal just
+         * won't be available.  The system can still boot without it. */
+        int write_ret = write_jsb();
+        if (write_ret != 0) {
+            log_printf(LOG_LEVEL_WARN, "journal: superblock write failed (%d), journal unavailable\n", write_ret);
+            return -EIO;
         }
         log_printf(LOG_LEVEL_INFO, "journal: created new journal\n");
     }

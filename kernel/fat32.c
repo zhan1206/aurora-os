@@ -1795,10 +1795,13 @@ struct super_block *fat32_mount(struct block_device *bdev) {
 
     struct fat32_boot_sector *bs = (struct fat32_boot_sector *)boot_buf;
 
-    /* Verify boot signature */
+    /* FIXED (v4.3.5): BUG-NEW-07 — Clearer message when fat32 probe fails. */
     if (bs->boot_signature_2 != 0xAA55) {
-        log_printf(LOG_LEVEL_ERR, "fat32: invalid boot signature 0x%04x\n",
+        log_printf(LOG_LEVEL_DEBUG,
+                   "fat32: no filesystem found (boot_sig=0x%04x, expected 0xAA55)\n",
                    bs->boot_signature_2);
+        log_printf(LOG_LEVEL_DEBUG,
+                   "fat32: this is normal if the device is not FAT-formatted\n");
         kfree(boot_buf);
         kfree(sbi);
         return NULL;
