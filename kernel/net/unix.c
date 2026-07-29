@@ -74,7 +74,7 @@ struct unix_sock *unix_socket_create(int type) {
     sk->type      = type;
     sk->read_open  = 1;
     sk->write_open = 1;
-    sk->refcount   = 1;
+    sk->refcount   = 1;  /* FIXED (v4.3.3): UNIX-001 — atomic refcount */
     spin_init(&sk->lock);
 
     if (type == SOCK_STREAM) {
@@ -631,19 +631,12 @@ int unix_recvfrom(struct unix_sock *sk, void *buf, int max_len,
 }
 
 /* ================================================================
- * unix_sock_put — Decrement refcount and free when zero         /* FIXED (v4.2.7): BUG-UNIX-PEER-UAF */
+ * unix_socket_flush_queues — Free all queued data           /* FIXED (v4.3.3): UNIX-001 */
  * ================================================================ */
-static void unix_sock_put(struct unix_sock *sk) {
+static void unix_socket_flush_queues(struct unix_sock *sk) {
     if (!sk) return;
-    spin_lock(&sk->lock);
-    sk->refcount--;
-    if (sk->refcount > 0) {
-        spin_unlock(&sk->lock);
-        return;
-    }
-    spin_unlock(&sk->lock);
 
-    /* Free resources */
+    /* Free ring buffer */
     if (sk->buf) {
         kfree(sk->buf);
         sk->buf = NULL;
@@ -656,8 +649,60 @@ static void unix_sock_put(struct unix_sock *sk) {
         if (dg->data) kfree(dg->data);
         kfree(dg);
     }
+}
 
-    kfree(sk);
+/* ================================================================
+ * unix_sock_get — Atomic refcount increment                 /* FIXED (v4.3.3): UNIX-001 */
+ * ================================================================ */
+static inline void unix_sock_get(struct unix_sock *sk) {
+    if (!sk) return;
+    __sync_fetch_and_add(&sk->refcount, 1);
+}
+
+/* ================================================================
+ * unix_sock_put — Atomic refcount decrement & free when zero /* FIXED (v4.3.3): UNIX-001 */
+ * ================================================================ */
+static void unix_sock_put(struct unix_sock *sk) {
+    if (!sk) return;
+    if (__sync_sub_and_fetch(&sk->refcount, 1) == 0) {
+        /* Last reference — free the socket */
+        if (sk->peer) {
+            sk->peer->peer = NULL;
+            unix_sock_put(sk->peer);
+        }
+        unix_socket_flush_queues(sk);
+        kfree(sk);  /* FIXED (v4.3.3): UNIX-001 — safe cleanup */
+    }
+}
+
+/* ================================================================
+ * unix_socket_close — Close by fd with atomic refcount       /* FIXED (v4.3.3): UNIX-001 */
+ * ================================================================ */
+static int unix_socket_close(int fd) {
+    struct unix_sock *sock = fd_to_unix_sock(fd);
+    if (!sock) return -EBADF;
+
+    spin_lock(&sock->lock);
+    sock->state = UNIX_CLOSED;
+    spin_unlock(&sock->lock);
+
+    /* Notify peer */
+    if (sock->peer) {
+        sock->peer->peer = NULL;
+    }
+
+    /* Drop the fd reference */
+    unix_sock_put(sock);
+    return 0;
+}
+
+/* ================================================================
+ * unix_socket_fork — Child inherits reference on fork       /* FIXED (v4.3.3): UNIX-001 */
+ * ================================================================ */
+int unix_socket_fork(struct unix_sock *sock) {
+    if (!sock) return -EINVAL;
+    unix_sock_get(sock);  /* Child inherits reference */
+    return 0;
 }
 
 /* ================================================================
@@ -696,15 +741,14 @@ void unix_close(struct unix_sock *sk) {
         peer->write_open = 0;
         unix_wake_all(&peer->blocked_readers);
         unix_wake_all(&peer->blocked_writers);
-        /* FIXED (v4.2.7): BUG-UNIX-PEER-UAF — Clear the peer's
-         * back-reference and decrement its refcount.  This prevents
-         * a use-after-free if the peer accesses sk after sk is freed.
-         * The peer's own state is NOT set to CLOSED here — the peer
-         * manages its own lifecycle. */
+        /* FIXED (v4.3.3): UNIX-001 — Clear the peer's
+         * back-reference.  The peer's own state is NOT set to
+         * CLOSED here — the peer manages its own lifecycle.
+         * Release locks before calling unix_sock_put to avoid
+         * use-after-free on the lock object. */
         peer->peer = NULL;
-        unix_sock_put(peer);
-        spin_unlock(&peer->lock);
         sk->peer = NULL;
+        spin_unlock(&peer->lock);
     }
 
     sk->state = UNIX_CLOSED;
@@ -725,10 +769,11 @@ void unix_close(struct unix_sock *sk) {
     }
     spin_unlock(&unix_global_lock);
 
-    /* FIXED (v4.2.7): BUG-UNIX-PEER-UAF — Use refcount-based put
-     * instead of direct kfree.  The socket may still be referenced
-     * by its peer (e.g. if the peer hasn't closed yet); unix_sock_put
-     * only frees the memory when refcount reaches zero. */
+    /* FIXED (v4.3.3): UNIX-001 — Drop references after all locks released.
+     * unix_sock_put is atomic and may free the socket if refcount reaches 0. */
+    if (peer) {
+        unix_sock_put(peer);
+    }
     unix_sock_put(sk);
 }
 

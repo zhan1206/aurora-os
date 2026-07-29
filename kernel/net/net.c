@@ -11,6 +11,7 @@
 #include "../smp.h"
 #include "../mem.h"
 #include "../perf.h"       /* FIXED (v4.3.2): ARP-001 — get_uptime_ms() */
+#include "../sched.h"      /* FIXED (v4.3.3): TCP-001 — schedule() */
 #include "unix.h"        /* AF_UNIX (v4.2.6) */
 #include <stdint.h>
 
@@ -1012,48 +1013,83 @@ int tcp_listen(int sock, int backlog) {
     return 0;
 }
 
+/* FIXED (v4.3.3): TCP-001 — Accept only ESTABLISHED sockets.
+ * Previously accept could return SYN_RECEIVED sockets, where tcp_send
+ * is disabled, causing immediate send failure after accept.
+ * Now waits for the handshake to complete with a timeout and yields
+ * the CPU instead of busy-looping.  Returns -EAGAIN when no pending
+ * connections are available (non-blocking). */
 int tcp_accept(int sock, uint8_t remote_ip[4], uint16_t *remote_port) {
+    int accepted_id;
+
     spin_lock(&tcp_lock);
     struct tcp_socket *s = tcp_find_socket(sock);
     if (!s) {
         spin_unlock(&tcp_lock);
-        return -1;
+        return -EINVAL;  /* FIXED (v4.3.3): TCP-001 — return proper errno */
     }
 
     if (s->state != TCP_LISTEN) {
         spin_unlock(&tcp_lock);
-        return -1;
+        return -EINVAL;  /* FIXED (v4.3.3): TCP-001 — return proper errno */
     }
 
     /* Check for pending connections */
     if (s->pending_count <= 0) {
         spin_unlock(&tcp_lock);
-        return -1;  /* No pending connections */
+        return -EAGAIN;  /* FIXED (v4.3.3): TCP-001 — Return EAGAIN instead of blocking */
     }
 
     /* Dequeue the first pending connection */
-    int accepted_id = s->pending_ids[0];
+    accepted_id = s->pending_ids[0];
     s->pending_count--;
     for (int i = 0; i < s->pending_count; i++) {
         s->pending_ids[i] = s->pending_ids[i + 1];
     }
 
-    /* Find the accepted socket and get its remote address */
-    struct tcp_socket *accepted = tcp_find_socket(accepted_id);
-    if (accepted) {
-        /* FIXED (v4.2.9): BUG-ACCEPT-STATE — Only return sockets that
-         * have completed the 3-way handshake (ESTABLISHED).  If the
-         * socket is still in SYN_RECEIVED, tcp_send() would refuse to
-         * send, breaking the server side. */
-        if (accepted->state != TCP_ESTABLISHED) {
+    /* FIXED (v4.3.3): TCP-001 — Release lock before waiting for ESTABLISHED.
+     * We cannot hold the spinlock while calling schedule(). */
+    spin_unlock(&tcp_lock);
+
+    /* FIXED (v4.3.3): TCP-001 — Wait for the handshake to complete.
+     * The accepted socket may still be in SYN_RECEIVED state.
+     * Wait up to 30 seconds for it to reach ESTABLISHED. */
+    {
+        uint64_t start = get_uptime_ms();
+        int established = 0;
+        while (get_uptime_ms() - start < 30000) {  /* 30s timeout */
+            spin_lock(&tcp_lock);
+            struct tcp_socket *accepted = tcp_find_socket(accepted_id);
+            if (accepted && accepted->state == TCP_ESTABLISHED) {
+                /* Copy remote address while under lock */
+                if (remote_ip) memcpy(remote_ip, accepted->remote_ip, 4);
+                if (remote_port) *remote_port = accepted->remote_port;
+                established = 1;
+                spin_unlock(&tcp_lock);
+                break;
+            }
+            if (!accepted || accepted->state == TCP_CLOSED) {
+                /* Socket was closed or invalidated */
+                spin_unlock(&tcp_lock);
+                return -ECONNRESET;
+            }
             spin_unlock(&tcp_lock);
-            return -1;
+            schedule();  /* FIXED (v4.3.3): TCP-001 — yield while waiting for handshake */
         }
-        if (remote_ip) memcpy(remote_ip, accepted->remote_ip, 4);
-        if (remote_port) *remote_port = accepted->remote_port;
+
+        if (!established) {
+            /* Timeout — close the socket */
+            spin_lock(&tcp_lock);
+            struct tcp_socket *accepted = tcp_find_socket(accepted_id);
+            if (accepted) {
+                accepted->state = TCP_CLOSED;
+                accepted->in_use = 0;
+            }
+            spin_unlock(&tcp_lock);
+            return -ETIMEDOUT;
+        }
     }
 
-    spin_unlock(&tcp_lock);
     return accepted_id;
 }
 

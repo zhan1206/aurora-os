@@ -13,6 +13,7 @@
 #include "include/kstdio.h"
 #include "include/theme.h"
 #include "console.h"
+#include "include/hpet.h"
 #include <string.h>
 
 /* ================================================================
@@ -58,78 +59,107 @@ static inline uint64_t read_tsc(void) {
  *   4. Read TSC
  *   5. tsc_freq = (tsc_diff * 1193180) / divisor
  * ================================================================ */
+/* FIXED (v4.3.3): TSC-001 — Improved TSC calibration with HPET fallback.
+ * Previously used PIT polling only with 2GHz fallback.
+ * Now tries HPET first (more accurate), falls back to PIT, then 2GHz. */
 static void tsc_calibrate(void) {
-    /*
-     * PIT calibration: use divisor 11930 (≈10ms at 1193180 Hz).
-     * Set channel 0 to mode 0 (interrupt on terminal count),
-     * load divisor, then poll the output pin.
-     *
-     * PIT ports:
-     *   0x40 = channel 0 data
-     *   0x43 = mode/command register
-     * Mode 0 command: 0x30 = channel 0, lobyte/hibyte, mode 0, binary
-     *
-     * PIT output pin status: bit 5 of port 0x61 (NMI Status and Control)
-     *   When bit 5 = 0, count is in progress. When bit 5 = 1, count done.
-     *
-     * We use a conservative approach: measure multiple ~10ms intervals
-     * and take the average for better accuracy.
-     */
+    uint64_t tsc_freq = 0;
 
-    uint16_t divisor = 11930;  /* ~10ms */
-    uint64_t best_tsc_freq = 0;
-
-    /* Calibrate over 3 samples and take the average */
-    for (int sample = 0; sample < 3; sample++) {
-        /* Set PIT channel 0 to mode 0 (interrupt on terminal count) */
+    /* FIXED (v4.3.3): TSC-001 — Try HPET calibration first */
+    if (hpet_base_addr) {
+        uint16_t divisor = 11930;  /* ~10ms */
         outb(0x43, 0x30);  /* channel 0, lobyte/hibyte, mode 0 */
-
-        /* Load divisor */
         outb(0x40, (uint8_t)(divisor & 0xFF));
         outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
 
-        /* Read TSC at start */
         uint64_t tsc_start = read_tsc();
+        uint64_t hpet_start = hpet_get_counter();
 
-        /* Poll until PIT output goes high (count reached 0) */
+        /* Poll until PIT output goes high */
         uint32_t timeout = 0;
         while (!(inb(0x61) & 0x20)) {
             timeout++;
-            if (timeout > 10000000) {
-                log_printf(LOG_LEVEL_WARN, "perf: TSC calibration PIT timeout, skipping sample\n");
-                goto next_sample;  /* skip this sample, don't use bad data */
+            if (timeout > 10000000) break;
+        }
+
+        uint64_t tsc_end = read_tsc();
+        uint64_t hpet_end = hpet_get_counter();
+
+        if (timeout <= 10000000) {
+            uint64_t tsc_diff = tsc_end - tsc_start;
+            uint64_t hpet_diff = hpet_end - hpet_start;
+            uint64_t elapsed_ns = hpet_ticks_to_ns(hpet_diff);
+            if (elapsed_ns > 0 && tsc_diff > 0) {
+                tsc_freq = (tsc_diff * 1000000000ULL) / elapsed_ns;
+                log_printf(LOG_LEVEL_INFO,
+                           "perf: TSC HPET calibration: %lu MHz\n",
+                           tsc_freq / 1000000);
             }
         }
+    }
 
-        /* Read TSC at end */
-        uint64_t tsc_end = read_tsc();
-        uint64_t tsc_diff = tsc_end - tsc_start;
+    /* FIXED (v4.3.3): TSC-001 — Fallback: PIT calibration */
+    if (tsc_freq == 0) {
+        uint16_t divisor = 11930;  /* ~10ms */
+        uint64_t best_tsc_freq = 0;
 
-        /* Skip if TSC didn't advance (shouldn't happen normally) */
-        if (tsc_diff == 0) {
-            log_printf(LOG_LEVEL_WARN, "perf: TSC calibration zero diff, skipping\n");
-            goto next_sample;
+        /* Calibrate over 3 samples and take the average */
+        for (int sample = 0; sample < 3; sample++) {
+            /* Set PIT channel 0 to mode 0 (interrupt on terminal count) */
+            outb(0x43, 0x30);  /* channel 0, lobyte/hibyte, mode 0 */
+
+            /* Load divisor */
+            outb(0x40, (uint8_t)(divisor & 0xFF));
+            outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
+
+            /* Read TSC at start */
+            uint64_t tsc_start = read_tsc();
+
+            /* Poll until PIT output goes high (count reached 0) */
+            uint32_t timeout = 0;
+            while (!(inb(0x61) & 0x20)) {
+                timeout++;
+                if (timeout > 10000000) {
+                    log_printf(LOG_LEVEL_WARN, "perf: TSC calibration PIT timeout, skipping sample\n");
+                    goto next_sample;  /* skip this sample, don't use bad data */
+                }
+            }
+
+            /* Read TSC at end */
+            uint64_t tsc_end = read_tsc();
+            uint64_t tsc_diff = tsc_end - tsc_start;
+
+            /* Skip if TSC didn't advance (shouldn't happen normally) */
+            if (tsc_diff == 0) {
+                log_printf(LOG_LEVEL_WARN, "perf: TSC calibration zero diff, skipping\n");
+                goto next_sample;
+            }
+
+            /* Calculate TSC frequency: tsc_diff ticks in (divisor / 1193180) seconds.
+             * tsc_freq = tsc_diff * 1193180 / divisor */
+            uint64_t sample_freq = (tsc_diff * 1193180ULL) / divisor;
+            best_tsc_freq += sample_freq;
+        next_sample:
+            continue;
         }
 
-        /* Calculate TSC frequency: tsc_diff ticks in (divisor / 1193180) seconds.
-         * tsc_freq = tsc_diff * 1193180 / divisor */
-        uint64_t sample_freq = (tsc_diff * 1193180ULL) / divisor;
-        best_tsc_freq += sample_freq;
-    next_sample:
-        continue;
+        tsc_freq = best_tsc_freq / 3;
+        if (tsc_freq > 0) {
+            log_printf(LOG_LEVEL_INFO,
+                       "perf: TSC PIT calibration: %lu MHz\n",
+                       tsc_freq / 1000000);
+        }
     }
 
-    tsc_freq_hz = best_tsc_freq / 3;
-
-    if (tsc_freq_hz == 0) {
-        /* Fallback: assume 2 GHz if calibration fails */
-        tsc_freq_hz = 2000000000ULL;
-        log_printf(LOG_LEVEL_WARN, "perf: TSC calibration failed, using %d MHz\n",
-                   (int)(tsc_freq_hz / 1000000));
-    } else {
-        log_printf(LOG_LEVEL_INFO, "perf: TSC calibrated at %d MHz\n",
-                   (int)(tsc_freq_hz / 1000000));
+    /* FIXED (v4.3.3): TSC-001 — Final fallback: 2GHz */
+    if (tsc_freq == 0) {
+        tsc_freq = 2000000000ULL;
+        log_printf(LOG_LEVEL_WARN, "perf: TSC calibration failed, using fallback 2GHz\n");
     }
+
+    tsc_freq_hz = tsc_freq;
+    log_printf(LOG_LEVEL_INFO, "perf: TSC calibrated at %d MHz\n",
+               (int)(tsc_freq_hz / 1000000));
 }
 
 /* ================================================================

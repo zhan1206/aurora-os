@@ -26,6 +26,7 @@
 #include "procfs.h"
 #include "devtmpfs.h"
 #include "sysfs.h"
+#include "tmpfs.h"
 #include "journal.h"
 #include "fsck.h"
 #include "squashfs.h"
@@ -129,18 +130,10 @@ void fs_init(void) {
             /* Mount sysfs at /sys */
             sysfs_init();
 
-            /* POSIX (v4.2.6): Mount tmpfs at /tmp */
-            {
-                struct super_block *tmpfs_sb = ramfs_create();
-                if (tmpfs_sb) {
-                    if (vfs_mount("/tmp", tmpfs_sb) == 0) {
-                        log_printf(LOG_LEVEL_INFO, "fs: tmpfs mounted at /tmp\n");
-                    } else {
-                        kfree(tmpfs_sb);
-                        log_printf(LOG_LEVEL_WARN, "fs: tmpfs mount at /tmp failed\n");
-                    }
-                }
-            }
+            /* FIXED (v4.3.3): TMPFS-001 — Mount tmpfs at /tmp.
+             * Previously used ramfs_create() for /tmp; now uses the
+             * proper tmpfs filesystem implementation. */
+            tmpfs_init();
 
             embed_init();
 
@@ -183,18 +176,8 @@ void fs_init(void) {
         /* Mount sysfs at /sys */
         sysfs_init();
 
-        /* POSIX (v4.2.6): Mount tmpfs at /tmp */
-        {
-            struct super_block *tmpfs_sb = ramfs_create();
-            if (tmpfs_sb) {
-                if (vfs_mount("/tmp", tmpfs_sb) == 0) {
-                    log_printf(LOG_LEVEL_INFO, "fs: tmpfs mounted at /tmp\n");
-                } else {
-                    kfree(tmpfs_sb);
-                    log_printf(LOG_LEVEL_WARN, "fs: tmpfs mount at /tmp failed\n");
-                }
-            }
-        }
+        /* FIXED (v4.3.3): TMPFS-001 — Mount tmpfs at /tmp */
+        tmpfs_init();
 
         embed_init();
 

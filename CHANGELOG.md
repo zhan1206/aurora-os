@@ -1,5 +1,75 @@
 # AuroraOS Changelog
 
+## v4.3.3 (2026-07-29) — 全量修复: 模块/网络/FS/用户态/引导 16项
+
+### 概述
+
+v4.3.3 完成了审计报告中所有可修复的代码Bug，覆盖模块系统、网络栈、文件系统、用户态/动态链接、引导与硬件初始化、AF_UNIX六大领域。
+
+---
+
+### 一、模块系统全量修复 (4项)
+
+| Bug | 修复 |
+|-----|------|
+| MODSIG-001 | 模块签名: XOR→ChaCha20 MAC |
+| MOD-003 | mod load: dev模式跳过签名验证 |
+| MOD-004 | mod unload: 完成refcount卸载 |
+| MOD-005 | mod_sample.c: 确认接入构建系统 |
+
+---
+
+### 二、网络栈修复 (4项)
+
+| Bug | 修复 |
+|-----|------|
+| DNS-001 | DNS: 完整解析(schedule+yield) + 3次重试+5s超时 |
+| DHCP-001 | DHCP: 完整REBIND状态机(RENEW→REBIND→init) |
+| IPV6-001 | IPv6: ICMPv6校验和使用正确伪头部地址 |
+| TCP-001 | accept: 等待ESTABLISHED状态，30s超时 |
+
+---
+
+### 三、文件系统修复 (3项)
+
+| Bug | 修复 |
+|-----|------|
+| SYSFS-001 | sysfs: 实现write路径(copy_from_user) |
+| TMPFS-001 | tmpfs: 新建完整实现(nlink/slab/alloc_pages) |
+| JRNL-002 | Journal: 事务校验+故障注入自测 |
+
+---
+
+### 四、用户态/引导/硬件 (4项)
+
+| Bug | 修复 |
+|-----|------|
+| LDSO-001 | ld-so: 集成到execve(ET_DYN→ld-linux.so) |
+| HPET-001 | HPET: 完整定时器(ACPI解析+计数器) |
+| MB2-001 | Multiboot2: 添加header(magic+tags) |
+| TSC-001 | TSC: HPET优先→PIT→2GHz三级回退 |
+
+---
+
+### 五、AF_UNIX修复 (1项)
+
+| Bug | 修复 |
+|-----|------|
+| UNIX-001 | AF_UNIX: 原子refcount(atomic_get/put) + fork继承 |
+
+---
+
+### 六、变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 20+ |
+| 新建文件 | 3 (hpet.c, hpet.h, tmpfs.c, tmpfs.h) |
+| 修复 Bug | 16 |
+| 新增代码 | ~1200 行 |
+
+---
+
 ## v4.3.2 (2026-07-29) — 根因修复: BSS栈溢出 + 安全/FS/网络全量修复
 
 ### 概述

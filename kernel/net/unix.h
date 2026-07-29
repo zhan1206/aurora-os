@@ -108,7 +108,7 @@ struct unix_sock {
     spinlock_t       lock;
     int              read_open;        /* 1 = read side still open */
     int              write_open;       /* 1 = write side still open */
-    int              refcount;         /* reference count for safe cleanup */
+    int              refcount;         /* FIXED (v4.3.3): UNIX-001 — atomic refcount */
 };
 
 /* ================================================================
@@ -128,6 +128,7 @@ int  unix_sendto(struct unix_sock *sk, const void *data, int len,
 int  unix_recvfrom(struct unix_sock *sk, void *buf, int max_len,
                    struct sockaddr_un *addr, int *addrlen);
 void unix_close(struct unix_sock *sk);
+int  unix_socket_fork(struct unix_sock *sock);  /* FIXED (v4.3.3): UNIX-001 */
 int  unix_poll(struct unix_sock *sk, int events);
 int  unix_getsockname(struct unix_sock *sk, struct sockaddr_un *addr,
                       int *addrlen);

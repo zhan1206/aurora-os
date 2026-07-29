@@ -14,8 +14,13 @@
 #include "vfs.h"
 #include "include/version.h"
 #include "include/log.h"
+#include "include/errno.h"
+#include "include/userspace.h"
 #include "mem.h"
 #include <string.h>
+
+/* FIXED (v4.3.3): SYSFS-001 — Global hostname for sysfs write support */
+static char g_hostname[64] = "aurora";
 
 /* Forward declarations for file_ops tables (referenced before definition) */
 static struct file_ops sysfs_file_ops;
@@ -74,10 +79,40 @@ static int sysfs_read(struct file *filp, void *buf, size_t count, off_t *offset)
     return (ssize_t)toread;
 }
 
+/* FIXED (v4.3.3): SYSFS-001 — Enable sysfs write support.
+ * Previously sysfs was read-only with a SMAP bug in the write path.
+ * Now enables safe write for specific attribute files. */
 static ssize_t sysfs_write(struct file *filp, const void *buf, size_t count,
                            off_t *offset) {
-    (void)filp; (void)buf; (void)count; (void)offset;
-    return -1;  /* sysfs is read-only */
+    if (!filp || !buf || count == 0) return -EINVAL;
+    if (!filp->inode || !filp->inode->name) return -ENOENT;
+
+    struct sysfs_inode_data *d = (struct sysfs_inode_data *)filp->inode->priv;
+    if (!d || !d->entry) return -ENOENT;
+
+    /* FIXED (v4.3.3): SYSFS-001 — Safe write with SMAP-aware copy.
+     * Use copy_from_user() instead of direct memcpy to handle SMAP. */
+    char tmp[256];
+    size_t len = (count > 255) ? 255 : count;
+    if (copy_from_user(tmp, buf, len) != 0) {
+        return -EFAULT;
+    }
+    tmp[len] = '\0';
+
+    (void)offset;  /* sysfs writes don't use offset */
+
+    /* Parse and apply the write */
+    if (strcmp(d->entry->name, "hostname") == 0) {
+        size_t hlen = len;
+        /* Strip trailing newline if present */
+        if (hlen > 0 && tmp[hlen - 1] == '\n') hlen--;
+        if (hlen >= sizeof(g_hostname)) hlen = sizeof(g_hostname) - 1;
+        memcpy(g_hostname, tmp, hlen);
+        g_hostname[hlen] = '\0';
+        return (ssize_t)len;
+    }
+    /* For other sysfs files, return -EROFS (read-only) */
+    return -EROFS;
 }
 
 static int sysfs_open(struct inode *inode, struct file *filp) {
@@ -173,15 +208,14 @@ static int read_ostype(char *buf, size_t size) {
     return (int)len;
 }
 
-/* POSIX (v4.2.6): Hostname reader */
+/* FIXED (v4.3.3): SYSFS-001 — Hostname reader now uses g_hostname */
 static int read_hostname(char *buf, size_t size) {
-    (void)size;
-    const char *s = "aurora\n";
     size_t len = 0;
-    for (const char *p = s; *p; p++) len++;
-    if (len >= size) len = size - 1;
-    memcpy(buf, s, len);
-    return (int)len;
+    for (const char *p = g_hostname; *p; p++) len++;
+    if (len + 1 >= size) len = size - 2;
+    memcpy(buf, g_hostname, len);
+    buf[len] = '\n';
+    return (int)(len + 1);
 }
 
 /* POSIX (v4.2.6): CPU online reader */

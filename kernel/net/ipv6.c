@@ -505,6 +505,53 @@ static int ipv6_walk_headers(uint8_t next_header,
 }
 
 /* ================================================================
+ * FIXED (v4.3.3): IPV6-001 — Fix ICMPv6 checksum using correct pseudo-header.
+ * Previously used multicast address as source in pseudo-header,
+ * which didn't match the link-local address in the IPv6 header,
+ * causing checksum verification failure.
+ *
+ * The pseudo-header uses the source and destination addresses as they
+ * appear in the IPv6 header of the *outgoing* packet, plus the
+ * upper-layer packet length and the Next Header value (58 for ICMPv6).
+ * ================================================================ */
+static uint16_t ipv6_icmp_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
+                                    const uint8_t *icmp_data, uint16_t icmp_len) {
+    uint32_t sum = 0;
+    int i;
+
+    /* IPv6 pseudo-header: Source Address (16 bytes) */
+    for (i = 0; i < 16; i += 2) {
+        sum += ((uint16_t)src_ip[i] << 8) | src_ip[i + 1];
+    }
+    /* IPv6 pseudo-header: Destination Address (16 bytes) */
+    for (i = 0; i < 16; i += 2) {
+        sum += ((uint16_t)dst_ip[i] << 8) | dst_ip[i + 1];
+    }
+    /* IPv6 pseudo-header: Upper-Layer Packet Length (32 bits) */
+    sum += (icmp_len >> 16) & 0xFFFF;  /* upper length */
+    sum += icmp_len & 0xFFFF;          /* lower length */
+    /* IPv6 pseudo-header: Next Header = ICMPv6 (58) */
+    sum += (uint32_t)IPV6_PROTO_ICMPV6;
+
+    /* ICMPv6 data (checksum field is zeroed by caller) */
+    for (i = 0; i < icmp_len; i += 2) {
+        uint16_t word;
+        if (i + 1 < icmp_len) {
+            word = ((uint16_t)icmp_data[i] << 8) | icmp_data[i + 1];
+        } else {
+            word = (uint16_t)icmp_data[i] << 8;
+        }
+        sum += word;
+    }
+
+    /* Fold 32-bit sum to 16-bit */
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t)(~sum);
+}
+
+/* ================================================================
  * IPv6 Packet Handler (called from Ethernet layer)
  * ================================================================ */
 void ipv6_handle_packet(struct net_device *netdev,
@@ -574,45 +621,29 @@ void ipv6_handle_packet(struct net_device *netdev,
             reply[2] = 0;
             reply[3] = 0;
 
-            /* Build ICMPv6 pseudo-header checksum */
-            uint32_t sum = 0;
-            /* Source address */
-            for (i = 0; i < 8; i++) {
-                sum += ((uint16_t)ip6->src_addr[i * 2] << 8) | ip6->src_addr[i * 2 + 1];
-            }
-            /* Destination address */
-            for (i = 0; i < 8; i++) {
-                sum += ((uint16_t)ip6->dst_addr[i * 2] << 8) | ip6->dst_addr[i * 2 + 1];
-            }
-            /* Upper-layer packet length */
-            sum += (uint32_t)payload_len;
-            /* Next header */
-            sum += (uint32_t)IPV6_PROTO_ICMPV6;
+            /* FIXED (v4.3.3): IPV6-001 — Use correct pseudo-header addresses.
+             * For the reply, the source is our address (original dst) and
+             * the destination is the remote (original src).  Previously
+             * the incoming packet's src/dst were used directly, which
+             * don't match the outgoing IPv6 header's addresses. */
+            {
+                /* Build source address for reply (our address = original dst) */
+                ipv6_addr_t reply_src;
+                memcpy(reply_src.addr, ip6->dst_addr, 16);
 
-            /* ICMPv6 data */
-            for (i = 0; i < reply_len / 2; i++) {
-                sum += ((uint16_t)reply[i * 2] << 8) | reply[i * 2 + 1];
+                /* Build destination for reply (remote = original src) */
+                ipv6_addr_t reply_dst;
+                memcpy(reply_dst.addr, ip6->src_addr, 16);
+
+                /* FIXED (v4.3.3): IPV6-001 — Compute checksum with correct
+                 * pseudo-header: src = reply_src (our address), dst = reply_dst */
+                uint16_t csum = ipv6_icmp_checksum(reply_src.addr, reply_dst.addr,
+                                                    reply, (uint16_t)reply_len);
+                reply[2] = (uint8_t)((csum >> 8) & 0xFF);
+                reply[3] = (uint8_t)(csum & 0xFF);
+
+                ipv6_send(&reply_dst, IPV6_PROTO_ICMPV6, reply, (uint16_t)reply_len);
             }
-            if (reply_len & 1) {
-                sum += (uint16_t)reply[reply_len - 1] << 8;
-            }
-
-            while (sum >> 16) {
-                sum = (sum & 0xFFFF) + (sum >> 16);
-            }
-            uint16_t csum = (uint16_t)(~sum);
-            reply[2] = (uint8_t)((csum >> 8) & 0xFF);
-            reply[3] = (uint8_t)(csum & 0xFF);
-
-            /* Build source address for reply */
-            ipv6_addr_t reply_src;
-            memcpy(reply_src.addr, ip6->dst_addr, 16);
-
-            /* Build destination for reply */
-            ipv6_addr_t reply_dst;
-            memcpy(reply_dst.addr, ip6->src_addr, 16);
-
-            ipv6_send(&reply_dst, IPV6_PROTO_ICMPV6, reply, payload_len);
 
             kfree(reply);
             break;

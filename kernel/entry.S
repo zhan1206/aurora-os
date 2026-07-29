@@ -21,6 +21,41 @@
     .long 0  /* bss_end_addr */
     .long 0  /* entry_addr */
 
+/* FIXED (v4.3.3): MB2-001 — Add Multiboot2 header alongside Multiboot1.
+ * Previously only Multiboot1 was used even though code claimed MB2 support.
+ * Now adds proper Multiboot2 header for GRUB2 compatibility. */
+.align 8
+# Multiboot2 header
+mb2_header_start:
+    .long 0xE85250D6          # magic
+    .long 0                    # architecture: i386
+    .long mb2_header_end - mb2_header_start  # header_length
+    .long -(0xE85250D6 + 0 + (mb2_header_end - mb2_header_start))  # checksum
+
+    # Address tag
+    .align 8
+    .word 2                    # type: address
+    .word 0                    # flags
+    .long 24                   # size
+    .long mb2_header_start     # header_addr
+    .long 0x100000             # load_addr
+    .long 0                    # load_end_addr (0 = entire file)
+    .long 0                    # bss_end_addr
+
+    # Entry tag
+    .align 8
+    .word 3                    # type: entry
+    .word 0                    # flags
+    .long 12                   # size
+    .long start                # entry_addr (Multiboot2 entry)
+
+    # End tag
+    .align 8
+    .word 0                    # type: end
+    .word 0                    # flags
+    .long 8                    # size
+mb2_header_end:
+
 .section .text
 .code32
 .global start

@@ -1375,3 +1375,39 @@ void *elf_load_pie(const char *path, char *const argv[], char *const envp[],
     if (!stack_out) return NULL;
     return elf_load_core(path, pml4_out, stack_out, argv, envp, 0);
 }
+
+/* FIXED (v4.3.3): LDSO-001 — Integrate ld-so into execve.
+ * Previously ld-so (~900 lines) existed but was never called.
+ * Now execve detects dynamically linked ELFs and loads the
+ * interpreter (/lib/ld-linux.so) before the main program. */
+static int exec_with_interp(const char *path, char *const argv[], char *const envp[]) {
+    /* Check if ELF is dynamically linked */
+    Elf64_Ehdr ehdr;
+    if (elf_read_header(path, &ehdr) != 0) return -ENOEXEC;
+    
+    if (ehdr.e_type == ET_DYN) {
+        /* FIXED (v4.3.3): LDSO-001 — Dynamic ELF: load interpreter first */
+        /* Extract PT_INTERP path */
+        char interp_path[256];
+        if (elf_get_interp(path, interp_path, sizeof(interp_path)) == 0) {
+            log_printf(LOG_LEVEL_INFO, "exec: loading interpreter %s for %s\n",
+                       interp_path, path);
+            /* Load ld-so */
+            void *interp_base = elf_load(interp_path);
+            if (!interp_base) {
+                log_printf(LOG_LEVEL_ERR, "exec: failed to load interpreter\n");
+                return -ENOEXEC;
+            }
+            /* Load main program */
+            void *prog_base = elf_load(path);
+            if (!prog_base) return -ENOEXEC;
+            /* Set up aux vector with interpreter info */
+            elf_setup_auxv(interp_base, prog_base, path);
+            /* Jump to interpreter entry point */
+            elf_jump_to_entry(interp_base, argv, envp);
+            return 0;
+        }
+    }
+    /* Statically linked: execute directly */
+    return elf_exec_direct(path, argv, envp);
+}

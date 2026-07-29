@@ -8,6 +8,7 @@
 #include "../mem.h"
 #include "../aslr.h"
 #include "../sched.h"      /* FIXED (v4.2.8): BUG-DNS-BUSY — schedule() */
+#include "../perf.h"       /* FIXED (v4.3.3): DNS-001 — get_uptime_ms() */
 #include <stdint.h>
 
 /* Byte order conversion */
@@ -18,6 +19,16 @@ static inline uint16_t ntohs(uint16_t n) {
 static inline uint16_t htons(uint16_t n) {
     return ntohs(n);
 }
+
+/* FIXED (v4.3.3): DNS-001 — get_uptime_ms() helper for time-based timeout.
+ * PIT timer runs at 100 Hz, so each tick = 10 ms. */
+static inline uint64_t get_uptime_ms(void) {
+    return perf_get_ticks() * 10;
+}
+
+/* FIXED (v4.3.3): DNS-001 — Retry and timeout constants */
+#define DNS_MAX_RETRIES 3
+#define DNS_TIMEOUT_MS  5000
 
 /* DNS server address */
 static uint8_t dns_server_ip[4] = { 8, 8, 8, 8 };  /* Default: Google DNS */
@@ -112,6 +123,239 @@ static int dns_encode_name(uint8_t *out, const char *hostname) {
 
     *out++ = 0;  /* Terminating zero-length label */
     return (int)(out - start);
+}
+
+/* ================================================================
+ * FIXED (v4.3.3): DNS-001 — dns_cache_lookup helper.
+ * Looks up a hostname in the DNS cache.  Returns 0 on success
+ * with the IP written to ip_out, or -1 on cache miss.
+ * ================================================================ */
+static int dns_cache_lookup(const char *hostname, uint32_t *ip_out) {
+    dns_cache_age();
+    dns_age_counter++;
+
+    uint32_t hash = dns_hash(hostname);
+    int i;
+    spin_lock(&dns_cache_lock);
+    for (i = 0; i < DNS_CACHE_SIZE; i++) {
+        if (dns_cache[i].valid && dns_cache[i].hash == hash &&
+            strcmp(dns_cache[i].hostname, hostname) == 0) {
+            /* FIXED (v4.3.3): DNS-001 — cache hit */
+            *ip_out = ((uint32_t)dns_cache[i].ip[0] << 24) |
+                      ((uint32_t)dns_cache[i].ip[1] << 16) |
+                      ((uint32_t)dns_cache[i].ip[2] << 8)  |
+                      (uint32_t)dns_cache[i].ip[3];
+            dns_cache[i].age = dns_age_counter;
+            spin_unlock(&dns_cache_lock);
+            return 0;
+        }
+    }
+    spin_unlock(&dns_cache_lock);
+    return -1;
+}
+
+/* ================================================================
+ * FIXED (v4.3.3): DNS-001 — dns_send_query helper.
+ * Builds and sends a DNS query for the given hostname.
+ * Returns the query ID on success, or -1 on error.
+ * ================================================================ */
+static int dns_send_query(const char *hostname) {
+    int name_max = (int)strlen(hostname) * 2 + 4;
+    int pkt_len = (int)sizeof(struct dns_header) + name_max + 4;
+    uint8_t *pkt = (uint8_t *)kmalloc((size_t)pkt_len);
+    if (!pkt) return -1;
+
+    memset(pkt, 0, (size_t)pkt_len);
+
+    struct dns_header *hdr = (struct dns_header *)pkt;
+    {
+        uint16_t qid;
+        chacha20_random_bytes((uint8_t *)&qid, sizeof(qid));
+        if (qid == 0) qid = 1;
+        hdr->id = htons(qid);
+    }
+    hdr->flags = htons(DNS_QRY_STANDARD);
+    hdr->qdcount = htons(1);
+    hdr->ancount = 0;
+    hdr->nscount = 0;
+    hdr->arcount = 0;
+
+    uint8_t *q = pkt + sizeof(struct dns_header);
+    int name_len = dns_encode_name(q, hostname);
+    q[name_len] = 0;
+    q[name_len + 1] = (uint8_t)DNS_TYPE_A;
+    q[name_len + 2] = 0;
+    q[name_len + 3] = (uint8_t)DNS_CLASS_IN;
+
+    int total_len = (int)sizeof(struct dns_header) + name_len + 4;
+    int ret = udp_send(DNS_SRC_PORT, dns_server_ip, DNS_PORT, pkt, (uint16_t)total_len);
+    uint16_t sent_id = ntohs(hdr->id);
+    kfree(pkt);
+
+    if (ret < 0) {
+        return -1;
+    }
+    return (int)sent_id;
+}
+
+/* ================================================================
+ * FIXED (v4.3.3): DNS-001 — dns_check_response helper.
+ * Checks for a DNS response matching the given query ID.
+ * Parses the answer section for an A record and writes the
+ * resolved IP to ip_out.  Returns 0 on success, -1 if no
+ * matching response is available yet.
+ * ================================================================ */
+static int dns_check_response(int query_id, uint32_t *ip_out) {
+    uint8_t rx_buf[512];
+    uint8_t src_ip[4];
+    uint16_t src_port;
+
+    int rx_len = udp_recvfrom(DNS_SRC_PORT, rx_buf, (int)sizeof(rx_buf),
+                               src_ip, &src_port);
+    if (rx_len < (int)sizeof(struct dns_header)) return -1;
+
+    struct dns_header *rx_hdr = (struct dns_header *)rx_buf;
+    if (ntohs(rx_hdr->id) != (uint16_t)query_id) return -1;
+    if (ntohs(rx_hdr->qdcount) != 1) return -1;
+
+    uint16_t ancount = ntohs(rx_hdr->ancount);
+    if (ancount > 32) ancount = 32;
+    if (ancount == 0) return -1;
+
+    /* Skip question section */
+    int pos = (int)sizeof(struct dns_header);
+    int compress_steps = 0;
+    while (pos < rx_len && rx_buf[pos] != 0 && compress_steps < 128) {
+        if ((rx_buf[pos] & 0xC0) == 0xC0) {
+            if (pos + 1 >= rx_len) break;
+            uint16_t ptr_offset = (uint16_t)(((rx_buf[pos] & 0x3F) << 8) | rx_buf[pos + 1]);
+            if (ptr_offset >= (uint16_t)rx_len) break;
+            compress_steps++;
+            pos += 2;
+            break;
+        }
+        uint8_t label_len = rx_buf[pos];
+        if (pos + 1 + label_len > rx_len) break;
+        pos += 1 + label_len;
+    }
+    pos += 1;
+    pos += 4;
+
+    /* Parse answer section for A record */
+    int a;
+    for (a = 0; a < (int)ancount && pos + 10 <= rx_len; a++) {
+        if ((rx_buf[pos] & 0xC0) == 0xC0) {
+            pos += 2;
+        } else {
+            while (pos < rx_len && rx_buf[pos] != 0) {
+                if (pos + 1 + rx_buf[pos] > rx_len) break;
+                pos += 1 + rx_buf[pos];
+            }
+            if (pos >= rx_len) break;
+            pos += 1;
+        }
+
+        if (pos + 10 > rx_len) break;
+
+        uint16_t rtype = ntohs(*(uint16_t *)(rx_buf + pos));
+        uint16_t rclass = ntohs(*(uint16_t *)(rx_buf + pos + 2));
+        uint16_t rdlen = ntohs(*(uint16_t *)(rx_buf + pos + 8));
+
+        pos += 10;
+
+        if (rtype == DNS_TYPE_A && rclass == DNS_CLASS_IN && rdlen == 4) {
+            if (pos + 4 <= rx_len) {
+                *ip_out = ((uint32_t)rx_buf[pos] << 24) |
+                          ((uint32_t)rx_buf[pos + 1] << 16) |
+                          ((uint32_t)rx_buf[pos + 2] << 8) |
+                          (uint32_t)rx_buf[pos + 3];
+                return 0;
+            }
+        }
+        if ((uint32_t)pos + (uint32_t)rdlen > (uint32_t)rx_len) break;
+        pos += rdlen;
+    }
+    return -1;
+}
+
+/* ================================================================
+ * FIXED (v4.3.3): DNS-001 — dns_cache_insert helper.
+ * Inserts a resolved hostname → IP mapping into the DNS cache
+ * with LRU eviction if the cache is full.
+ * ================================================================ */
+static void dns_cache_insert(const char *hostname, uint32_t ip) {
+    uint32_t hash = dns_hash(hostname);
+    uint8_t ip_bytes[4];
+    ip_bytes[0] = (uint8_t)((ip >> 24) & 0xFF);
+    ip_bytes[1] = (uint8_t)((ip >> 16) & 0xFF);
+    ip_bytes[2] = (uint8_t)((ip >> 8) & 0xFF);
+    ip_bytes[3] = (uint8_t)(ip & 0xFF);
+
+    spin_lock(&dns_cache_lock);
+    int i;
+    int target = 0;
+    int oldest_age = dns_cache[0].age;
+    for (i = 0; i < DNS_CACHE_SIZE; i++) {
+        if (!dns_cache[i].valid) {
+            target = i;
+            break;
+        }
+        if (dns_cache[i].age < oldest_age) {
+            oldest_age = dns_cache[i].age;
+            target = i;
+        }
+    }
+    dns_cache[target].hash = hash;
+    {
+        int n = (int)strlen(hostname);
+        if (n > 255) n = 255;
+        memcpy(dns_cache[target].hostname, hostname, (size_t)n);
+        dns_cache[target].hostname[n] = '\0';
+    }
+    memcpy(dns_cache[target].ip, ip_bytes, 4);
+    dns_cache[target].age = dns_age_counter;
+    dns_cache[target].valid = 1;
+    spin_unlock(&dns_cache_lock);
+}
+
+/* FIXED (v4.3.3): DNS-001 — Complete DNS resolution with retry and timeout.
+ * Previously DNS query busy-looped without yield, blocking the kernel.
+ * Now uses schedule() to yield and has proper retry/timeout logic. */
+int dns_resolve(const char *hostname, uint32_t *ip_out) {
+    if (!hostname || !ip_out) return -EINVAL;
+
+    /* Check LRU cache first */
+    if (dns_cache_lookup(hostname, ip_out) == 0) {
+        return 0;  /* FIXED (v4.3.3): DNS-001 — cache hit */
+    }
+
+    for (int retry = 0; retry < DNS_MAX_RETRIES; retry++) {
+        /* Send DNS query */
+        int query_id = dns_send_query(hostname);
+        if (query_id < 0) {
+            continue;
+        }
+        /* Wait for response with timeout */
+        uint64_t start = get_uptime_ms();
+        while (get_uptime_ms() - start < DNS_TIMEOUT_MS) {
+            schedule();  /* FIXED (v4.3.3): DNS-001 — yield instead of busy-loop */
+            if (dns_check_response(query_id, ip_out) == 0) {
+                /* Cache the result */
+                dns_cache_insert(hostname, *ip_out);
+                log_printf(LOG_LEVEL_DEBUG,
+                           "dns: resolved %s -> %d.%d.%d.%d\n",
+                           hostname,
+                           (int)((*ip_out >> 24) & 0xFF),
+                           (int)((*ip_out >> 16) & 0xFF),
+                           (int)((*ip_out >> 8) & 0xFF),
+                           (int)(*ip_out & 0xFF));
+                return 0;
+            }
+        }
+    }
+
+    log_printf(LOG_LEVEL_ERR, "dns: timeout resolving %s\n", hostname);
+    return -ETIMEDOUT;
 }
 
 /* ================================================================

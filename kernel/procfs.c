@@ -550,6 +550,8 @@ static int read_filesystems(char *buf, size_t size) {
     int len = 0;
 
     len += append_str(buf + len, size - (size_t)len, "nodev   proc\n");
+    len += append_str(buf + len, size - (size_t)len, "nodev   sysfs\n");
+    len += append_str(buf + len, size - (size_t)len, "nodev   tmpfs\n");
     len += append_str(buf + len, size - (size_t)len, "        ramfs\n");
     len += append_str(buf + len, size - (size_t)len, "        ext2\n");
 

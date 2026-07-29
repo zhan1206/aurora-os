@@ -36,6 +36,9 @@
 #define JOURNAL_MAGIC_DESC   0x5452414E  /* "TRAN" */
 #define JOURNAL_MAGIC_COMMIT 0x434F4D54  /* "COMT" */
 
+/* FIXED (v4.3.3): JRNL-002 — Maximum blocks per transaction */
+#define MAX_JOURNAL_BLOCKS   1024
+
 /* ================================================================
  * Journal superblock (first block of journal area)
  * ================================================================ */
@@ -188,5 +191,22 @@ void journal_get_stats(uint64_t *total_blocks, uint64_t *used_blocks,
  * journal_is_clean: Returns 1 if no recovery is needed, 0 otherwise.
  */
 int journal_is_clean(void);
+
+/*
+ * FIXED (v4.3.3): JRNL-002 — Journal crash recovery validation.
+ * Validates a transaction's sequence number, checksum, and block count.
+ * Returns 0 on success, -EIO on checksum failure, -EINVAL on invalid data.
+ */
+int journal_validate_transaction(struct journal_block_header *txn_hdr,
+                                  struct journal_data_block *jdbs,
+                                  uint32_t num_blocks);
+
+/*
+ * FIXED (v4.3.3): JRNL-002 — Self-test with fault injection.
+ * Simulates a crash by writing a partial transaction and then
+ * recovering.  Verifies that the journal detects and rolls back
+ * the incomplete transaction.
+ */
+void journal_fault_injection_test(void);
 
 #endif /* JOURNAL_H */

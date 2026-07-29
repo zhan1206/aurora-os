@@ -17,6 +17,7 @@
 #include "acpi.h"
 #include "include/log.h"
 #include "include/portio.h"
+#include "include/hpet.h"
 #include "pagetable.h"
 #include <stdint.h>
 
@@ -311,6 +312,9 @@ void acpi_init(void) {
     }
 
     log_printf(LOG_LEVEL_INFO, "acpi: ACPI subsystem initialized\n");
+
+    /* FIXED (v4.3.3): HPET-001 — Initialize HPET timer */
+    hpet_init();
 }
 
 /* ================================================================

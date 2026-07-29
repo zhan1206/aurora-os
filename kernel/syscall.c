@@ -847,9 +847,7 @@ long sys_fork(int flags) {
             struct unix_sock *usk = fd_to_unix_sock(i);
             if (usk) {
                 child->fd_table[i] = entry;
-                spin_lock(&usk->lock);
-                usk->refcount++;
-                spin_unlock(&usk->lock);
+                unix_socket_fork(usk);  /* FIXED (v4.3.3): UNIX-001 — atomic refcount */
             } else {
                 /* Regular file pointer: inherit with incremented refcount */
                 child->fd_table[i] = entry;

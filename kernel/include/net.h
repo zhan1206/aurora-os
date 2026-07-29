@@ -366,6 +366,7 @@ void dhcp_poll(void);   /* FIXED (v4.1.9): Periodic lease renewal check */
 
 /* DNS */
 int  dns_query(const char *hostname, uint8_t ip_out[4]);
+int  dns_resolve(const char *hostname, uint32_t *ip_out);  /* FIXED (v4.3.3): DNS-001 */
 void dns_set_server(const uint8_t ip[4]);
 void dns_init(void);  /* FIXED (v4.2.2): initialize DNS cache lock */
 
