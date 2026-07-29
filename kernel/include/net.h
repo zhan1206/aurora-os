@@ -98,6 +98,9 @@ struct udp_hdr {
 #define TCP_ACK  0x10
 #define TCP_URG  0x20
 
+/* Forward declaration for congestion control API */
+struct tcp_socket;
+
 struct tcp_hdr {
     uint16_t src_port;
     uint16_t dst_port;
@@ -179,7 +182,55 @@ struct tcp_opt_sack {
 enum tcp_cong_state {
     TCP_CONG_SLOW_START,
     TCP_CONG_AVOIDANCE,
-    TCP_CONG_RECOVERY
+    TCP_CONG_RECOVERY,
+    TCP_CONG_LOSS       /* FIXED (v4.3.4): TCP-003 — NewReno timeout recovery */
+};
+
+/* FIXED (v4.3.4): TCP-002 — TCP Selective Acknowledgment (SACK).
+ * SACK allows the receiver to acknowledge non-contiguous segments,
+ * so the sender only retransmits the actually lost segments.
+ * SACK option format (RFC 2018):
+ *   Kind: 5, Length: variable, Blocks: [left_edge, right_edge] pairs
+ *   Each block is 8 bytes (2x uint32_t), max 4 blocks in 40-byte option space.
+ */
+#define TCP_MAX_SACK_BLOCKS 4
+
+struct tcp_sack_block {
+    uint32_t left_edge;   /* first sequence number in block */
+    uint32_t right_edge;  /* sequence number after last in block */
+};
+
+/* FIXED (v4.3.4): TCP-002 — SACK block storage per connection */
+struct tcp_sack_state {
+    struct tcp_sack_block blocks[TCP_MAX_SACK_BLOCKS];
+    int num_blocks;
+    int sack_ok;  /* SACK permitted negotiated */
+};
+
+/* FIXED (v4.3.4): TCP-003 — TCP NewReno congestion control.
+ * NewReno improves upon Reno by using partial ACKs to detect
+ * multiple losses in a single window, avoiding the timeout
+ * when multiple segments are lost.
+ *
+ * States:
+ *   TCP_CA_OPEN      — normal operation
+ *   TCP_CA_RECOVERY  — in Fast Recovery
+ *   TCP_CA_LOSS      — in timeout recovery
+ */
+enum tcp_ca_state {
+    TCP_CA_OPEN,
+    TCP_CA_RECOVERY,
+    TCP_CA_LOSS,
+};
+
+struct tcp_congestion {
+    uint32_t cwnd;          /* congestion window (bytes) */
+    uint32_t ssthresh;      /* slow start threshold */
+    uint32_t recover;       /* NewReno: recovery point */
+    uint32_t high_seq;      /* highest sequence sent */
+    uint32_t dup_ack_count; /* duplicate ACK counter */
+    uint32_t last_ack;      /* last ACK received */
+    enum tcp_ca_state state;
 };
 
 /* ================================================================
@@ -357,6 +408,16 @@ void ipv6_handle_packet(struct net_device *netdev, const uint8_t *data, int len)
 void tcp_cong_init(void);
 void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count);
 void tcp_cong_on_timeout(int sock);
+
+/* FIXED (v4.3.4): TCP-002 — SACK option parsing and generation */
+int tcp_parse_sack(const uint8_t *options, int opt_len,
+                   struct tcp_sack_block *blocks, int *num_blocks);
+int tcp_write_sack(uint8_t *options, struct tcp_sack_state *sack);
+
+/* FIXED (v4.3.4): TCP-003 — NewReno congestion control */
+void tcp_cong_newreno_on_ack(struct tcp_socket *sock, uint32_t ack);
+void tcp_enter_fast_recovery(struct tcp_socket *sock);
+void tcp_retransmit_lost(struct tcp_socket *sock, uint32_t ack);
 
 /* DHCP */
 int dhcp_init(void);

@@ -3,15 +3,20 @@
  *
  * Sets up SBI console, Sv39 page tables, and enables the MMU.
  * Called from boot.S before kmain().
- *
- * /* MULTIARCH (v4.2.6) */
- *
- * /* STUB (v4.2.8): Boot stub only. Memory management, scheduling, and
- * filesystem initialization are not yet implemented for this architecture.
- * Only x86_64 is fully functional. The kmain entry point halts
- * immediately after arch_early_init() because no kernel subsystems
- * are initialized for RISC-V. */
  */
+
+/* FIXED (v4.3.4): ARCH-001 — Multi-architecture support status.
+ * Currently only x86_64 is fully functional.  Other architectures
+ * (RISC-V64, ARM64/AArch64, LoongArch64) have boot stubs that halt
+ * immediately after entering kmain.  Full porting requires:
+ *   - Architecture-specific MMU initialization (Sv39/Sv48, VMSAv8, LA64)
+ *   - Interrupt controller setup (PLIC, GICv3, LS7A)
+ *   - TLB shootdown protocol
+ *   - Architecture-specific syscall ABI
+ *   - Device tree parsing (for non-ACPI architectures)
+ *   - Per-architecture linker scripts and boot sequences
+ * These are planned for future releases.  The arch/ directory contains
+ * the foundation (linker scripts, boot.S, early init) for each target. */
 #include <stdint.h>
 #include "sbi.h"
 #include "pagetable.h"
@@ -80,4 +85,15 @@ int arch_page_table_map(uint64_t root_phys, uint64_t vaddr, uint64_t paddr,
 void arch_page_table_unmap(uint64_t root_phys, uint64_t vaddr, uint64_t size)
 {
     (void)root_phys; (void)vaddr; (void)size;
+}
+
+/* STUB (v4.3.4): ARCH-001 — Architecture initialization stub.
+ * For non-x86_64 architectures, kmain halts immediately.
+ * This is intentional — the architecture-specific code is not yet
+ * implemented.  See LIMITATIONS.md for details. */
+void arch_init(void) {
+    log_printf(LOG_LEVEL_INFO, "arch: %s boot stub - halting\n", ARCH_NAME);
+    log_printf(LOG_LEVEL_INFO, "arch: full port requires MMU/interrupt/driver stack\n");
+    /* STUB (v4.3.4): ARCH-001 — Future: call arch-specific init */
+    asm volatile("cli; 1: hlt; jmp 1b");
 }

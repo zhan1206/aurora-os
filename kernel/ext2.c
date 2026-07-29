@@ -5,11 +5,11 @@
  * Supports:
  *   - Superblock reading and verification
  *   - Inode reading and writing
- *   - Block reading (direct + single indirect)
- *   - Block writing (direct blocks only)
+ *   - Block reading (direct + single + double + triple indirect)
+ *   - Block writing (direct + single + double + triple indirect)
  *   - Directory lookup and readdir
  *   - File creation in directories
- *   - File read/write operations
+ *   - File read/write operations (full indirect chain)
  *
  * Block device I/O is abstracted through struct block_device.
  */
@@ -200,12 +200,8 @@ static int ext2_write_inode_raw(struct ext2_sb_info *sbi, uint32_t inum,
 
 /*
  * Read a data block from the filesystem.
- * Handles direct blocks, single indirect, and double indirect blocks.
- * @sbi: filesystem private data
- * @raw: the inode to read from
- * @logical_block: zero-based logical block index within the file
- * @buf: output buffer (must be at least block_size bytes)
- * Returns 0 on success, negative on error.
+ * Handles direct blocks, single indirect, double indirect, and triple
+ * indirect blocks.  FIXED (v4.3.4): EXT2-001.
  */
 static int ext2_read_data_block(struct ext2_sb_info *sbi,
                                 const struct ext2_inode *raw,
@@ -331,14 +327,93 @@ static int ext2_read_data_block(struct ext2_sb_info *sbi,
         return read_block(sbi->bdev, block_size, blk, buf);
     }
 
-    /* Triple indirect not supported (files > ~4GB are rare for this OS) */
-    return -ENOSYS;
+    /* FIXED (v4.3.4): EXT2-001 — Triple indirect block support.
+     * Previously EXT2 only supported direct + single/double indirect blocks,
+     * limiting files to ~4GB (assuming 4KB blocks).  Triple indirect blocks
+     * (inode->i_block[14]) raise this limit to ~4TB. */
+    logical_block -= ptrs_per_block * ptrs_per_block;
+
+    uint32_t tind_blk = raw->i_block[EXT2_TIND_BLOCK];
+    /* Zero-fill for sparse blocks through triple indirect pointer. */
+    if (tind_blk == 0) {
+        memset(buf, 0, block_size);
+        return 0;
+    }
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate triple-indirect block pointer. */
+    if (tind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+    /* Level 1: Read the triple-indirect block (array of double-indirect pointers) */
+    uint32_t *tind_buf = (uint32_t *)kmalloc(block_size);
+    if (!tind_buf) return -ENOMEM;
+
+    if (read_block(sbi->bdev, block_size, tind_blk, tind_buf) < 0) {
+        kfree(tind_buf);
+        return -EIO;
+    }
+
+    uint32_t tind_idx = logical_block / (ptrs_per_block * ptrs_per_block);
+    uint32_t dind_blk = tind_buf[tind_idx];
+    kfree(tind_buf);
+
+    if (dind_blk == 0) {
+        memset(buf, 0, block_size);
+        return 0;
+    }
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate double-indirect block pointer. */
+    if (dind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+    /* Level 2: Read the double-indirect block (array of single-indirect pointers) */
+    uint32_t *dind_buf = (uint32_t *)kmalloc(block_size);
+    if (!dind_buf) return -ENOMEM;
+
+    if (read_block(sbi->bdev, block_size, dind_blk, dind_buf) < 0) {
+        kfree(dind_buf);
+        return -EIO;
+    }
+
+    uint32_t dind_idx = (logical_block / ptrs_per_block) % ptrs_per_block;
+    uint32_t ind_blk = dind_buf[dind_idx];
+    kfree(dind_buf);
+
+    if (ind_blk == 0) {
+        memset(buf, 0, block_size);
+        return 0;
+    }
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate single-indirect block pointer. */
+    if (ind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+    /* Level 3: Read the single-indirect block (array of data block pointers) */
+    uint32_t *ind_buf = (uint32_t *)kmalloc(block_size);
+    if (!ind_buf) return -ENOMEM;
+
+    if (read_block(sbi->bdev, block_size, ind_blk, ind_buf) < 0) {
+        kfree(ind_buf);
+        return -EIO;
+    }
+
+    uint32_t ind_idx = logical_block % ptrs_per_block;
+    uint32_t blk = ind_buf[ind_idx];
+    kfree(ind_buf);
+
+    if (blk == 0) {
+        memset(buf, 0, block_size);
+        return 0;
+    }
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate resolved block number. */
+    if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+    return read_block(sbi->bdev, block_size, blk, buf);
+
+    /* Beyond triple indirect — file too large */
+    return -EFBIG;
 }
 
 /*
  * Write a data block to the filesystem.
- * Handles direct blocks and single indirect blocks.
- * Double indirect write is not yet supported (requires block allocation).
+ * Handles direct blocks, single indirect, double indirect, and triple
+ * indirect blocks.  FIXED (v4.3.4): EXT2-001.
  */
 static int ext2_write_data_block(struct ext2_sb_info *sbi,
                                  struct ext2_inode *raw,
@@ -388,8 +463,117 @@ static int ext2_write_data_block(struct ext2_sb_info *sbi,
         return ret;
     }
 
-    /* Double/triple indirect write not supported */
-    return -ENOSYS;
+    /* FIXED (v4.3.4): EXT2-001 — Double indirect write */
+    logical_block -= ptrs_per_block;
+    if (logical_block < ptrs_per_block * ptrs_per_block) {
+        uint32_t dind_blk = raw->i_block[EXT2_DIND_BLOCK];
+        if (dind_blk == 0) return -EIO;
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate double-indirect block pointer. */
+        if (dind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+        uint32_t *dind_buf = (uint32_t *)kmalloc(block_size);
+        if (!dind_buf) return -ENOMEM;
+
+        if (read_block(sbi->bdev, block_size, dind_blk, dind_buf) < 0) {
+            kfree(dind_buf);
+            return -EIO;
+        }
+
+        uint32_t dind_idx = logical_block / ptrs_per_block;
+        uint32_t ind_blk = dind_buf[dind_idx];
+        kfree(dind_buf);
+
+        if (ind_blk == 0) return -EIO;
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate single-indirect block pointer. */
+        if (ind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+        uint32_t *ind_buf = (uint32_t *)kmalloc(block_size);
+        if (!ind_buf) return -ENOMEM;
+
+        if (read_block(sbi->bdev, block_size, ind_blk, ind_buf) < 0) {
+            kfree(ind_buf);
+            return -EIO;
+        }
+
+        uint32_t ind_idx = logical_block % ptrs_per_block;
+        uint32_t blk = ind_buf[ind_idx];
+        kfree(ind_buf);
+
+        if (blk == 0) return -EIO;
+
+        /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate resolved block number. */
+        if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+        return write_block(sbi->bdev, block_size, blk, buf);
+    }
+
+    /* FIXED (v4.3.4): EXT2-001 — Triple indirect write */
+    logical_block -= ptrs_per_block * ptrs_per_block;
+
+    uint32_t tind_blk = raw->i_block[EXT2_TIND_BLOCK];
+    if (tind_blk == 0) return -EIO;
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate triple-indirect block pointer. */
+    if (tind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+    /* Level 1: Triple indirect → Double indirect */
+    uint32_t *tind_buf = (uint32_t *)kmalloc(block_size);
+    if (!tind_buf) return -ENOMEM;
+
+    if (read_block(sbi->bdev, block_size, tind_blk, tind_buf) < 0) {
+        kfree(tind_buf);
+        return -EIO;
+    }
+
+    uint32_t tind_idx = logical_block / (ptrs_per_block * ptrs_per_block);
+    uint32_t dind_blk = tind_buf[tind_idx];
+    kfree(tind_buf);
+
+    if (dind_blk == 0) return -EIO;
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate double-indirect block pointer. */
+    if (dind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+    /* Level 2: Double indirect → Single indirect */
+    uint32_t *dind_buf = (uint32_t *)kmalloc(block_size);
+    if (!dind_buf) return -ENOMEM;
+
+    if (read_block(sbi->bdev, block_size, dind_blk, dind_buf) < 0) {
+        kfree(dind_buf);
+        return -EIO;
+    }
+
+    uint32_t dind_idx = (logical_block / ptrs_per_block) % ptrs_per_block;
+    uint32_t ind_blk = dind_buf[dind_idx];
+    kfree(dind_buf);
+
+    if (ind_blk == 0) return -EIO;
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate single-indirect block pointer. */
+    if (ind_blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+
+    /* Level 3: Single indirect → Data block */
+    uint32_t *ind_buf = (uint32_t *)kmalloc(block_size);
+    if (!ind_buf) return -ENOMEM;
+
+    if (read_block(sbi->bdev, block_size, ind_blk, ind_buf) < 0) {
+        kfree(ind_buf);
+        return -EIO;
+    }
+
+    uint32_t ind_idx = logical_block % ptrs_per_block;
+    uint32_t blk = ind_buf[ind_idx];
+    kfree(ind_buf);
+
+    if (blk == 0) return -EIO;
+
+    /* FIXED (v4.2.5): BUG-EXT2-BOUNDS — validate resolved block number. */
+    if (blk >= sbi->sb_raw->s_blocks_count) return -EIO;
+    return write_block(sbi->bdev, block_size, blk, buf);
+
+    /* Beyond triple indirect — file too large */
+    return -EFBIG;
 }
 
 /*
@@ -553,6 +737,215 @@ static void ext2_free_inode(struct ext2_sb_info *sbi, uint32_t ino) {
     kfree(bitmap);
 }
 
+/*
+ * FIXED (v4.3.4): EXT2-001 — Allocate and resolve a data block through
+ * the indirect chain for writing.  Creates intermediate indirect blocks
+ * (single, double, triple) as needed.  The newly allocated data block
+ * is zero-filled on disk.
+ *
+ * Returns the physical block number on success, 0 on failure.
+ */
+static uint32_t ext2_alloc_block_indirect(struct ext2_sb_info *sbi,
+                                          struct ext2_inode *raw,
+                                          uint32_t logical_block) {
+    uint32_t block_size = sbi->block_size;
+    uint32_t ptrs_per_block = block_size / 4;
+    uint32_t *buf;
+    uint32_t blk;
+
+    /* --- Direct blocks --- */
+    if (logical_block < EXT2_NDIR_BLOCKS) {
+        if (raw->i_block[logical_block] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) return 0;
+            raw->i_block[logical_block] = blk;
+            raw->i_blocks += (block_size / 512);
+            /* Zero the new block */
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) {
+                memset(zb, 0, block_size);
+                write_block(sbi->bdev, block_size, blk, zb);
+                kfree(zb);
+            }
+        }
+        return raw->i_block[logical_block];
+    }
+    logical_block -= EXT2_NDIR_BLOCKS;
+
+    /* --- Single indirect --- */
+    if (logical_block < ptrs_per_block) {
+        if (raw->i_block[EXT2_IND_BLOCK] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) return 0;
+            raw->i_block[EXT2_IND_BLOCK] = blk;
+            raw->i_blocks += (block_size / 512);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) {
+                memset(zb, 0, block_size);
+                write_block(sbi->bdev, block_size, blk, zb);
+                kfree(zb);
+            }
+        }
+        buf = (uint32_t *)kmalloc(block_size);
+        if (!buf) return 0;
+        if (read_block(sbi->bdev, block_size, raw->i_block[EXT2_IND_BLOCK], buf) < 0) {
+            kfree(buf);
+            return 0;
+        }
+        if (buf[logical_block] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) { kfree(buf); return 0; }
+            buf[logical_block] = blk;
+            raw->i_blocks += (block_size / 512);
+            write_block(sbi->bdev, block_size, raw->i_block[EXT2_IND_BLOCK], buf);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) {
+                memset(zb, 0, block_size);
+                write_block(sbi->bdev, block_size, blk, zb);
+                kfree(zb);
+            }
+        }
+        blk = buf[logical_block];
+        kfree(buf);
+        return blk;
+    }
+    logical_block -= ptrs_per_block;
+
+    /* --- Double indirect --- */
+    if (logical_block < ptrs_per_block * ptrs_per_block) {
+        uint32_t dind_idx = logical_block / ptrs_per_block;
+        uint32_t ind_idx  = logical_block % ptrs_per_block;
+
+        /* Allocate double-indirect block if needed */
+        if (raw->i_block[EXT2_DIND_BLOCK] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) return 0;
+            raw->i_block[EXT2_DIND_BLOCK] = blk;
+            raw->i_blocks += (block_size / 512);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+
+        buf = (uint32_t *)kmalloc(block_size);
+        if (!buf) return 0;
+        if (read_block(sbi->bdev, block_size, raw->i_block[EXT2_DIND_BLOCK], buf) < 0) {
+            kfree(buf); return 0;
+        }
+
+        /* Allocate single-indirect block if needed */
+        if (buf[dind_idx] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) { kfree(buf); return 0; }
+            buf[dind_idx] = blk;
+            raw->i_blocks += (block_size / 512);
+            write_block(sbi->bdev, block_size, raw->i_block[EXT2_DIND_BLOCK], buf);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+        uint32_t ind_blk = buf[dind_idx];
+        kfree(buf);
+
+        buf = (uint32_t *)kmalloc(block_size);
+        if (!buf) return 0;
+        if (read_block(sbi->bdev, block_size, ind_blk, buf) < 0) {
+            kfree(buf); return 0;
+        }
+
+        /* Allocate data block if needed */
+        if (buf[ind_idx] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) { kfree(buf); return 0; }
+            buf[ind_idx] = blk;
+            raw->i_blocks += (block_size / 512);
+            write_block(sbi->bdev, block_size, ind_blk, buf);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+        blk = buf[ind_idx];
+        kfree(buf);
+        return blk;
+    }
+    logical_block -= ptrs_per_block * ptrs_per_block;
+
+    /* FIXED (v4.3.4): EXT2-001 — Triple indirect */
+    {
+        uint32_t tind_idx = logical_block / (ptrs_per_block * ptrs_per_block);
+        uint32_t dind_idx = (logical_block / ptrs_per_block) % ptrs_per_block;
+        uint32_t ind_idx  = logical_block % ptrs_per_block;
+
+        /* Level 1: Allocate triple-indirect block if needed */
+        if (raw->i_block[EXT2_TIND_BLOCK] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) return 0;
+            raw->i_block[EXT2_TIND_BLOCK] = blk;
+            raw->i_blocks += (block_size / 512);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+
+        buf = (uint32_t *)kmalloc(block_size);
+        if (!buf) return 0;
+        if (read_block(sbi->bdev, block_size, raw->i_block[EXT2_TIND_BLOCK], buf) < 0) {
+            kfree(buf); return 0;
+        }
+
+        /* Level 2: Allocate double-indirect block if needed */
+        if (buf[tind_idx] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) { kfree(buf); return 0; }
+            buf[tind_idx] = blk;
+            raw->i_blocks += (block_size / 512);
+            write_block(sbi->bdev, block_size, raw->i_block[EXT2_TIND_BLOCK], buf);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+        uint32_t dind_blk = buf[tind_idx];
+        kfree(buf);
+
+        buf = (uint32_t *)kmalloc(block_size);
+        if (!buf) return 0;
+        if (read_block(sbi->bdev, block_size, dind_blk, buf) < 0) {
+            kfree(buf); return 0;
+        }
+
+        /* Level 3: Allocate single-indirect block if needed */
+        if (buf[dind_idx] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) { kfree(buf); return 0; }
+            buf[dind_idx] = blk;
+            raw->i_blocks += (block_size / 512);
+            write_block(sbi->bdev, block_size, dind_blk, buf);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+        uint32_t ind_blk = buf[dind_idx];
+        kfree(buf);
+
+        buf = (uint32_t *)kmalloc(block_size);
+        if (!buf) return 0;
+        if (read_block(sbi->bdev, block_size, ind_blk, buf) < 0) {
+            kfree(buf); return 0;
+        }
+
+        /* Level 4: Allocate data block if needed */
+        if (buf[ind_idx] == 0) {
+            blk = ext2_alloc_block(sbi);
+            if (blk == 0) { kfree(buf); return 0; }
+            buf[ind_idx] = blk;
+            raw->i_blocks += (block_size / 512);
+            write_block(sbi->bdev, block_size, ind_blk, buf);
+            uint8_t *zb = (uint8_t *)kmalloc(block_size);
+            if (zb) { memset(zb, 0, block_size); write_block(sbi->bdev, block_size, blk, zb); kfree(zb); }
+        }
+        blk = buf[ind_idx];
+        kfree(buf);
+        return blk;
+    }
+
+    /* Beyond triple indirect — file too large */
+    return 0;
+}
+
 /* ================================================================
  * VFS file operations for ext2 files
  * ================================================================ */
@@ -621,11 +1014,19 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
      */
     spin_lock(&info->write_lock);
 
-    /* Only support writing within the first 12 direct blocks */
-    uint32_t max_blocks = EXT2_NDIR_BLOCKS;
-    uint32_t max_offset = max_blocks * block_size;
+    /*
+     * FIXED (v4.3.4): EXT2-001 — Support writing beyond direct blocks
+     * through the full indirect chain (single, double, triple indirect).
+     * Previously limited to the first 12 direct blocks.
+     */
+    uint32_t ptrs_per_block = block_size / 4;
+    uint32_t max_blocks = EXT2_NDIR_BLOCKS
+                        + ptrs_per_block                         /* single indirect */
+                        + ptrs_per_block * ptrs_per_block         /* double indirect */
+                        + ptrs_per_block * ptrs_per_block * ptrs_per_block; /* FIXED (v4.3.4): EXT2-001 */
+    uint64_t max_offset = (uint64_t)max_blocks * block_size;
 
-    if (*offset >= (off_t)max_offset) {
+    if ((uint64_t)(*offset) >= max_offset) {
         spin_unlock(&info->write_lock);
         return -ENOSPC;
     }
@@ -637,23 +1038,20 @@ static ssize_t ext2_file_write(struct file *filp, const void *buf, size_t count,
         return -ENOMEM;
     }
 
-    while (count > 0 && *offset < (off_t)max_offset) {
+    while (count > 0 && (uint64_t)(*offset) < max_offset) {
         uint32_t logical_block = (uint32_t)(*offset / block_size);
         uint32_t block_offset  = (uint32_t)(*offset % block_size);
 
-        /* Allocate block if needed */
-        if (info->raw.i_block[logical_block] == 0) {
-            uint32_t new_blk = ext2_alloc_block(sbi);
-            if (new_blk == 0) {
-                kfree(block_buf);
-                spin_unlock(&info->write_lock);
-                return total_written > 0 ? (ssize_t)total_written : -ENOSPC;
-            }
-            info->raw.i_block[logical_block] = new_blk;
-            info->raw.i_blocks += (block_size / 512);
-            /* Zero the newly allocated block */
-            memset(block_buf, 0, block_size);
-            write_block(sbi->bdev, block_size, new_blk, block_buf);
+        /*
+         * FIXED (v4.3.4): EXT2-001 — Use ext2_alloc_block_indirect()
+         * which handles allocation at all levels (direct, single, double,
+         * triple indirect).  Previously only direct blocks were supported.
+         */
+        uint32_t phys_block = ext2_alloc_block_indirect(sbi, &info->raw, logical_block);
+        if (phys_block == 0) {
+            kfree(block_buf);
+            spin_unlock(&info->write_lock);
+            return total_written > 0 ? (ssize_t)total_written : -ENOSPC;
         }
 
         /* Read-modify-write for partial block writes */

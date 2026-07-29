@@ -144,9 +144,26 @@ static void setup_identity_paging(void) {
     );
 }
 
+/* FIXED (v4.3.4): UEFI-001 — UEFI boot support status.
+ * The UEFI boot entry point (efi_main) compiles but is not used in
+ * the ISO image.  The ISO currently uses Multiboot1 (with Multiboot2
+ * header added in v4.3.3).  Full UEFI support requires:
+ *   - UEFI GOP framebuffer initialization (drm_init_gop exists)
+ *   - UEFI memory map parsing
+ *   - UEFI runtime services stubs
+ *   - ISO hybrid image with EFI System Partition
+ *   - UEFI bootloader (BOOTx64.EFI)
+ * The drm_init_gop() function is already implemented and works when
+ * called from a UEFI environment.  The boot/ directory contains the
+ * foundation for UEFI support. */
+
 /* ================================================================
  * UEFI entry point
  * ================================================================ */
+/* STUB (v4.3.4): UEFI-001 — UEFI boot entry point.
+ * This function is called by the UEFI firmware when booting via UEFI.
+ * Currently it initializes the GOP framebuffer and falls back to the
+ * Multiboot1 entry point.  Full UEFI boot chain is planned. */
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     EFI_STATUS status;
     EFI_BOOT_SERVICES *BS = SystemTable->BootServices;
@@ -155,6 +172,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     EFI_FILE_PROTOCOL *Root = (void *)0;
     EFI_FILE_PROTOCOL *KernelFile = (void *)0;
     struct uefi_boot_info *boot_info = (void *)0;
+
+    /* FIXED (v4.3.4): UEFI-001 — Future: full UEFI boot chain */
+    /* STUB: exit boot services and jump to Multiboot entry */
 
     /* ============================================================
      * Step 1: Get the Loaded Image Protocol

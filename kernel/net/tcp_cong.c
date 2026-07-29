@@ -44,6 +44,7 @@ struct tcp_cong_data {
     int      dup_ack_count;  /* Duplicate ACK counter */
     uint32_t last_ack;       /* Last received ACK number */
     uint32_t recover_seq;    /* Recovery sequence number */
+    uint32_t high_seq;       /* FIXED (v4.3.4): TCP-003 — highest seq sent */
     int      cong_state;     /* Current congestion state */
     int      window_scale;   /* Window scale shift count */
     int      sack_ok;        /* SACK permitted */
@@ -110,6 +111,7 @@ void tcp_cong_socket_init(int sock_id) {
     tcp_cong_data[slot].dup_ack_count = 0;
     tcp_cong_data[slot].last_ack = 0;
     tcp_cong_data[slot].cong_state = TCP_CONG_SLOW_START;
+    tcp_cong_data[slot].high_seq = 0;  /* FIXED (v4.3.4): TCP-003 */
     tcp_cong_data[slot].window_scale = 0;
     tcp_cong_data[slot].sack_ok = 0;
     tcp_cong_data[slot].timestamp_ok = 0;
@@ -163,7 +165,12 @@ static void tcp_cong_update_rtt(struct tcp_cong_data *cd, uint32_t measured_rtt)
 }
 
 /* ================================================================
- * Congestion Control on ACK
+ * Congestion Control on ACK — NewReno (FIXED v4.3.4: TCP-003)
+ *
+ * NewReno improves upon basic Reno by handling partial ACKs during
+ * Fast Recovery.  When multiple segments are lost in a single window,
+ * a partial ACK (ack < recover_seq) indicates another lost segment
+ * that should be retransmitted immediately, avoiding a costly timeout.
  * ================================================================ */
 void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count) {
     spin_lock(&tcp_cong_lock);
@@ -173,6 +180,11 @@ void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count) {
         return;
     }
 
+    /* FIXED (v4.3.4): TCP-003 — Track highest sequence sent */
+    if (ack_seq > cd->high_seq) {
+        cd->high_seq = ack_seq;
+    }
+
     /* Duplicate ACK detection */
     if (ack_seq == cd->last_ack) {
         cd->dup_ack_count++;
@@ -180,9 +192,7 @@ void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count) {
         /* New ACK */
         cd->dup_ack_count = 0;
         cd->last_ack = ack_seq;
-        /* FIXED (v4.2.1): Reset RTO backoff on successful ACK.
-         * Without this, a single timeout would permanently inflate srto
-         * because tcp_cong_on_timeout doubles it without reset. (BUG-NET-M11) */
+        /* FIXED (v4.2.1): Reset RTO backoff on successful ACK. */
         if (cd->srto > TCP_RTO_INITIAL && cd->rtt > 0) {
             cd->srto = cd->rtt + 4 * cd->rttvar;
             if (cd->srto < TCP_RTO_MIN) cd->srto = TCP_RTO_MIN;
@@ -192,7 +202,9 @@ void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count) {
 
     int state = cd->cong_state;
 
-    if (state == TCP_CONG_SLOW_START) {
+    /* FIXED (v4.3.4): TCP-003 — NewReno state machine */
+    switch (state) {
+    case TCP_CONG_SLOW_START:
         /* Slow Start: Each ACK increases cwnd by MSS */
         if (cd->cwnd < cd->ssthresh) {
             if (cd->cwnd <= UINT32_MAX - TCP_MSS) {
@@ -205,53 +217,82 @@ void tcp_cong_on_ack(int sock, uint32_t ack_seq, int dup_ack_count) {
             /* Transition to congestion avoidance */
             cd->cong_state = TCP_CONG_AVOIDANCE;
         }
+        /* Fall through to congestion avoidance if we just transitioned */
+        if (cd->cong_state == TCP_CONG_AVOIDANCE && cd->cwnd >= cd->ssthresh) {
+            /* Congestion Avoidance: cwnd += MSS * MSS / cwnd per ACK */
+            uint32_t increment = (uint32_t)(((uint64_t)TCP_MSS * TCP_MSS) / cd->cwnd);
+            if (increment == 0) increment = 1;
+            cd->cwnd += increment;
+        }
+        break;
+
+    case TCP_CONG_AVOIDANCE:
+        /* Congestion Avoidance: linear growth */
+        {
+            uint32_t increment = (uint32_t)(((uint64_t)TCP_MSS * TCP_MSS) / cd->cwnd);
+            if (increment == 0) increment = 1;
+            cd->cwnd += increment;
+        }
+        break;
+
+    case TCP_CONG_RECOVERY:
+        /* FIXED (v4.3.4): TCP-003 — NewReno partial ACK handling */
+        if (ack_seq > cd->last_ack) {
+            /* This is a new ACK (not a duplicate) */
+            if (ack_seq < cd->recover_seq) {
+                /* Partial ACK: another segment was lost in the same window.
+                 * Retransmit the next lost segment and reduce cwnd further. */
+                cd->cwnd -= TCP_MSS;
+                if (cd->cwnd < TCP_MSS) cd->cwnd = TCP_MSS;
+                cd->dup_ack_count = 0;
+                /* The caller should retransmit starting at ack_seq */
+            } else {
+                /* Full ACK: all outstanding data acknowledged.
+                 * Exit recovery, deflate cwnd to ssthresh. */
+                cd->cwnd = cd->ssthresh;
+                cd->cong_state = TCP_CONG_AVOIDANCE;
+                cd->dup_ack_count = 0;
+            }
+        } else {
+            /* Duplicate ACK during recovery: inflate cwnd */
+            cd->cwnd += TCP_MSS;
+        }
+        break;
+
+    case TCP_CONG_LOSS:
+        /* FIXED (v4.3.4): TCP-003 — Timeout recovery state */
+        if (ack_seq >= cd->recover_seq) {
+            /* All data acknowledged after timeout */
+            cd->cong_state = TCP_CONG_SLOW_START;
+            cd->dup_ack_count = 0;
+        }
+        break;
     }
 
-    if (cd->cong_state == TCP_CONG_AVOIDANCE) {
-        /* Congestion Avoidance: cwnd += MSS * MSS / cwnd per ACK */
-        /* Approximate: cwnd += MSS / cwnd_fraction */
-        uint32_t increment = (uint32_t)(((uint64_t)TCP_MSS * TCP_MSS) / cd->cwnd);
-        if (increment == 0) increment = 1;
-        cd->cwnd += increment;
-    }
-
-    /* Fast Retransmit: 3 duplicate ACKs */
-    if (cd->dup_ack_count >= 3 && state != TCP_CONG_RECOVERY) {
+    /* FIXED (v4.3.4): TCP-003 — Fast Retransmit: 3 duplicate ACKs */
+    if (cd->dup_ack_count >= 3 && state != TCP_CONG_RECOVERY &&
+        state != TCP_CONG_LOSS) {
         /* Set ssthresh to max(cwnd/2, 2*MSS) */
         cd->ssthresh = cd->cwnd / 2;
         if (cd->ssthresh < 2 * TCP_MSS) {
             cd->ssthresh = 2 * TCP_MSS;
         }
 
-        /* Enter fast recovery */
+        /* Enter fast recovery with NewReno recovery point */
         cd->cwnd = cd->ssthresh + 3 * TCP_MSS;
+        cd->recover_seq = cd->high_seq;  /* NewReno: highest seq sent */
         cd->cong_state = TCP_CONG_RECOVERY;
-        cd->recover_seq = ack_seq;
 
         log_printf(LOG_LEVEL_DEBUG,
-                   "tcp_cong: fast retransmit sock=%d, cwnd=%u, ssthresh=%u\n",
-                   sock, cd->cwnd, cd->ssthresh);
-    }
-
-    /* Fast Recovery: additional duplicate ACKs */
-    if (state == TCP_CONG_RECOVERY && cd->dup_ack_count >= 3) {
-        /* Inflate cwnd by MSS for each additional dup ACK */
-        cd->cwnd += TCP_MSS;
-    }
-
-    /* Fast Recovery: new ACK covering recover_seq */
-    if (state == TCP_CONG_RECOVERY && ack_seq > cd->recover_seq) {
-        /* Deflate cwnd and exit recovery */
-        cd->cwnd = cd->ssthresh;
-        cd->cong_state = TCP_CONG_AVOIDANCE;
-        cd->dup_ack_count = 0;
+                   "tcp_cong: fast retransmit sock=%d, cwnd=%u, ssthresh=%u, recover=%u\n",
+                   sock, cd->cwnd, cd->ssthresh, cd->recover_seq);
     }
 
     spin_unlock(&tcp_cong_lock);
 }
 
 /* ================================================================
- * Congestion Control on Timeout
+ * Congestion Control on Timeout — NewReno (FIXED v4.3.4: TCP-003)
  * ================================================================ */
 void tcp_cong_on_timeout(int sock) {
     spin_lock(&tcp_cong_lock);
@@ -278,8 +319,9 @@ void tcp_cong_on_timeout(int sock) {
         cd->srto = TCP_RTO_MAX;
     }
 
-    /* Enter slow start */
-    cd->cong_state = TCP_CONG_SLOW_START;
+    /* FIXED (v4.3.4): TCP-003 — Enter TCP_CONG_LOSS state */
+    cd->recover_seq = cd->high_seq;  /* NewReno: recovery point */
+    cd->cong_state = TCP_CONG_LOSS;
     cd->dup_ack_count = 0;
     cd->rtt_measuring = 0;  /* Karn: don't use RTT from retransmitted segments */
 

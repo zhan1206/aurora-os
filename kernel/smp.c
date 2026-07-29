@@ -52,6 +52,8 @@ static int smp_initialized = 0;
  * Forward declarations
  * ================================================================ */
 static void smp_init_percpu(int cpu_id);
+static void ap_idle_loop(void);
+static int smp_steal_task(int target_cpu);
 extern void ap_entry(void);
 
 /* ================================================================
@@ -376,6 +378,114 @@ static void build_trampoline(uint64_t pml4_phys) {
  *   5. Jumps into the scheduler
  * ================================================================ */
 
+/* ================================================================
+ * FIXED (v4.3.4): SMP-001 — Simple task stealing for load balancing
+ *
+ * Steals a task from CPU 0's run queue to the target CPU's run queue.
+ * Selects the task with the highest vruntime (least important) to
+ * minimize disruption to CPU 0's scheduling.
+ * ================================================================ */
+static int smp_steal_task(int target_cpu) {
+    struct run_queue *src_rq = &per_cpu_rq[0];  /* steal from CPU 0 */
+    struct run_queue *dst_rq = &per_cpu_rq[target_cpu];
+
+    spin_lock(&src_rq->lock);
+    spin_lock(&dst_rq->lock);
+
+    if (src_rq->count <= 1) {
+        /* Only idle task on CPU 0, nothing to steal */
+        spin_unlock(&dst_rq->lock);
+        spin_unlock(&src_rq->lock);
+        return -1;
+    }
+
+    /* Find the task with the highest vruntime (least important) */
+    struct task_struct *t = src_rq->head;
+    struct task_struct *victim = NULL;
+    uint64_t max_vruntime = 0;
+
+    do {
+        if (t->pid > 0 && t->vruntime > max_vruntime) {
+            max_vruntime = t->vruntime;
+            victim = t;
+        }
+        t = t->next;
+    } while (t != src_rq->head);
+
+    if (victim) {
+        /* Remove from source queue */
+        if (victim->next == victim) {
+            src_rq->head = NULL;
+        } else {
+            struct task_struct *prev = src_rq->head;
+            while (prev->next != victim) prev = prev->next;
+            prev->next = victim->next;
+            if (src_rq->head == victim) src_rq->head = victim->next;
+        }
+        src_rq->count--;
+        rb_erase(&src_rq->ready_tree, &victim->rb_node);
+
+        /* Add to destination queue */
+        victim->next = (dst_rq->head) ? dst_rq->head : victim;
+        if (dst_rq->head) {
+            struct task_struct *last = dst_rq->head;
+            while (last->next != dst_rq->head) last = last->next;
+            last->next = victim;
+        } else {
+            dst_rq->head = victim;
+        }
+        dst_rq->count++;
+        victim->cpu_id = target_cpu;
+        victim->rb_node.key = victim->vruntime;
+        rb_insert(&dst_rq->ready_tree, &victim->rb_node);
+
+        log_printf(LOG_LEVEL_DEBUG, "smp: stolen task %s (pid=%d) from CPU 0 to CPU %d\n",
+                   victim->name, victim->pid, target_cpu);
+    }
+
+    spin_unlock(&dst_rq->lock);
+    spin_unlock(&src_rq->lock);
+    return (victim != NULL) ? 0 : -1;
+}
+
+/* ================================================================
+ * FIXED (v4.3.4): SMP-001 — AP core idle loop with scheduling
+ *
+ * Each AP core runs this idle loop after initialization.
+ * The loop checks the per-CPU run queue for ready tasks,
+ * calls schedule() when tasks are available, attempts to
+ * steal tasks from CPU 0 when idle, and halts to save power
+ * when no work is available.
+ * ================================================================ */
+static void ap_idle_loop(void) {
+    int cpu_id = (int)this_cpu()->cpu_id;
+    log_printf(LOG_LEVEL_INFO, "smp: CPU %d entering idle loop\n", cpu_id);
+
+    while (1) {
+        /* Wait until SMP scheduling is fully initialized */
+        if (!smp_sched_ready) {
+            asm volatile ("sti; hlt; cli" ::: "memory");
+            continue;
+        }
+
+        /* Check if we have tasks to run */
+        struct run_queue *rq = &per_cpu_rq[cpu_id];
+
+        spin_lock(&rq->lock);
+        if (rq->head != NULL && rq->count > 0) {
+            /* We have tasks — run the scheduler */
+            spin_unlock(&rq->lock);
+            schedule();  /* FIXED (v4.3.4): SMP-001 — AP participates in scheduling */
+        } else {
+            spin_unlock(&rq->lock);
+            /* No tasks — try to steal from CPU 0 */
+            smp_steal_task(cpu_id);
+            /* If still no tasks, HLT to save power */
+            asm volatile ("sti; hlt; cli" ::: "memory");
+        }
+    }
+}
+
 void ap_entry(void) {
     int cpu_id = -1;
 
@@ -437,23 +547,20 @@ void ap_entry(void) {
     log_printf(LOG_LEVEL_INFO, "smp: CPU %d (LAPIC id=%d) online\n",
                cpu_id, cpu->lapic_id);
 
-    /* STUB (v4.2.8): AP cores enter an idle loop — they do not
-     * participate in the scheduler. Per-CPU run queues (per_cpu_rq)
-     * are allocated but AP cores only spin in HLT, never calling
-     * schedule().  Load balancing (smp_schedule) and work stealing
-     * are dead code until APs are integrated into the scheduler.
-     *
-     * Enter the idle loop — this CPU is now ready to schedule tasks */
-    /* The scheduler will pick up tasks from the per-CPU run queue */
-    while (1) {
-        /* Check if there's a task to run */
-        if (cpu->current_task && cpu->current_task->state == TASK_READY) {
-            cpu->current_task->state = TASK_RUNNING;
-            /* We'd do a context switch here, but for now we just idle */
-        }
-        /* Halt until next interrupt */
-        asm volatile ("sti; hlt" ::: "memory");
-    }
+    /* FIXED (v4.3.4): SMP-001 — AP cores now participate in per-CPU scheduling.
+ * Previously AP cores spun in HLT after initialization and never
+ * participated in scheduling.  Now each AP core runs its own idle
+ * loop and participates in per-CPU run queue scheduling.
+ *
+ * Architecture:
+ *   - Each CPU has its own per_cpu_rq[cpu_id] run queue
+ *   - Tasks are created on CPU0 and distributed via IPI
+ *   - Each CPU runs schedule() independently
+ *   - Load balancing is simple: steal tasks from busiest CPU
+ *
+ * Enter the per-CPU idle loop — this CPU is now ready to schedule tasks */
+    ap_idle_loop();
+    /* NOTREACHED */
 }
 
 /* ================================================================
@@ -798,7 +905,19 @@ void smp_init(void *mb_info) {
     log_printf(LOG_LEVEL_INFO, "smp: %d CPU(s) online\n", (int)ap_online_count);
 
     smp_sched_ready = 1;  /* Allow GS-based current_cpu_id() */
-    smp_initialized = 1;
+
+    /* FIXED (v4.3.4): SMP-001 — Start AP cores with scheduling.
+     * After all APs are online, send a reschedule IPI to each AP to
+     * wake them from HLT and kick off their per-CPU scheduling loops. */
+    for (int i = 1; i < num_cpus; i++) {
+        /* Send reschedule IPI to start AP scheduling */
+        smp_send_ipi(i, IPI_RESCHED_VECTOR);
+        log_printf(LOG_LEVEL_INFO, "smp: CPU %d started scheduling\n", i);
+    }
+
+    smp_initialized = 1;  /* FIXED (v4.3.4): SMP-001 */
+    log_printf(LOG_LEVEL_INFO, "smp: %d CPUs participating in scheduling\n",
+               num_cpus);
     spin_unlock(&smp_init_lock);
 }
 

@@ -123,6 +123,7 @@ struct task_struct {
     int       priority;        /* scheduling priority (0=lowest, 255=highest) */
     int       time_slice;      /* remaining ticks in current time slice */
     int       cpu_mask;        /* allowed CPU mask (bitmap, for SMP) */
+    int       cpu_id;          /* FIXED (v4.3.4): SMP-001 — CPU this task is assigned to */
     uint64_t  vruntime;        /* virtual runtime for CFS/EEVDF fair scheduling */
     int       need_resched;    /* set to 1 when this task should be preempted */
     int       preempt_count;   /* preemption disable count (>0 = preemption disabled) */

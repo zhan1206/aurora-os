@@ -497,6 +497,7 @@ struct task_struct *create_task(void (*fn)(void)) {
     if (num_cpus == 0) num_cpus = 1;
     int target_cpu = t->pid % num_cpus;
     if (target_cpu >= num_cpus) target_cpu = 0;
+    t->cpu_id = target_cpu;  /* FIXED (v4.3.4): SMP-001 — track assigned CPU */
 
     /* Add to the target CPU's run queue.
      * CRITICAL: Acquire rq->lock with IRQ disabled to prevent races

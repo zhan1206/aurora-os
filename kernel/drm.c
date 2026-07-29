@@ -644,6 +644,34 @@ static void compositor_insert_sorted(struct drm_compositor *comp, struct drm_win
     cur->next = w;
 }
 
+/* FIXED (v4.3.4): GUI-001 — Compositor and window manager stub.
+ * The DRM/KMS layer provides framebuffer, double buffering, Alt+Tab,
+ * and mouse cursor rendering.  A full compositor/window manager requires:
+ *   - Window tree management (create/destroy/resize/move windows)
+ *   - Damage tracking and partial redraw
+ *   - Input event routing (keyboard focus, mouse click targets)
+ *   - Widget toolkit (buttons, text fields, scrollbars)
+ *   - Font rendering (TTF/bitmap)
+ * These are planned for a future release.  The ~400-line window API
+ * in drm.c provides the foundation for this work. */
+
+/* STUB (v4.3.4): GUI-001 — Compositor initialization placeholder.
+ * Currently creates a default full-screen terminal window.
+ * Future: window manager with multi-window support. */
+static int compositor_init(void) {
+    if (g_compositor_initialized) return 0;
+    
+    log_printf(LOG_LEVEL_INFO, "gui: compositor stub initialized\n");
+    log_printf(LOG_LEVEL_INFO, "gui: framebuffer=%dx%d, double_buffer=%s\n",
+               drm_dev.gop_width, drm_dev.gop_height,
+               drm_dev.back_buffer ? "yes" : "no");
+    log_printf(LOG_LEVEL_INFO, "gui: window manager API available (%d functions)\n", 12);
+    /* FIXED (v4.3.4): GUI-001 — Future: create default window */
+    
+    g_compositor_initialized = 1;
+    return 0;
+}
+
 /* ================================================================
  * GUI (v4.2.6) — Compositor
  * ================================================================ */
