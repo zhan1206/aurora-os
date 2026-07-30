@@ -7,6 +7,8 @@
 #include "pagetable.h"
 #include "include/log.h"
 #include "include/userspace.h"
+/* FIXED (v4.3.6): UA-001 */
+#include "include/user_access.h"
 #include "include/trapframe.h"
 #include "smp.h"
 #include "mem.h"

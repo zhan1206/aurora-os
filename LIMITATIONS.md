@@ -43,21 +43,21 @@
 ## 根因级限制
 
 ### BUG-CURRENT-NULL
-- **状态**: 未修复
+- **状态**: 已修复 (v4.3.2, BSS-001)
 - **描述**: 内核自检后 `current` 和 `idle_task` 被 BSS 溢出清零，调度器停摆
-- **绕过**: 恢复路径 inline 运行 Shell，跳过调度器
-- **影响**: 所有依赖于调度器的功能（用户态进程、SMP、网络等）无法正常工作
+- **根因**: 内核栈(32KB)在.bss段中，selftest多个1024字节栈缓冲区导致溢出
+- **修复**: 栈移至独立.stack段(64KB)，在.bss之后，加4KB guard page + canary
 
 ### BUG-CR3-CACHE
-- **状态**: 未修复
+- **状态**: 已修复 (v4.3.2, BSS-001)
 - **描述**: `kernel_cr3` (.bss) 被踩穿，每次重新 walk 规避
-- **绕过**: 每次都从 CR3 寄存器重新读取
-- **影响**: 性能下降，BSS 溢出根本原因未定位
+- **根因**: 与BUG-CURRENT-NULL同源，栈溢出踩穿相邻BSS变量
+- **修复**: 栈移出BSS后不再影响kernel_cr3
 
 ### BSS 段溢出
-- **状态**: 未定位
+- **状态**: 已修复 (v4.3.2, BSS-001)
 - **描述**: BUG-CURRENT-NULL 和 BUG-CR3-CACHE 指向同一 BSS 溢出
-- **影响**: 所有 BSS 变量不可靠
+- **修复**: 栈完全移出BSS，source of overflow eliminated
 
 ## 架构限制
 
@@ -74,21 +74,21 @@
 ### 安全子系统
 - seccomp: BPF 解释器存在，始终通过（无实际过滤）
 - Capability: 框架存在，未接入 setuid/chown 等调用点
-- 模块签名: XOR 哈希 + 硬编码密钥（占位实现）
-- KASLR: 仅堆/栈/模块随机化，.text/.data 未随机化
+- 模块签名: ECDSA P-256 (secp256r1) 公钥验证，已实现 (v4.2.0) /* FIXED (v4.3.6) */
+- KASLR: 仅堆/栈/模块随机化，.text/.data 已随机化 (v4.3.4) /* FIXED (v4.3.6) */
 - SMAP/SMEP: CPUID检测后启用，QEMU默认不支持
 - Stack Protector: 工作中
 
 ### 调度器与 SMP
-- 只有 CPU0 在运行调度器
-- AP 核收到 IPI 后自旋
-- 负载均衡为死代码
-- VMPair/CFS/EVDF 代码存在，受 BUG-CURRENT-NULL 影响无法工作
+- CPU0 + AP 核均参与调度 (v4.3.4 SMP-001) /* FIXED (v4.3.6) */
+- AP 核运行 ap_idle_loop + schedule() (v4.3.4) /* FIXED (v4.3.6) */
+- 负载均衡: 任务窃取 smp_steal_task (v4.3.4) /* FIXED (v4.3.6) */
+- VMPair/CFS/EVDF 代码存在，受 BUG-CURRENT-NULL 影响 (已修复 BSS-001) /* FIXED (v4.3.6) */
 
 ### 网络栈
 - ARP: 无老化机制、无广播缓存
 - IPv4: 无分片重组、无 IP 选项
-- TCP: 骨架实现，无 SACK、无高级拥塞控制
+- TCP: 完整实现，含 SACK (v4.3.4 TCP-002) + NewReno 拥塞控制 (v4.3.4 TCP-003) /* FIXED (v4.3.6) */
 - TCP 重传: 已接入 PIT 定时器，未经压力测试
 - IPv6: 最小实现（邻居表 + 老化）
 - DHCP: 有 REBIND，不完整
@@ -119,9 +119,9 @@
 - 仓库只有 hello.c 一个用户态程序
 
 ### 内核模块系统
-- mod load: 需要签名，签名为 XOR 占位，无法通过
-- mod unload: 依赖 REFCOUNT，未完成
-- mod_sample.c: 存在但未接入构建系统
+- mod load: 需要签名，签名为 ECDSA P-256 公钥验证 (v4.2.0) /* FIXED (v4.3.6) */
+- mod unload: 基于引用计数的安全卸载 (v4.3.3 MOD-003) /* FIXED (v4.3.6) */
+- mod_sample.c: 已接入构建系统 (v4.3.3 MOD-004) /* FIXED (v4.3.6) */
 
 ### 引导与硬件初始化
 - Multiboot2: 代码自称支持，ISO 走 Multiboot1
@@ -147,6 +147,6 @@
 
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| CRITICAL (不可用) | 9 | GUI应用、RISC架构、TLS、UEFI启动、ld-so、journal、模块签名、SMP调度、网络高级特性 |
+| CRITICAL (不可用) | 6 | GUI应用、RISC架构、TLS、UEFI启动、ld-so、journal |
 | PARTIAL (框架存在) | 11 | seccomp、capability、virtio_net、TCP、KASLR、ramfs、USB、动态链接、大文件、用户态shell |
-| STUB (占位) | 7 | 3 RISC启动核、用户态shell、模块签名、ld-so、演示任务、三重间接块 |
+| STUB (占位) | 4 | 3 RISC启动核、ld-so、演示任务、三重间接块 |

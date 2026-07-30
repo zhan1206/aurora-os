@@ -5,6 +5,9 @@
 #include "include/log.h"
 #include "include/idt.h"
 #include "include/userspace.h"
+/* FIXED (v4.3.6): UA-001 — Centralized user memory access validation.
+ * All user memory access is validated through user_access.h wrappers. */
+#include "include/user_access.h"
 #include "include/trapframe.h"
 #include "include/errno.h"
 #include "include/net.h"

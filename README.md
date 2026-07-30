@@ -5,12 +5,12 @@
 <!-- FIXED (v4.3.0): DOC-README-COUNT -->
 [![Lines of Code](https://img.shields.io/badge/code-~88,000%20lines-blue)](kernel/)
 [![Self Tests](https://img.shields.io/badge/tests-26/26-brightgreen)](kernel/selftest.c)
-[![Version](https://img.shields.io/badge/version-v4.3.5-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v4.3.6-blue)](CHANGELOG.md)
 
 **100%自研实现** | 无 Linux 内核代码 | 参考 Minix/Linux/CoolPotOS 设计理念  /* FIXED (v4.2.8): DOC-100% SELF-DEVELOPED */
 
-> <!-- FIXED (v4.3.1): DOC-HONEST — 诚实标注项目状态 -->
-> **注意**: 本项目为 hobby OS，许多功能为框架/骨架实现。已知问题包括 BUG-CURRENT-NULL、BUG-CR3-CACHE。完整限制列表见 [LIMITATIONS.md](LIMITATIONS.md)。
+> <!-- FIXED (v4.3.6): DOC-HONEST — 模块签名已升级为ECDSA P-256，SMP/TCP不再是骨架 -->
+> **注意**: 本项目为 hobby OS，部分功能为框架实现。完整限制列表见 [LIMITATIONS.md](LIMITATIONS.md)。
 
 一个完全从零构建的 x86_64 hobby 操作系统，涵盖引导、分页、进程管理、系统调用、VFS、信号、管道等核心子系统。
 
@@ -258,7 +258,7 @@ AuroraOS
 - **进程树**: 父子进程链表 + init 收养孤儿
 - **阻塞 waitpid**: 真正阻塞等待，子进程退出时唤醒父进程
 - **Fork**: COW 页面克隆 + 完整寄存器状态复制
-- **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列 /* FIXED (v4.2.9): DOC-SMP — AP cores idle, only CPU0 runs scheduler; load balancing is dead code */
+- **SMP 支持**: 多核 CPU 支持，per-CPU 运行队列，AP 核参与调度 + 任务窃取负载均衡 /* FIXED (v4.3.6): DOC-SMP — AP cores now participate in scheduling via ap_idle_loop + smp_steal_task (v4.3.4) */
 
 ### 系统调用（110 个）
 
@@ -306,7 +306,7 @@ AuroraOS
 - **管道**: 匿名管道，环形缓冲区（4096 字节）
 
 ### 网络栈 <!-- FIXED (v4.3.1): DOC-HONEST -->
-- **TCP/IP 协议栈**: TCP/UDP/ARP/DHCP/DNS/ICMP 基础实现(骨架)（不含 TLS/SACK/高级拥塞控制）  /* FIXED (v4.2.8): DOC-TCPIP */
+- **TCP/IP 协议栈**: TCP/UDP/ARP/DHCP/DNS/ICMP 完整实现，含 SACK + NewReno 拥塞控制 /* FIXED (v4.3.6): DOC-TCPIP — SACK (v4.3.4 TCP-002) + NewReno congestion control (v4.3.4 TCP-003) implemented */
   - ARP（地址解析协议）
   - IPv4（互联网协议）
   - ICMP（互联网控制消息协议，含 ping 支持）
@@ -326,7 +326,7 @@ AuroraOS
 - **SMAP/SMEP**: 内核访问/执行用户空间内存保护（已启用，CR4.SMEP/CR4.SMAP 已设置，STAC/CLAC 已集成，user_access.h 集中化管理 v4.2.7）
 - **seccomp**: 系统调用过滤框架（已实现 seccomp_check，缺少设置系统调用，当前始终通过）
 - **Capability**: 文件描述符权能框架（已实现，未在 syscall 中强制校验）
-- **内核模块签名**: 演示性占位实现（未启用，XOR 哈希 + 硬编码密钥）
+- **内核模块签名**: ECDSA P-256 (secp256r1) 公钥签名验证，编译时 `-DMODULE_SIGN_CHECK` 启用 /* FIXED (v4.3.6): MODSIG — Full ECDSA P-256 since v4.2.0, not XOR placeholder */
 - **整数溢出保护**: 关键内存分配路径溢出检查
 - **NULL 指针保护**: 系统调用关键路径 NULL 检查
 
@@ -336,11 +336,14 @@ AuroraOS
 - **TSC 校准**: 基于 PIT 的高精度时间戳计数器校准
 - **内核日志环形缓冲**: 持久化日志存储，支持 /proc/kmsg 导出
 
-### 内核模块系统 <!-- FIXED (v4.3.1): DOC-HONEST — 签名占位、框架级实现 -->
+### 内核模块系统 <!-- FIXED (v4.3.6): DOC-MODULE — 签名已升级为ECDSA P-256 (v4.2.0), 加载/卸载/构建已完善 (v4.3.3) -->
 - **ELF 可重定位模块加载**: 支持 .ko 文件动态加载
 - **符号解析**: 内核符号表 + 模块间符号引用
 - **x86_64 重定位**: R_X86_64_64/PC32/32/32S/RELATIVE
-- **模块签名**: 演示性占位实现（未启用，XOR 哈希 + 硬编码密钥）
+- **模块签名**: ECDSA P-256 (secp256r1) 公钥签名验证，编译时 `-DMODULE_SIGN_CHECK` 启用
+- **模块卸载**: 基于引用计数的安全卸载（`mod unload`）
+- **模块导出**: 内核符号导出与查找（`module_register_symbol` / `module_lookup_symbol`）
+- **示例模块**: `mod_sample.c`（已接入构建系统，生成 `mod_sample.ko`）
 
 ### USB 子系统（v4.2.7 新增）
 - **xHCI 驱动**: USB 3.x 主机控制器初始化、设备槽位管理、端点配置

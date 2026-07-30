@@ -56,4 +56,33 @@ static inline int copy_to_user_safe(void __user *dst, const void *src, size_t le
     return 0;
 }
 
+/* FIXED (v4.3.6): UA-001 — Centralized user memory access validation.
+ * All copy_from_user/copy_to_user must go through these wrappers which
+ * validate the user pointer range before the copy.  Prevents TOCTOU,
+ * NULL pointer dereference, and kernel address space access attacks. */
+
+static inline int validate_user_range(const void __user *ptr, size_t size) {
+    /* NULL pointer check */
+    if (!ptr && size > 0) return -1;
+    /* User space range: 0x0000000000000000 - 0x00007FFFFFFFFFFF
+     * Kernel addresses must not be passed as user pointers */
+    if ((uintptr_t)ptr >= 0x0000800000000000ULL) return -1;
+    /* Overflow check */
+    if ((uintptr_t)ptr + size < (uintptr_t)ptr) return -1;
+    if ((uintptr_t)ptr + size > 0x0000800000000000ULL) return -1;
+    return 0;
+}
+
+static inline int safe_copy_from_user(void *to, const void __user *from, size_t n) {
+    if (validate_user_range(from, n) != 0) return -1;
+    if (n == 0) return 0;
+    return copy_from_user(to, from, n);
+}
+
+static inline int safe_copy_to_user(void __user *to, const void *from, size_t n) {
+    if (validate_user_range(to, n) != 0) return -1;
+    if (n == 0) return 0;
+    return copy_to_user(to, from, n);
+}
+
 #endif /* USER_ACCESS_H */

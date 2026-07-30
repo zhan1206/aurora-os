@@ -180,12 +180,18 @@ jobs:
     needs: lint
     if: ${{ !cancelled() }}
 
+    # FIXED (v4.3.6): CI-001 — Enhanced CI matrix with multi-vCPU, clang-tidy, matrix builds
     strategy:
       fail-fast: false
       matrix:
         build-type:
-          - release
           - debug
+          - release
+        include:
+          - build-type: debug
+            cflags: "-g -O0 -fsanitize=undefined"
+          - build-type: release
+            cflags: "-O2 -DNDEBUG"
 
     steps:
       - name: Checkout
@@ -256,27 +262,41 @@ jobs:
           echo "iso_size=${ISO_SIZE}" >> "$GITHUB_OUTPUT"
           echo "::endgroup::"
 
-      # ── QEMU Boot Test + Self-Test Verification ─────────────────
-      # FIXED (v4.2.8): CI-QEMU-TEST — replaced composite action with inline QEMU steps
-      - name: QEMU boot test
+      # ── Static Analysis (clang-tidy) ────────────────────────────
+      # FIXED (v4.3.6): CI-001 — clang-tidy static analysis for debug builds
+      - name: Static analysis (clang-tidy)
+        if: matrix.build-type == 'debug'
         run: |
-          qemu-system-x86_64 -m 256M -cdrom os.iso -nographic -no-reboot 2>&1 | tee qemu_output.log &
+          clang-tidy kernel/*.c -- -Ikernel/include -Iinclude -nostdinc -ffreestanding \
+            -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -fno-omit-frame-pointer \
+            -D__KERNEL__ -DKERNEL 2>&1 | tee clang-tidy.log
+
+      # ── QEMU Multi-vCPU Smoke Test ──────────────────────────────
+      # FIXED (v4.3.6): CI-001 — multi-vCPU QEMU smoke test with selftest verification
+      - name: QEMU multi-vCPU smoke test
+        run: |
+          qemu-system-x86_64 -cdrom os.iso -m 128M -smp 4 -no-reboot \
+            -serial file:qemu_serial.log -display none \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 &
           QEMU_PID=$!
-          for i in $(seq 1 90); do
-            if grep -q "System Ready" qemu_output.log 2>/dev/null; then
-              echo "PASS: Kernel booted successfully"
-              kill $QEMU_PID 2>/dev/null || true
-              exit 0
-            fi
-            if ! kill -0 $QEMU_PID 2>/dev/null; then
-              echo "FAIL: QEMU exited unexpectedly"
-              exit 1
+          # Wait up to 30 seconds for boot
+          for i in $(seq 1 30); do
+            if grep -q "selftest: All " qemu_serial.log 2>/dev/null; then
+              echo "Boot successful after ${i}s"
+              break
             fi
             sleep 1
           done
-          echo "FAIL: Kernel did not boot within timeout"
           kill $QEMU_PID 2>/dev/null || true
-          exit 1
+          # Check results
+          if grep -q "selftest: All" qemu_serial.log; then
+            echo "PASS: Kernel booted and self-test passed"
+            cat qemu_serial.log
+          else
+            echo "FAIL: Kernel did not boot correctly"
+            cat qemu_serial.log
+            exit 1
+          fi
         timeout-minutes: 5
 
       # ── Publish Test Report ─────────────────────────────────────
@@ -298,21 +318,17 @@ jobs:
           fail-on-error: 'true'
 
       # ── Upload Build Artifacts ──────────────────────────────────
-      - name: Upload ISO artifact
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aurora-os-linux-${{ matrix.build-type }}
-          path: os.iso
-          retention-days: 7
-
-      - name: Upload QEMU output
+      # FIXED (v4.3.6): CI-001 — include kernel.elf and all logs in artifacts
+      - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-output-linux-${{ matrix.build-type }}
-          path: qemu_output.log
-          retention-days: 3
+          name: build-${{ matrix.build-type }}
+          path: |
+            kernel.elf
+            os.iso
+            qemu_serial.log
+            clang-tidy.log
 
       # ── Build Summary ───────────────────────────────────────────
       - name: Build summary
@@ -328,10 +344,10 @@ jobs:
           ISO_SIZE_MB=$(awk "BEGIN {printf \"%.1f\", ${ISO_SIZE}/1048576}")
 
           # Parse self-test results from QEMU output
-          if [ -f qemu_output.log ]; then
-            TOTAL_TESTS=$(grep -c '\[PASS\]\|\[FAIL\]' qemu_output.log 2>/dev/null || echo 0)
-            PASSED_TESTS=$(grep -c '\[PASS\]' qemu_output.log 2>/dev/null || echo 0)
-            FAILED_TESTS=$(grep -c '\[FAIL\]' qemu_output.log 2>/dev/null || echo 0)
+          if [ -f qemu_serial.log ]; then
+            TOTAL_TESTS=$(grep -c '\[PASS\]\|\[FAIL\]' qemu_serial.log 2>/dev/null || echo 0)
+            PASSED_TESTS=$(grep -c '\[PASS\]' qemu_serial.log 2>/dev/null || echo 0)
+            FAILED_TESTS=$(grep -c '\[FAIL\]' qemu_serial.log 2>/dev/null || echo 0)
           else
             TOTAL_TESTS=0
             PASSED_TESTS=0

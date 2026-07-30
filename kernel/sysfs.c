@@ -16,6 +16,8 @@
 #include "include/log.h"
 #include "include/errno.h"
 #include "include/userspace.h"
+/* FIXED (v4.3.6): UA-001 */
+#include "include/user_access.h"
 #include "mem.h"
 #include <string.h>
 
