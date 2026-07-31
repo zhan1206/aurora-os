@@ -4,9 +4,9 @@
  * Sets up TTBR0/TTBR1, enables the MMU, and initializes GIC.
  * Called from boot.S before kmain().
  *
- * /* MULTIARCH (v4.2.6) */
+ * // MULTIARCH (v4.2.6)
  *
- * /* STUB (v4.2.8): Boot stub only. Memory management, scheduling, and
+ * // STUB (v4.2.8): Boot stub only. Memory management, scheduling, and
  * filesystem initialization are not yet implemented for this architecture.
  * Only x86_64 is fully functional. The kmain entry point halts
  * immediately after arch_early_init() because no kernel subsystems
@@ -15,6 +15,9 @@
 #include <stdint.h>
 #include "pagetable.h"
 #include "gic.h"
+
+/* FIXED (v4.3.7): BUG-07 — Guard with arch-specific ifdef */
+#ifdef __aarch64__
 
 /* Identity-map 1 GiB starting at 0x40000000 using 2 MiB blocks */
 #define IDMAP_START   0x40000000ULL
@@ -115,3 +118,5 @@ void arch_page_table_unmap(uint64_t root_phys, uint64_t vaddr, uint64_t size)
 {
     (void)root_phys; (void)vaddr; (void)size;
 }
+
+#endif /* __aarch64__ */

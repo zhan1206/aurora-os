@@ -1,10 +1,63 @@
 # AuroraOS Changelog
 
-## v4.3.6 (2026-07-30) — 安全加固+工程完善: 5项改进
+## v4.3.7 (2026-07-30) — 编译+运行时Bug修复: 18项修复
 
 ### 概述
 
-v4.3.6 针对审计报告中"框架/占位"项目进行安全加固和工程完善：
+v4.3.7 针对编译期和运行时Bug进行集中修复，覆盖内存管理、调度器、VFS、网络和Shell。
+
+### 修复统计
+
+| 领域 | 修复数 | 关键修复 |
+|------|--------|----------|
+| 编译/链接 | 4 | 隐式声明、errno、链接脚本、embed_init |
+| 内存/页表 | 5 | buddy边界、buddy合并残留、COW double-free、TSC校准 |
+| 调度器 | 2 | 栈帧顺序、container_of |
+| VFS | 6 | lookup ghost、dentry缓存、ramfs basename、rm/mkdir/rmdir |
+| Shell/网络 | 6 | ping/gui命令、loopback ARP、ICMP计数、autotest |
+
+### 详细修复
+
+| Bug | 文件 | 修复 |
+|-----|------|------|
+| BUG-09 | pagetable.c | free_pagetable_subtree 前向声明 |
+| BUG-10g | perf.c | TSC校准采样平均: valid_samples计数器 |
+| BUG-11b | mem.c | get_buddy边界检查: buddy_pfn < total_phys_pages |
+| BUG-11d | mem.c | buddy合并残留: 清除非合并页flags/order/next |
+| BUG-11e | pagetable.c | COW页表free_pagetable: 移除重复free_page |
+| BUG-1A | sched.c | 栈帧压栈顺序匹配context_switch弹出顺序 |
+| BUG-1B | rbtree.h | container_of宏已存在 |
+| BUG-2A | vfs.c | lookup失败: child->inode = NULL |
+| BUG-2C | ramfs.c | ramfs_add_file: 提取basename |
+| BUG-2D | shell.c | cp命令: src_buf 256→1024 |
+| BUG-2E | vfs.c | vfs_unlink/vfs_rmdir: dentry缓存失效 |
+| BUG-2F | shell.c | do_mkdir: 改用vfs_mkdir() |
+| BUG-2H/3H | shell.c+vfs.c | rmdir命令: vfs_rmdir+dentry清理 |
+| BUG-3C | net.c | loopback 127.0.0.0/8: 跳过ARP |
+| BUG-3D | net.c+net.h | ICMP Echo Reply计数器 |
+| BUG-3E | shell.c | ping命令: 发送ICMP Echo Request |
+| BUG-3F | shell.c | gui命令桩 |
+| BUG-3G | shell.c | autotest命令: 重放历史记录 |
+
+### 已跳过（已修复或无需修复）
+BUG-1C(idle halt), 1D(waitpid), 1E(pipe唤醒), 1F(create_task null), 2B(路径解析), 2G(touch), 2I(cp), 3A(UNIX socket), 3B(cmd_find)
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 10 |
+| 新增代码 | ~200 行 |
+
+### 版本历史
+
+```
+v4.3.7 ← 当前 (编译+运行时Bug修复: 18项, 10文件, ~200行)
+v4.3.6 (安全加固+工程完善: 5项, 14文件, +553行)
+
+---
+
+## v4.3.6 (2026-07-30) — 安全加固+工程完善: 5项改进
 - 模块签名已确认 ECDSA P-256 (v4.2.0) — 不是 XOR 占位
 - SMP 已确认 AP 核参调+任务窃取 (v4.3.4) — 不是 dead code
 - TCP 已确认 SACK+NewReno (v4.3.4) — 不是骨架

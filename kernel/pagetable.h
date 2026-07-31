@@ -33,12 +33,21 @@
 /* SMAP/SMEP: Supervisor Mode Access/Execution Prevention
  * STAC sets AC flag (temporarily allow kernel to access user pages).
  * CLAC clears AC flag (re-enable SMAP protection).
- * Must be used in pairs around copy_from_user/copy_to_user. */
+ * Must be used in pairs around copy_from_user/copy_to_user.
+ *
+ * FIXED (v4.3.7): BUG-10f — Check SMAP availability before stac/clac.
+ * On CPUs without SMAP, stac/clac are no-ops to avoid #UD. */
 static inline void stac(void) {
-    asm volatile ("stac" ::: "memory");
+    extern int smap_available;
+    if (smap_available) {
+        asm volatile ("stac" ::: "memory");
+    }
 }
 static inline void clac(void) {
-    asm volatile ("clac" ::: "memory");
+    extern int smap_available;
+    if (smap_available) {
+        asm volatile ("clac" ::: "memory");
+    }
 }
 
 /* Page size (may already be defined in mem.h) */

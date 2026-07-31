@@ -330,11 +330,22 @@ int ramfs_add_file(const char *name, const char *content) {
     /* Allow empty content (will create a zero-length file) */
     if (!content) content = "";
 
+    /* FIXED (v4.3.7): BUG-2C — Extract basename from the path.
+     * Callers (touch, cp, etc.) pass full paths like "/dir/file",
+     * but the inode name should be just "file".  Without this,
+     * the file is stored with name "/dir/file" and vfs_lookup
+     * can never find it (it searches for "file" in the directory). */
+    const char *basename = name;
+    for (const char *p = name; *p; p++) {
+        if (*p == '/') basename = p + 1;
+    }
+    if (*basename == '\0') return -1;  /* path ends with '/', no filename */
+
     /* Check for duplicate file names */
     struct ramfs_node *existing = ramfs_root->children;
     while (existing) {
-        if (existing->inode.name && strcmp(existing->inode.name, name) == 0) {
-            log_printf(LOG_LEVEL_WARN, "ramfs: duplicate file '%s' ignored\n", name);
+        if (existing->inode.name && strcmp(existing->inode.name, basename) == 0) {
+            log_printf(LOG_LEVEL_WARN, "ramfs: duplicate file '%s' ignored\n", basename);
             return -1;
         }
         existing = existing->next;
@@ -344,9 +355,9 @@ int ramfs_add_file(const char *name, const char *content) {
     if (!n) return -1;
     memset(n, 0, sizeof(*n));
 
-    n->inode.name   = kmalloc(strlen(name) + 1);
+    n->inode.name   = kmalloc(strlen(basename) + 1);
     if (!n->inode.name) { kfree(n); return -1; }
-    strcpy((char *)n->inode.name, name);
+    strcpy((char *)n->inode.name, basename);
 
     n->inode.size = strlen(content);
     n->data = (char *)kmalloc(n->inode.size + 1);
@@ -368,11 +379,18 @@ int ramfs_add_file_data(const char *name, const void *data, size_t size) {
     if (!ramfs_root) return -1;
     if (!name || !data) return -1;
 
+    /* FIXED (v4.3.7): BUG-2C — Extract basename from the path */
+    const char *basename = name;
+    for (const char *p = name; *p; p++) {
+        if (*p == '/') basename = p + 1;
+    }
+    if (*basename == '\0') return -1;
+
     /* Check for duplicate file names */
     struct ramfs_node *existing = ramfs_root->children;
     while (existing) {
-        if (existing->inode.name && strcmp(existing->inode.name, name) == 0) {
-            log_printf(LOG_LEVEL_WARN, "ramfs: duplicate file '%s' ignored\n", name);
+        if (existing->inode.name && strcmp(existing->inode.name, basename) == 0) {
+            log_printf(LOG_LEVEL_WARN, "ramfs: duplicate file '%s' ignored\n", basename);
             return -1;
         }
         existing = existing->next;
@@ -382,9 +400,9 @@ int ramfs_add_file_data(const char *name, const void *data, size_t size) {
     if (!n) return -1;
     memset(n, 0, sizeof(*n));
 
-    n->inode.name = kmalloc(strlen(name) + 1);
+    n->inode.name = kmalloc(strlen(basename) + 1);
     if (!n->inode.name) { kfree(n); return -1; }
-    strcpy((char *)n->inode.name, name);
+    strcpy((char *)n->inode.name, basename);
 
     n->inode.size = size;
     n->data = (char *)kmalloc(size);

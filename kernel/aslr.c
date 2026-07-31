@@ -160,6 +160,14 @@ static int chacha20_random(uint8_t *buf) {
  * Entropy mixing
  * ================================================================ */
 
+/* FIXED (v4.3.7): BUG-10d — CPUID check for RDRAND support */
+static int has_rdrand(void) {
+    uint32_t eax, ebx, ecx, edx;
+    eax = 1; ebx = ecx = edx = 0;
+    asm volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "0"(eax), "2"(ecx) : "memory");
+    return (ecx & (1 << 30)) != 0;  /* RDRAND bit */
+}
+
 static uint64_t mix_entropy(uint64_t a, uint64_t b) {
     uint64_t result = a ^ b;
     /* SplitMix64-style finalizer for better avalanche */
@@ -181,13 +189,16 @@ void aslr_init(void) {
     /* Try RDRAND for additional entropy (may not be available) */
     uint64_t rdrand_val = 0;
     uint8_t rdrand_ok_byte = 0;
-    asm volatile (
-        "rdrand %0\n\t"
-        "setc %1"
-        : "=r"(rdrand_val), "=qm"(rdrand_ok_byte)
-        :
-        : "cc"
-    );
+    /* FIXED (v4.3.7): BUG-10d — Check CPUID before attempting RDRAND */
+    if (has_rdrand()) {
+        asm volatile (
+            "rdrand %0\n\t"
+            "setc %1"
+            : "=r"(rdrand_val), "=qm"(rdrand_ok_byte)
+            :
+            : "cc"
+        );
+    }
     int rdrand_ok = rdrand_ok_byte;
 
     /*
@@ -386,15 +397,13 @@ static int      kaslr_active = 0;
 /* KASLR (v4.2.6) — Direct mapping random offset */
 static uint64_t direct_map_offset = 0;
 
-/* FIXED (v4.3.4): ASLR-001 — Randomize kernel base address */
+/* FIXED (v4.3.7): BUG-10c — Use chacha20_random() (lock-free) instead of
+ * chacha20_random_bytes() to avoid spinlock reentry deadlock.
+ * kaslr_init() already holds chacha_spin_lock when calling this. */
 static void kaslr_randomize_kernel_base(void) {
-    uint64_t random_val;
-    if (chacha20_random_bytes((uint8_t *)&random_val, sizeof(random_val)) != 0) {
-        /* RDRAND/RDSEED fallback */
-        uint64_t tsc_low, tsc_high;
-        asm volatile ("rdtsc" : "=a"(tsc_low), "=d"(tsc_high));
-        random_val = (tsc_high << 32) | tsc_low;
-    }
+    uint8_t rnd[64];
+    chacha20_random(rnd);
+    uint64_t random_val = *(uint64_t *)rnd;
 
     /* FIXED (v4.3.5): BUG-NEW-10 — Cap KASLR slide to available physical memory.
      * Previously the slide could be up to 510MB (256 * 2MB), but the system
@@ -476,22 +485,25 @@ void kaslr_init(void) {
      */
     uint64_t rdrand_val = 0;
     int rdrand_ok = 0;
-    for (int attempt = 0; attempt < 10; attempt++) {
-        uint64_t tmp;
-        uint8_t carry;
-        asm volatile (
-            "rdrand %0\n\t"
-            "setc %1"
-            : "=r"(tmp), "=qm"(carry)
-            :
-            : "cc"
-        );
-        if (carry) {
-            rdrand_val = tmp;
-            rdrand_ok = 1;
-            break;
+    /* FIXED (v4.3.7): BUG-10d — Check CPUID before attempting RDRAND */
+    if (has_rdrand()) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            uint64_t tmp;
+            uint8_t carry;
+            asm volatile (
+                "rdrand %0\n\t"
+                "setc %1"
+                : "=r"(tmp), "=qm"(carry)
+                :
+                : "cc"
+            );
+            if (carry) {
+                rdrand_val = tmp;
+                rdrand_ok = 1;
+                break;
+            }
+            asm volatile ("pause" ::: "memory");
         }
-        asm volatile ("pause" ::: "memory");
     }
 
     /*

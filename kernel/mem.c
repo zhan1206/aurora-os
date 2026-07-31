@@ -227,10 +227,14 @@ static inline uint64_t pfn_to_phys(uint64_t pfn) {
 }
 
 /* Buddy calculation: page ^ (1 << order) gives the buddy */
+/* FIXED (v4.3.7): BUG-11b — Use total_phys_pages instead of BUDDY_MAX_PAGES
+ * for consistency with buddy_split().  BUDDY_MAX_PAGES is the array size,
+ * but pages beyond total_phys_pages are not managed and should not be
+ * treated as valid buddies. */
 static inline struct page *get_buddy(struct page *p, uint32_t order) {
     uint64_t pfn = page_to_pfn(p);
     uint64_t buddy_pfn = pfn ^ (1ULL << order);
-    if (buddy_pfn >= BUDDY_MAX_PAGES) return NULL;
+    if (buddy_pfn >= total_phys_pages) return NULL;
     return &page_array[buddy_pfn];
 }
 
@@ -376,6 +380,11 @@ static struct page *buddy_split(uint32_t order) {
 }
 
 /* Try to merge a page with its buddy, recursively */
+/* FIXED (v4.3.7): BUG-11d — Clear the non-merged page's flags after a
+ * successful merge.  After merging, the non-merged page (the one with
+ * the higher PFN) is no longer in any free list but still has
+ * PAGE_FLAG_FREE set.  This could cause a false double-free detection
+ * if someone later tries to free it.  Clearing the flags prevents this. */
 static struct page *buddy_merge(struct page *p) {
     uint32_t order = p->order;
     if (order >= MAX_ORDER) return p;
@@ -398,6 +407,16 @@ static struct page *buddy_merge(struct page *p) {
     merged->flags = PAGE_FLAG_FREE;
     merged->order = order + 1;
     merged->phys_addr = pfn_to_phys(base_pfn);
+
+    /* FIXED (v4.3.7): BUG-11d — Clear the non-merged page's metadata
+     * to prevent stale PAGE_FLAG_FREE from causing false double-free
+     * detection or confusing debug output. */
+    {
+        struct page *other = (pfn < buddy_pfn) ? buddy : p;
+        other->flags = 0;
+        other->order = 0;
+        other->next = NULL;
+    }
 
     list_add(&free_area[order + 1], merged);
 
@@ -1038,9 +1057,12 @@ void kfree(void *ptr) {
 
         slab_lock();
 
-        /* FIXED (v4.3.0): NEW-10 SLAB-DOUBLE-FREE — detect double-free via magic. */
+        /* FIXED (v4.3.7): BUG-11a — Separate magic from next pointer.
+         * Previously magic was written at offset 0, overwriting the
+         * free_list next pointer.  Now magic is at offset sizeof(void*)
+         * so the free list chain is preserved. */
         #define SLAB_FREE_MAGIC 0xDEADBEEFDEADBEEFULL
-        if (*(uint64_t*)ptr == SLAB_FREE_MAGIC) {
+        if (*(uint64_t*)((uint8_t*)ptr + sizeof(void*)) == SLAB_FREE_MAGIC) {
             log_printf(LOG_LEVEL_ERR, "slab: double free detected at %p\n", ptr);
             slab_unlock();
             return;
@@ -1049,11 +1071,11 @@ void kfree(void *ptr) {
         /* Zero memory before returning to free list (prevent info leak) */
         memset(ptr, 0, cache->obj_size);
 
+        /* Mark as freed (magic for double-free detection) at offset after next pointer */
+        *(uint64_t*)((uint8_t*)ptr + sizeof(void*)) = SLAB_FREE_MAGIC;
+
         *(void**)ptr = cache->free_list;
         cache->free_list = ptr;
-
-        /* Mark as freed (magic for double-free detection) */
-        *(uint64_t*)ptr = SLAB_FREE_MAGIC;
 
         /*
          * FIXED (v4.1.4): Track free objects per slab page and reclaim

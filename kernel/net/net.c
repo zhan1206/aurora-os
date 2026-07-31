@@ -7,6 +7,7 @@
 #include "net.h"
 #include "log.h"
 #include "string.h"
+#include "../include/errno.h"  /* FIXED (v4.3.7): BUG-08 */
 #include "../netdev.h"
 #include "../smp.h"
 #include "../mem.h"
@@ -113,8 +114,15 @@ static int ipv4_send_raw(struct net_if *iface, uint8_t *packet,
                           uint16_t total_len, const uint8_t dst_ip[4], uint8_t proto) {
     (void)proto;
     uint8_t dst_mac[6];
-    if (arp_lookup(dst_ip, dst_mac) != 0) {
-        return -1;
+    /* FIXED (v4.3.7): BUG-3C — Skip ARP for loopback (127.0.0.0/8).
+     * Loopback packets go through the loopback netdev directly and
+     * don't need a MAC address. */
+    if (dst_ip[0] == 127) {
+        memset(dst_mac, 0, 6);
+    } else {
+        if (arp_lookup(dst_ip, dst_mac) != 0) {
+            return -1;
+        }
     }
     return eth_send(iface->netdev, dst_mac, ETH_IPV4, packet, total_len);
 }
@@ -588,7 +596,28 @@ static inline uint16_t ip_id_atomic_inc(void) {
 int ip_send(const uint8_t dst_ip[4], uint8_t protocol,
             const void *data, uint16_t len) {
     if (!data && len > 0) return -1;
-    struct net_if *iface = net_if_find_by_ip(dst_ip);
+
+    /* FIXED (v4.3.7): BUG-3C — Skip ARP and use loopback for 127.0.0.0/8.
+     * Loopback addresses don't need ARP resolution; the packet stays
+     * local.  Without this check, arp_lookup() would broadcast an ARP
+     * request for 127.0.0.1 on the physical network, which is wrong. */
+    int is_loopback = (dst_ip[0] == 127);
+
+    struct net_if *iface = NULL;
+    if (is_loopback) {
+        /* Find the loopback interface (name "lo") */
+        int i;
+        for (i = 0; i < net_if_count; i++) {
+            if (net_ifs[i].ip[0] == 127 && net_ifs[i].ip[1] == 0 &&
+                net_ifs[i].ip[2] == 0 && net_ifs[i].ip[3] == 1) {
+                iface = &net_ifs[i];
+                break;
+            }
+        }
+    }
+    if (!iface) {
+        iface = net_if_find_by_ip(dst_ip);
+    }
     if (!iface) {
         /* Use first available interface */
         if (net_if_count > 0) {
@@ -721,6 +750,13 @@ static void ip_handle_packet(struct net_device *netdev,
 /* ================================================================
  * ICMP Layer
  * ================================================================ */
+/* FIXED (v4.3.7): BUG-3D — ICMP echo reply counter for statistics */
+static uint32_t icmp_echo_reply_count = 0;
+
+uint32_t net_icmp_echo_reply_count(void) {
+    return icmp_echo_reply_count;
+}
+
 static void icmp_handle_packet(struct net_device *netdev,
                                 const uint8_t src_ip[4],
                                 const uint8_t *data, int len) {
@@ -735,6 +771,8 @@ static void icmp_handle_packet(struct net_device *netdev,
 
     if (icmp->type == ICMP_ECHO_REQUEST && icmp->code == 0) {
         /* Send echo reply */
+        /* FIXED (v4.3.7): BUG-3D — Track ICMP echo reply count */
+        icmp_echo_reply_count++;
         int reply_len = len;
         uint8_t *reply = (uint8_t *)kmalloc((size_t)reply_len);
         if (!reply) return;

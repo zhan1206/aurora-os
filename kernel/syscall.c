@@ -2588,7 +2588,8 @@ static long sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
  * set: new mask to apply (may be NULL)
  * oldset: previous mask (may be NULL)
  * ================================================================ */
-static long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset) {
+/* FIXED (v4.3.7): BUG-04 — removed 'static' to match syscall.h declaration */
+long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset) {
     if (how < 0 || how > 2) { current->t_errno = EINVAL; return -1; }
     if (!current->sig) {
         current->sig = signal_alloc();

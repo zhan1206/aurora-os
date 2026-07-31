@@ -383,6 +383,9 @@ int  tcp_getpeername(int sock, uint8_t remote_ip[4], uint16_t *remote_port);
 struct net_if *net_get_interface(int index);
 int net_get_interface_count(void);
 
+/* FIXED (v4.3.7): BUG-3D — ICMP echo reply statistics */
+uint32_t net_icmp_echo_reply_count(void);
+
 /* ================================================================
  * IPv6 API
  * ================================================================ */

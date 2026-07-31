@@ -154,7 +154,7 @@ static inline void arch_cache_flush(void) {
 
 /* ================================================================
  * TLB flush
- * /* MULTIARCH (v4.2.6) */
+ * // MULTIARCH (v4.2.6)
  * ================================================================ */
 #if defined(ARCH_X86_64)
 static inline void arch_tlb_flush(uint64_t va) {

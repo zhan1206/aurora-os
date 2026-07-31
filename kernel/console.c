@@ -374,11 +374,13 @@ static void put_cell_raw(int r, int c, char ch, uint8_t attr) {
         uint32_t bg = vga_palette[bg_idx];
 
         fb_draw_char(c, r, ch, fg, bg);
+        console_out_lock_release();  /* FIXED (v4.3.7): BUG-10a — release lock */
         return;
     }
 
     int idx = r * COLS + c;
     VGA_BUF[idx] = (uint16_t)ch | ((uint16_t)attr << 8);
+    console_out_lock_release();  /* FIXED (v4.3.7): BUG-10a — release lock */
 }
 
 void console_putc_attr(int row, int col, char c, uint8_t attr) {

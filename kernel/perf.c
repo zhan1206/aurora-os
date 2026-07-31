@@ -102,6 +102,11 @@ static void tsc_calibrate(void) {
     if (tsc_freq == 0) {
         uint16_t divisor = 11930;  /* ~10ms */
         uint64_t best_tsc_freq = 0;
+        /* FIXED (v4.3.7): BUG-10g — Count successful samples instead of
+         * always dividing by 3.  If a sample times out or produces zero
+         * diff, it is skipped but the divisor must reflect only the
+         * valid samples to avoid a skewed average. */
+        int valid_samples = 0;
 
         /* Calibrate over 3 samples and take the average */
         for (int sample = 0; sample < 3; sample++) {
@@ -139,15 +144,19 @@ static void tsc_calibrate(void) {
              * tsc_freq = tsc_diff * 1193180 / divisor */
             uint64_t sample_freq = (tsc_diff * 1193180ULL) / divisor;
             best_tsc_freq += sample_freq;
+            valid_samples++;
         next_sample:
             continue;
         }
 
-        tsc_freq = best_tsc_freq / 3;
+        /* FIXED (v4.3.7): BUG-10g — Divide by actual number of valid samples */
+        if (valid_samples > 0) {
+            tsc_freq = best_tsc_freq / (uint64_t)valid_samples;
+        }
         if (tsc_freq > 0) {
             log_printf(LOG_LEVEL_INFO,
-                       "perf: TSC PIT calibration: %lu MHz\n",
-                       tsc_freq / 1000000);
+                       "perf: TSC PIT calibration: %lu MHz (%d samples)\n",
+                       tsc_freq / 1000000, valid_samples);
         }
     }
 

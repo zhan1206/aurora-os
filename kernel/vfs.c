@@ -665,13 +665,26 @@ struct inode *vfs_lookup(const char *path) {
             /* Ask parent inode to resolve this component (outside lock).
              * The filesystem's lookup op fills in the pre-allocated inode
              * (sets ops, priv, name, is_dir, size, etc.). */
+            int lookup_ret = -1;
             if (cur->inode && cur->inode->ops && cur->inode->ops->lookup) {
-                cur->inode->ops->lookup(cur->inode, child);
+                lookup_ret = cur->inode->ops->lookup(cur->inode, child);
             }
 
             vfs_lock();
             /* Decrement parent refcount now that we hold the lock again */
             if (cur->refcount > 0) cur->refcount--;
+
+            /*
+             * FIXED (v4.3.7): BUG-2A — Check the filesystem lookup return value.
+             * If lookup fails (returns < 0), the filesystem may not have set
+             * child->inode to NULL, leaving the pre-allocated inode as a "ghost"
+             * that doesn't correspond to any actual file.  Explicitly set
+             * child->inode to NULL so the negative-dentry path below cleans up
+             * the pre-allocated inode and marks the dentry as negative.
+             */
+            if (lookup_ret < 0) {
+                child->inode = NULL;
+            }
 
             /*
              * FIXED (v4.2.2): If the filesystem allocated its own inode
@@ -989,6 +1002,22 @@ int vfs_rmdir(const char *path) {
 
     vfs_lock();
     int ret = parent->ops->rmdir(parent, name);
+    /* FIXED (v4.3.7): BUG-2E/2H — Invalidate dentry cache entry after
+     * removing the directory.  Without this, subsequent lookups return
+     * the stale cached dentry instead of re-querying the filesystem. */
+    if (ret == 0) {
+        struct dentry *child = parent->dentry ?
+            dentry_lookup_child(parent->dentry, name) : NULL;
+        if (child) {
+            if (child->inode) {
+                if (child->inode->dentry == child) {
+                    vfs_iput(child->inode);
+                }
+                child->inode = NULL;
+            }
+            child->flags |= DENTRY_FLAG_NEGATIVE;
+        }
+    }
     vfs_unlock();
     return ret;
 }
@@ -1024,6 +1053,22 @@ int vfs_unlink(const char *path) {
 
     vfs_lock();
     int ret = parent->ops->unlink(parent, name);
+    /* FIXED (v4.3.7): BUG-2E — Invalidate dentry cache entry after
+     * removing the file.  Without this, subsequent lookups return
+     * the stale cached dentry instead of re-querying the filesystem. */
+    if (ret == 0) {
+        struct dentry *child = parent->dentry ?
+            dentry_lookup_child(parent->dentry, name) : NULL;
+        if (child) {
+            if (child->inode) {
+                if (child->inode->dentry == child) {
+                    vfs_iput(child->inode);
+                }
+                child->inode = NULL;
+            }
+            child->flags |= DENTRY_FLAG_NEGATIVE;
+        }
+    }
     vfs_unlock();
     return ret;
 }

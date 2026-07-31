@@ -36,12 +36,16 @@
 
 static uint64_t kernel_cr3 = 0;
 
+/* FIXED (v4.3.7): BUG-10f — SMAP availability flag referenced by stac()/clac() */
+int smap_available = 0;
+
 /* FIXED (v4.3.1): CRT-001 — Detect BSS corruption of kernel_cr3.
  * BSS variables can be silently zeroed by stack overflow, DMA overrun,
  * or other memory corruption.  This guard value is initialized at link
  * time and checked on every call to get_kernel_cr3().  If the guard is
  * corrupted, we re-read CR3 directly from the hardware register. */
-static uint64_t kernel_cr3_guard = 0xDEADBEEFCAFECR3EULL;
+/* FIXED (v4.3.7): BUG-01 — 'R' is not a valid hex digit; corrected CR3E → C3E */
+static uint64_t kernel_cr3_guard = 0xDEADBEEFCAFEC3EULL;
 
 /*
  * FIXED (v4.1.4): Global page table lock for SMP safety.
@@ -142,6 +146,7 @@ void page_table_init(void) {
 
     if (ebx & (1U << 20)) {
         cr4 |= (1ULL << 21);  /* CR4.SMAP */
+        smap_available = 1;   /* FIXED (v4.3.7): BUG-10f */
         log_printf(LOG_LEVEL_INFO, "pagetable: SMAP enabled\n");
     } else {
         log_printf(LOG_LEVEL_WARN, "pagetable: SMAP not supported by CPU, skipping\n");
@@ -153,12 +158,12 @@ void page_table_init(void) {
 
 uint64_t get_kernel_cr3(void) {
     /* FIXED (v4.3.1): CRT-001 — Detect BSS corruption of kernel_cr3 */
-    if (kernel_cr3_guard != 0xDEADBEEFCAFECR3EULL) {
+    if (kernel_cr3_guard != 0xDEADBEEFCAFEC3EULL) {
         log_printf(LOG_LEVEL_ERR, "pagetable: BSS corruption detected! kernel_cr3_guard=%p\n",
                    (void*)kernel_cr3_guard);
         /* Re-read CR3 directly */
         asm volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
-        kernel_cr3_guard = 0xDEADBEEFCAFECR3EULL;
+        kernel_cr3_guard = 0xDEADBEEFCAFEC3EULL;
     }
     return kernel_cr3;
 }
@@ -698,6 +703,11 @@ out:
  * Returns: physical address of new PML4, or kernel_cr3 on failure.
  * ================================================================ */
 
+/* FIXED (v4.3.7): BUG-09 — Forward declaration for static function
+ * free_pagetable_subtree() used by clone_current_pml4() before its
+ * definition at the bottom of this file. */
+static void free_pagetable_subtree(uint64_t pdpt_phys, int start_idx);
+
 uint64_t clone_current_pml4(void) {
     uint64_t irq_flags = irq_save();
     spin_lock(&pt_lock);
@@ -748,7 +758,6 @@ uint64_t clone_current_pml4(void) {
      * PDPT[0] is the kernel identity mapping (0-1GB) and stays shared. */
     uint64_t src_pdpt0_phys = src_pml4[0] & PTE_ADDR_MASK;
     uint64_t *src_pdpt0 = phys_to_virt(src_pdpt0_phys);
-    uint64_t *dst_pdpt0 = phys_to_virt(dst_pml4[0] & PTE_ADDR_MASK);
 
     /* Allocate a new PDPT for deep-copying user-space entries */
     uint64_t new_pdpt0_phys = alloc_table_page();
@@ -1588,11 +1597,14 @@ void free_pagetable(uint64_t pml4_phys) {
              * PML4[0]: New deep-copied PDPT.  PDPT[0] is the kernel
              * identity mapping (shared) — must NOT be freed.  Free
              * only PDPT[1..511] using free_pagetable_subtree().
-             * Then free the PDPT page itself.
+             * FIXED (v4.3.7): BUG-11e — free_pagetable_subtree() already
+             * frees the PDPT page itself (line 1563).  Calling free_page()
+             * again here would be a double-free, corrupting the buddy
+             * allocator's free list.
              */
             uint64_t pdpt0_phys = pml4e & PTE_ADDR_MASK;
             free_pagetable_subtree(pdpt0_phys, 1);
-            free_page((void *)(uintptr_t)pdpt0_phys);
+            /* PDPT page already freed by free_pagetable_subtree */
             continue;
         }
 

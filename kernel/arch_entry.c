@@ -7,13 +7,18 @@
  *
  * For x86_64, kernel/main.c provides the native kernel_main() entry point.
  *
- * /* MULTIARCH (v4.2.6) */
+ * // MULTIARCH (v4.2.6)
  */
 #include "include/arch.h"
 #include "include/print.h"
 #include "include/log.h"
 #include "include/string.h"
 #include "mem.h"
+
+/* FIXED (v4.3.7): EMBED-001 — embed_init weak stub for builds without embedded filesystem */
+void __attribute__((weak)) embed_init(void) {
+    /* No embedded filesystem */
+}
 
 /* Forward declarations */
 void arch_early_init(void);
@@ -25,6 +30,9 @@ void arch_early_init(void);
  *        firmware argument on LoongArch)
  * @arg1: Architecture-specific argument (usually 0 or DTB pointer)
  */
+/* FIXED (v4.3.7): BUG-07 — Guard kmain with #ifndef __x86_64__ to prevent
+ * conflict with kernel_main() in main.c on x86_64 builds. */
+#ifndef __x86_64__
 void kmain(uint64_t arg0, uint64_t arg1)
 {
     (void)arg1;
@@ -76,3 +84,4 @@ void kmain(uint64_t arg0, uint64_t arg1)
         arch_halt();
     }
 }
+#endif /* !__x86_64__ */

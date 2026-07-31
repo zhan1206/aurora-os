@@ -12,6 +12,11 @@
 
 #include <stdint.h>
 
+/* FIXED (v4.3.7): BUG-1B — container_of and offsetof for RB tree to task_struct */
+#define offsetof(type, member) ((size_t)&((type *)0)->member)
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
+
 #define RB_RED   0
 #define RB_BLACK 1
 

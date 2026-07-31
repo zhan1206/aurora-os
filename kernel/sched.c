@@ -12,6 +12,7 @@
 #include "smp.h"
 #include "include/log.h"
 #include "include/assert.h"
+#include "include/errno.h"  /* FIXED (v4.3.7): BUG-08 */
 #include "rbtree.h"
 #include "mem.h"
 #include "pagetable.h"
@@ -419,45 +420,57 @@ struct task_struct *create_task(void (*fn)(void)) {
      * to pop garbage values from beyond the stack.  (BUG-004)
      */
     if (fn) {
-        /* Normal task: 8 slots (7 context_switch values + ret addr) */
+        /*
+         * FIXED (v4.3.7): BUG-1A — Stack frame order must match context_switch
+         * pop order.  context_switch pushes: pushfq, rbp, rbx, r12, r13, r14, r15
+         * then saves RSP.  On restore it pops in reverse: r15, r14, r13, r12,
+         * rbx, rbp, pushfq, ret.  So the frame at RSP must be:
+         *   [RSP+0]=r15, [RSP+8]=r14, ..., [RSP+48]=rflags, [RSP+56]=ret_addr.
+         * The previous code had the order reversed (ret_addr at [0], r15 at [7]),
+         * causing context_switch to load garbage into registers and crash.
+         */
         uint64_t *frame = sp - 8;
-        frame[0] = (uint64_t)fn;   /* return address (popped by ret) */
-        frame[1] = 0x202;          /* pushfq (IF=1) */
-        frame[2] = 0;              /* rbp */
-        frame[3] = 0;              /* rbx */
-        frame[4] = 0;              /* r12 */
-        frame[5] = 0;              /* r13 */
-        frame[6] = 0;              /* r14 */
-        frame[7] = 0;              /* r15 */
+        frame[0] = 0;              /* r15 (popped first by context_switch) */
+        frame[1] = 0;              /* r14 */
+        frame[2] = 0;              /* r13 */
+        frame[3] = 0;              /* r12 */
+        frame[4] = 0;              /* rbx */
+        frame[5] = 0;              /* rbp */
+        frame[6] = 0x202;          /* rflags (IF=1, popped by popfq) */
+        frame[7] = (uint64_t)fn;   /* return address (popped by ret) */
         sp = frame;
     } else {
         /*
-         * Fork child: 23 slots = 8 context_switch + 15 syscall trapframe.
-         * BUG-003 fix added 2 extra fields (user RIP, user RSP) to the
-         * syscall trapframe, expanding it from 13 to 15 slots.
+         * FIXED (v4.3.7): BUG-1A — Fork child: 23 slots = 8 context_switch
+         * + 2 user_rsp/rip + 13 syscall trapframe.
          *
-         * Layout (top → bottom, highest → lowest address):
-         *   [ret_addr]                ← popped by context_switch ret
-         *   [pushfq..r15] × 7        ← popped by context_switch
-         *   [user_rsp, user_rip] × 2 ← skipped by add $16, %rsp
-         *   [rax..r15] × 13          ← popped by syscall_return_point
+         * Layout at RSP (lowest → highest address):
+         *   [0..7]   context_switch frame (r15..ret_addr) — popped by context_switch
+         *   [8..9]   user_rsp, user_rip — skipped by add $16, %rsp
+         *   [10..22] syscall regs (r15..rax) — popped by syscall_return_point
+         *
+         * context_switch pops in order: r15, r14, r13, r12, rbx, rbp, rflags, ret.
+         * syscall_return_point pops in order: r15, r14, r13, r12, r11, r10,
+         *   r9, r8, rsi, rdi, rdx, rcx, rax.
          */
         uint64_t *frame_start = sp - 23;
         for (int i = 0; i < 23; i++) frame_start[i] = 0;
-        /* context_switch ret addr → syscall_return_point */
-        frame_start[22] = (uint64_t)(uintptr_t)&syscall_return_point;
-        /* pushfq = 0x202 (IF=1, default RFLAGS) */
-        frame_start[21] = 0x202;
-        /* 6 callee-saved regs at [15..20] — already zeroed */
-        /* 2 extra fields at [13..14] — user RSP, user RIP */
-        frame_start[13] = 0;  /* user RSP (will be set by fork) */
-        frame_start[14] = 0x400000;  /* user RIP = default entry */
-        /* 13 syscall regs at [0..12].
-         * Slot index in push order (r15..rax):
-         *   [0]=r15, [1]=r14, [2]=r13, [3]=r12, [4]=r11, [5]=r10,
-         *   [6]=r9, [7]=r8, [8]=rsi, [9]=rdi, [10]=rdx, [11]=rcx, [12]=rax */
-        frame_start[11] = 0x400000;   /* RCX = user RIP */
-        frame_start[4]  = 0x202;      /* R11 = user RFLAGS (IF=1) */
+
+        /* --- context_switch frame at [0..7] --- */
+        /* [0]=r15, [1]=r14, [2]=r13, [3]=r12, [4]=rbx, [5]=rbp — already zeroed */
+        frame_start[6] = 0x202;  /* rflags (IF=1) */
+        frame_start[7] = (uint64_t)(uintptr_t)&syscall_return_point;  /* ret addr */
+
+        /* --- user RSP/RIP at [8..9] (skipped by add $16, %rsp) --- */
+        frame_start[8] = 0;          /* user RSP (will be set by fork) */
+        frame_start[9] = 0x400000;   /* user RIP = default entry */
+
+        /* --- syscall regs at [10..22] --- */
+        /* [10]=r15, [11]=r14, [12]=r13, [13]=r12 — already zeroed */
+        frame_start[14] = 0x202;     /* R11 = user RFLAGS (IF=1) */
+        /* [15]=r10, [16]=r9, [17]=r8, [18]=rsi, [19]=rdi, [20]=rdx — already zeroed */
+        frame_start[21] = 0x400000;  /* RCX = user RIP */
+        /* [22]=rax = 0 (return value, already zeroed) */
 
         sp = frame_start;
     }
@@ -520,7 +533,8 @@ struct task_struct *create_task(void (*fn)(void)) {
     irq_restore(create_irq_flags);
     add_child(current, t);
 
-    log_printf(LOG_LEVEL_INFO, "Created task pid=%d on CPU %d\n", t->pid, target_cpu);
+    /* FIXED (v4.3.7): BUG-1G — reduce debug output spam */
+    log_printf(LOG_LEVEL_DEBUG, "Created task pid=%d on CPU %d\n", t->pid, target_cpu);
     return t;
 }
 

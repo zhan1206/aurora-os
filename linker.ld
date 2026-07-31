@@ -56,6 +56,7 @@ SECTIONS
         __stack_bottom = .;
         . += 65536;  /* 64KB kernel stack */
         __stack_top = .;
+        PROVIDE(stack_top = __stack_top);  /* FIXED (v4.3.7): BUG-05 */
     }
 
     __kernel_end = .;

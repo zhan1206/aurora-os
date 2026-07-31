@@ -21,6 +21,9 @@
 #include "sbi.h"
 #include "pagetable.h"
 
+/* FIXED (v4.3.7): BUG-07 — Guard with arch-specific ifdef */
+#ifdef __riscv
+
 /* Identity-map 1 GiB starting at 0x80000000 using 2 MiB megapages */
 #define IDMAP_START   0x80000000ULL
 #define IDMAP_SIZE    0x40000000ULL  /* 1 GiB */
@@ -97,3 +100,5 @@ void arch_init(void) {
     /* STUB (v4.3.4): ARCH-001 — Future: call arch-specific init */
     asm volatile("cli; 1: hlt; jmp 1b");
 }
+
+#endif /* __riscv */

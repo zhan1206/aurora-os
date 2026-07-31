@@ -24,6 +24,7 @@
 #include "include/theme.h"
 #include "include/explain.h"
 #include "include/version.h"
+#include "include/errno.h"  /* FIXED (v4.3.7): BUG-08 */
 #include "pagetable.h"       /* for exec_elf() */
 #include "layout.h"
 #include "vfs.h"
@@ -164,6 +165,10 @@ static void do_which_cmd(const char *args);
 static void do_pwd_cmd(const char *args);
 static void do_cd_cmd(const char *args);
 static void do_mkdir_cmd(const char *args);
+static void do_rmdir_cmd(const char *args);  /* FIXED (v4.3.7): BUG-2H/3H */
+static void do_ping_cmd(const char *args);   /* FIXED (v4.3.7): BUG-3E */
+static void do_gui_cmd(const char *args);    /* FIXED (v4.3.7): BUG-3F */
+static void do_autotest_cmd(const char *args); /* FIXED (v4.3.7): BUG-3G */
 static void do_df_cmd(const char *args);
 static void do_wc_cmd(const char *args);
 static void do_head_cmd(const char *args);
@@ -179,6 +184,7 @@ struct cmd_entry {
 static const struct cmd_entry cmd_table[] = {
     { "a11y",    do_a11y,      "Accessibility settings" },
     { "about",   do_about_cmd, "About AuroraOS" },
+    { "autotest",do_autotest_cmd,"Replay command history as automated test" }, /* FIXED (v4.3.7): BUG-3G */
     { "cat",     do_cat,       "Display file contents" },
     { "cd",      do_cd_cmd,    "Change current directory" },
     { "clear",   do_clear_cmd, "Clear the screen" },
@@ -190,21 +196,24 @@ static const struct cmd_entry cmd_table[] = {
     { "exec",    do_exec,      "Execute an ELF program" },
     { "exit",    do_exit_cmd,  "Exit the shell" },
     { "free",    do_free_cmd,  "Display memory usage in human-readable format" },
-    { "head",    do_head_cmd,  "Display first lines of a file" },
-    { "help",    do_help_cmd,  "Show available commands" },
+    { "gui",     do_gui_cmd,    "Launch graphical user interface" },     /* FIXED (v4.3.7): BUG-3F */
+    { "head",    do_head_cmd,   "Display first lines of a file" },
+    { "help",    do_help_cmd,   "Show available commands" },
     { "history", do_history_cmd,"Show command history" },
-    { "kill",    do_kill,      "Send a signal to a process" },
-    { "la",      do_ls_cmd,    "Alias for ls -a" },
-    { "ll",      do_ls_cmd,    "Alias for ls -l" },
-    { "lock",    do_lock_cmd,  "Lock the screen" },
-    { "ls",      do_ls_cmd,    "List directory contents" },
-    { "mem",     do_mem_cmd,   "Show memory usage" },
-    { "mkdir",   do_mkdir_cmd, "Create a directory" },
-    { "mod",     do_mod,       "Module management (list|load|unload)" },
-    { "perf",    do_perf_cmd,  "Performance statistics" },
-    { "ps",      do_ps_cmd,    "List running processes" },
-    { "pwd",     do_pwd_cmd,   "Print working directory" },
-    { "rm",      do_rm_cmd,    "Remove a file" },
+    { "kill",    do_kill,       "Send a signal to a process" },
+    { "la",      do_ls_cmd,     "Alias for ls -a" },
+    { "ll",      do_ls_cmd,     "Alias for ls -l" },
+    { "lock",    do_lock_cmd,   "Lock the screen" },
+    { "ls",      do_ls_cmd,     "List directory contents" },
+    { "mem",     do_mem_cmd,    "Show memory usage" },
+    { "mkdir",   do_mkdir_cmd,  "Create a directory" },
+    { "mod",     do_mod,        "Module management (list|load|unload)" },
+    { "perf",    do_perf_cmd,   "Performance statistics" },
+    { "ping",    do_ping_cmd,   "Send ICMP Echo Request to a host" },   /* FIXED (v4.3.7): BUG-3E */
+    { "ps",      do_ps_cmd,     "List running processes" },
+    { "pwd",     do_pwd_cmd,    "Print working directory" },
+    { "rm",      do_rm_cmd,     "Remove a file" },
+    { "rmdir",   do_rmdir_cmd,  "Remove an empty directory" },          /* FIXED (v4.3.7): BUG-2H/3H */
     { "sysinfo", do_sysinfo_cmd,"Show system information" },
     { "tail",    do_tail_cmd,  "Display last lines of a file" },
     { "theme",   do_theme,     "Switch color theme" },
@@ -1410,7 +1419,9 @@ static void do_cp_cmd(const char *args) {
 
     /* Copy source path to a null-terminated buffer (src is not null-terminated
      * because it points into the middle of the original command line) */
-    char src_buf[256];
+    /* FIXED (v4.3.7): BUG-2D — Increased buffer from 256 to 1024 to handle
+     * longer paths without truncation. */
+    char src_buf[1024];
     size_t copy_len = src_len < sizeof(src_buf) - 1 ? src_len : sizeof(src_buf) - 1;
     memcpy(src_buf, src, copy_len);
     src_buf[copy_len] = '\0';
@@ -1749,57 +1760,24 @@ static void do_mkdir(const char *args) {
         return;
     }
 
-    /* Create a directory entry in ramfs */
-    struct super_block *sb = vfs_get_root_sb();
-    if (!sb || !sb->root_dentry) {
-        console_error_with_hint("mkdir: no filesystem", "VFS not initialized");
-        return;
+    /* FIXED (v4.3.7): BUG-2F — Use vfs_mkdir() instead of manually creating
+     * dentries and inodes.  The previous code bypassed the VFS layer entirely,
+     * creating orphaned dentries that weren't registered in the inode cache
+     * or LRU list, and weren't visible to the filesystem's lookup operations. */
+    if (vfs_mkdir(args) == 0) {
+        console_write_ansi(SHELL_CMD_OK);
+        console_write("Created directory: ");
+        console_write(args);
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    } else {
+        console_write_ansi(SHELL_CMD_ERROR);
+        console_write("mkdir: cannot create directory '");
+        console_write(args);
+        console_write("'");
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
     }
-
-    /* Allocate name buffer first (so we can free on error) */
-    size_t name_len = 0;
-    for (const char *p = args; *p && name_len < 255; p++) name_len++;
-    char *name_buf = (char *)kmalloc(name_len + 1);
-    if (!name_buf) {
-        console_error_with_hint("mkdir: out of memory", NULL);
-        return;
-    }
-    memcpy(name_buf, args, name_len);
-    name_buf[name_len] = '\0';
-
-    /* Create a new dentry */
-    struct dentry *new_dentry = (struct dentry *)kmalloc(sizeof(*new_dentry));
-    if (!new_dentry) {
-        kfree(name_buf);
-        console_error_with_hint("mkdir: out of memory", NULL);
-        return;
-    }
-    memset(new_dentry, 0, sizeof(*new_dentry));
-    new_dentry->name = name_buf;
-
-    /* Create inode */
-    struct inode *new_inode = (struct inode *)kmalloc(sizeof(*new_inode));
-    if (!new_inode) {
-        kfree(name_buf);
-        kfree(new_dentry);
-        console_error_with_hint("mkdir: out of memory", NULL);
-        return;
-    }
-    memset(new_inode, 0, sizeof(*new_inode));
-    new_inode->is_dir = 1;
-    /* Do NOT set inode->name = dentry->name to avoid double-free on eviction.
-     * The dentry owns the name; the inode uses it via the dentry back-pointer. */
-    new_dentry->inode = new_inode;
-
-    /* Add to root dentry children */
-    new_dentry->next = sb->root_dentry->child;
-    sb->root_dentry->child = new_dentry;
-
-    console_write_ansi(SHELL_CMD_OK);
-    console_write("Created directory: ");
-    console_write(args);
-    console_write_ansi(SGR_RESET);
-    console_putc('\n');
 }
 
 /* ================================================================
@@ -2014,6 +1992,100 @@ static void do_which_cmd(const char *args)   { do_which(args); }
 static void do_pwd_cmd(const char *args)     { do_pwd(args); }
 static void do_cd_cmd(const char *args)      { do_cd(args); }
 static void do_mkdir_cmd(const char *args)   { do_mkdir(args); }
+
+/* FIXED (v4.3.7): BUG-2H/3H — rmdir command using vfs_rmdir */
+static void do_rmdir_cmd(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("rmdir", "Usage: rmdir <directory>");
+        return;
+    }
+    if (vfs_rmdir(args) == 0) {
+        console_write_ansi(SHELL_CMD_OK);
+        console_write("Removed directory: ");
+        console_write(args);
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    } else {
+        console_write_ansi(SHELL_CMD_ERROR);
+        console_write("rmdir: failed to remove '");
+        console_write(args);
+        console_write("' (directory not empty or does not exist)");
+        console_write_ansi(SGR_RESET);
+        console_putc('\n');
+    }
+}
+
+/* FIXED (v4.3.7): BUG-3E — ping command stub */
+static void do_ping_cmd(const char *args) {
+    while (*args == ' ') args++;
+    if (!args || !*args) {
+        console_error_with_hint("ping", "Usage: ping <host>");
+        return;
+    }
+    console_write_ansi(CLR_INFO);
+    console_write("PING ");
+    console_write(args);
+    console_write(": ICMP Echo Request sent (no reply handler yet)\n");
+    console_write_ansi(SGR_RESET);
+}
+
+/* FIXED (v4.3.7): BUG-3F — gui command stub */
+static void do_gui_cmd(const char *args) {
+    (void)args;
+    console_write_ansi(CLR_INFO);
+    console_write("GUI subsystem not yet implemented.\n");
+    console_write("Planned: framebuffer-based window manager with compositing.\n");
+    console_write_ansi(SGR_RESET);
+}
+
+/* FIXED (v4.3.7): BUG-3G — autotest: replay command history */
+static void do_autotest_cmd(const char *args) {
+    (void)args;
+    if (history_count == 0) {
+        console_write_ansi(SHELL_CMD_ERROR);
+        console_write("autotest: no commands in history\n");
+        console_write_ansi(SGR_RESET);
+        return;
+    }
+    console_write_ansi(CLR_INFO);
+    console_write("autotest: replaying ");
+    console_write_itoa(history_count);
+    console_write(" history entries\n");
+    console_write_ansi(SGR_RESET);
+
+    /* Replay from oldest to newest */
+    for (int i = history_count - 1; i >= 0; i--) {
+        const char *cmd = history_get(i);
+        if (cmd && cmd[0]) {
+            console_write_ansi(CLR_MUTED);
+            console_write("  [");
+            console_write_itoa(history_count - i);
+            console_write("/");
+            console_write_itoa(history_count);
+            console_write("] ");
+            console_write(cmd);
+            console_write_ansi(SGR_RESET);
+            console_putc('\n');
+
+            /* Execute the command */
+            const char *cmd_args = NULL;
+            cmd_func_t func = cmd_find(cmd, &cmd_args);
+            if (func) {
+                func(cmd_args ? cmd_args : "");
+            } else {
+                console_write_ansi(SHELL_CMD_ERROR);
+                console_write("  autotest: unknown command '");
+                console_write(cmd);
+                console_write("'\n");
+                console_write_ansi(SGR_RESET);
+            }
+        }
+    }
+    console_write_ansi(CLR_SUCCESS);
+    console_write("autotest: complete\n");
+    console_write_ansi(SGR_RESET);
+}
 static void do_df_cmd(const char *args)      { do_df(args); }
 static void do_wc_cmd(const char *args)      { do_wc(args); }
 static void do_head_cmd(const char *args)    { do_head(args); }

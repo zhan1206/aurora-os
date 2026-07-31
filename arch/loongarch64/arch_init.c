@@ -4,9 +4,9 @@
  * Sets up CSR registers and enables the MMU with direct mapping.
  * Called from boot.S before kmain().
  *
- * /* MULTIARCH (v4.2.6) */
+ * // MULTIARCH (v4.2.6)
  *
- * /* STUB (v4.2.8): Boot stub only. Memory management, scheduling, and
+ * // STUB (v4.2.8): Boot stub only. Memory management, scheduling, and
  * filesystem initialization are not yet implemented for this architecture.
  * Only x86_64 is fully functional. The kmain entry point halts
  * immediately after arch_early_init() because no kernel subsystems
@@ -14,6 +14,9 @@
  */
 #include <stdint.h>
 #include "csr.h"
+
+/* FIXED (v4.3.7): BUG-07 — Guard with arch-specific ifdef */
+#ifdef __loongarch__
 
 void arch_early_init(void)
 {
@@ -72,3 +75,5 @@ void arch_page_table_unmap(uint64_t root_phys, uint64_t vaddr, uint64_t size)
 {
     (void)root_phys; (void)vaddr; (void)size;
 }
+
+#endif /* __loongarch__ */
