@@ -19,6 +19,11 @@
 
 /* ================================================================
  * tmpfs inode private data
+ *
+ * FIXED (v4.3.8): TMPFS-002 — Use page cache (alloc_page) instead of
+ * kmalloc for file data.  Each file's data is stored in an array of
+ * page pointers, allowing sparse files, swap awareness, and mmap
+ * compatibility with the kernel page cache.
  * ================================================================ */
 struct tmpfs_inode {
     uint32_t ino;
@@ -26,7 +31,8 @@ struct tmpfs_inode {
     uint32_t uid, gid;
     uint64_t atime, mtime, ctime;
     uint32_t nlink;  /* FIXED (v4.3.3): TMPFS-001 — proper nlink tracking */
-    void    *data;    /* file data (kmalloc) */
+    void    **pages;  /* FIXED (v4.3.8): TMPFS-002 — page array instead of kmalloc */
+    uint32_t num_pages; /* number of allocated pages */
     struct tmpfs_inode *next;     /* next sibling in parent's children list */
     struct tmpfs_inode *children; /* first child (for directories) */
 };
@@ -60,18 +66,36 @@ static ssize_t tmpfs_read(struct file *filp, void *buf, size_t count,
         spin_unlock(&tmpfs_lock);
         return 0;
     }
-    if (!n->data) {
-        spin_unlock(&tmpfs_lock);
-        return 0;
-    }
 
+    /* FIXED (v4.3.8): TMPFS-002 — Read from page cache instead of kmalloc buffer.
+     * Compute page index and offset, copy from each page in the chain. */
     size_t toread = count;
     if ((size_t)(*offset) + toread > n->inode.size)
         toread = n->inode.size - (size_t)(*offset);
-    memcpy(buf, (char *)n->data + (*offset), toread);
-    *offset += (off_t)toread;
+
+    size_t total = 0;
+    char *dst = (char *)buf;
+    off_t cur_off = *offset;
+
+    while (total < toread) {
+        uint32_t page_idx = (uint32_t)(cur_off / PAGE_SIZE);
+        uint32_t page_off = (uint32_t)(cur_off % PAGE_SIZE);
+        size_t chunk = toread - total;
+        if (page_off + chunk > PAGE_SIZE) chunk = PAGE_SIZE - page_off;
+
+        if (page_idx >= n->num_pages || !n->pages || !n->pages[page_idx]) {
+            /* Sparse region: read zeros */
+            memset(dst + total, 0, chunk);
+        } else {
+            memcpy(dst + total, (char *)n->pages[page_idx] + page_off, chunk);
+        }
+        total += chunk;
+        cur_off += (off_t)chunk;
+    }
+
+    *offset += (off_t)total;
     spin_unlock(&tmpfs_lock);
-    return (ssize_t)toread;
+    return (ssize_t)total;
 }
 
 static ssize_t tmpfs_write(struct file *filp, const void *buf, size_t count,
@@ -86,17 +110,61 @@ static ssize_t tmpfs_write(struct file *filp, const void *buf, size_t count,
 
     spin_lock(&tmpfs_lock);
 
-    if (new_size > n->inode.size) {
-        void *new_data = kmalloc(new_size);
-        if (!new_data) { spin_unlock(&tmpfs_lock); return -1; }
-        if (n->data && n->inode.size > 0)
-            memcpy(new_data, n->data, n->inode.size);
-        if (n->data) kfree(n->data);
-        n->data = new_data;
-        n->inode.size = new_size;
+    /* FIXED (v4.3.8): TMPFS-002 — Use alloc_page for page cache.
+     * Allocate pages as needed for the write range.  Each page is
+     * independently allocated and freed, supporting sparse files
+     * and swap awareness. */
+    uint32_t needed_pages = (uint32_t)((new_size + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (needed_pages > n->num_pages) {
+        /* Grow the page pointer array */
+        void **new_pages = (void **)kmalloc(needed_pages * sizeof(void *));
+        if (!new_pages) { spin_unlock(&tmpfs_lock); return -1; }
+        if (n->pages) {
+            memcpy(new_pages, n->pages, n->num_pages * sizeof(void *));
+            kfree(n->pages);
+        }
+        /* Initialize new slots to NULL */
+        for (uint32_t i = n->num_pages; i < needed_pages; i++) {
+            new_pages[i] = NULL;
+        }
+        n->pages = new_pages;
+        n->num_pages = needed_pages;
     }
 
-    memcpy((char *)n->data + (*offset), buf, count);
+    /* Allocate pages for the write range */
+    uint32_t start_page = (uint32_t)((size_t)(*offset) / PAGE_SIZE);
+    uint32_t end_page = (uint32_t)((new_size + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (end_page > n->num_pages) end_page = n->num_pages;
+    for (uint32_t pi = start_page; pi < end_page; pi++) {
+        if (!n->pages[pi]) {
+            n->pages[pi] = alloc_page();
+            if (!n->pages[pi]) {
+                spin_unlock(&tmpfs_lock);
+                return -1;
+            }
+        }
+    }
+
+    /* Write data page by page */
+    size_t total = 0;
+    const char *src = (const char *)buf;
+    off_t cur_off = *offset;
+
+    while (total < count) {
+        uint32_t page_idx = (uint32_t)(cur_off / PAGE_SIZE);
+        uint32_t page_off = (uint32_t)(cur_off % PAGE_SIZE);
+        size_t chunk = count - total;
+        if (page_off + chunk > PAGE_SIZE) chunk = PAGE_SIZE - page_off;
+
+        if (page_idx < n->num_pages && n->pages[page_idx]) {
+            memcpy((char *)n->pages[page_idx] + page_off, src + total, chunk);
+        }
+        total += chunk;
+        cur_off += (off_t)chunk;
+    }
+
+    if (new_size > n->inode.size)
+        n->inode.size = new_size;
     *offset += (off_t)count;
     n->mtime = 0;  /* FIXED (v4.3.3): TMPFS-001 — update mtime on write */
 
@@ -160,7 +228,8 @@ static int tmpfs_create_file(struct inode *dir, const char *name, int flags) {
     n->gid = 0;
     n->nlink = 1;
     n->inode.size = 0;
-    n->data = NULL;
+    n->pages = NULL;      /* FIXED (v4.3.8): TMPFS-002 — page cache */
+    n->num_pages = 0;     /* FIXED (v4.3.8): TMPFS-002 */
     n->inode.ops = &tmpfs_file_ops;
     n->inode.is_dir = 0;
     n->inode.priv = n;
@@ -202,7 +271,8 @@ static int tmpfs_mkdir(struct inode *dir, const char *name) {
     n->gid = 0;
     n->nlink = 2;  /* FIXED (v4.3.3): TMPFS-001 — "." and ".." */
     n->inode.size = 0;
-    n->data = NULL;
+    n->pages = NULL;      /* FIXED (v4.3.8): TMPFS-002 */
+    n->num_pages = 0;     /* FIXED (v4.3.8): TMPFS-002 */
     n->inode.ops = &tmpfs_dir_ops;
     n->inode.is_dir = 1;
     n->inode.priv = n;
@@ -235,7 +305,13 @@ static int tmpfs_unlink(struct inode *dir, const char *name) {
             else
                 head->children = cur->next;
             if (cur->inode.name) kfree((void *)cur->inode.name);
-            if (cur->data) kfree(cur->data);
+            /* FIXED (v4.3.8): TMPFS-002 — Free all allocated pages */
+            if (cur->pages) {
+                for (uint32_t i = 0; i < cur->num_pages; i++) {
+                    if (cur->pages[i]) free_page(cur->pages[i]);
+                }
+                kfree(cur->pages);
+            }
             kfree(cur);
             spin_unlock(&tmpfs_lock);
             return 0;
@@ -266,6 +342,13 @@ static int tmpfs_rmdir(struct inode *dir, const char *name) {
             /* FIXED (v4.3.3): TMPFS-001 — decrement parent nlink */
             head->nlink--;
             if (cur->inode.name) kfree((void *)cur->inode.name);
+            /* FIXED (v4.3.8): TMPFS-002 — Free pages if any */
+            if (cur->pages) {
+                for (uint32_t i = 0; i < cur->num_pages; i++) {
+                    if (cur->pages[i]) free_page(cur->pages[i]);
+                }
+                kfree(cur->pages);
+            }
             kfree(cur);
             spin_unlock(&tmpfs_lock);
             return 0;

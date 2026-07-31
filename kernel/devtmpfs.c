@@ -14,6 +14,7 @@
 #include "mem.h"
 #include "console.h"
 #include "include/log.h"
+#include "include/errno.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -55,8 +56,12 @@ static int dev_cache_hash(const char *name) {
 /* ================================================================
  * Device inode private data
  * ================================================================ */
+/* FIXED (v4.3.8): USB-002 — Add subdirectory support for /dev/usb/.
+ * The 'subdir' field identifies the USB subdirectory so that lookups
+ * under /dev/usb/ can find kbd0/mouse0 device nodes. */
 struct devtmpfs_inode_data {
     int type;  /* DEV_TYPE_* */
+    int subdir; /* 0=normal device, 1=/dev/usb subdirectory */
 };
 
 /* ================================================================
@@ -74,8 +79,8 @@ static struct dev_entry dev_entries[] = {
     { "stdout",  DEV_TYPE_STDOUT  },
     { "stderr",  DEV_TYPE_STDERR  },
     /* FIXED (v4.3.2): USB-001 — USB HID device nodes */
-    { "usb_kbd0",   DEV_TYPE_USB_KBD   },
-    { "usb_mouse0", DEV_TYPE_USB_MOUSE },
+    { "kbd0",   DEV_TYPE_USB_KBD   },
+    { "mouse0", DEV_TYPE_USB_MOUSE },
     { NULL,      0                },  /* sentinel */
 };
 
@@ -264,11 +269,11 @@ static int devtmpfs_open(struct inode *inode, struct file *filp) {
 
 static ssize_t devtmpfs_read(struct file *filp, void *buf, size_t count,
                              off_t *offset) {
-    if (!filp || !filp->inode || !buf) return -1;
+    if (!filp || !filp->inode || !buf) return -EINVAL;
 
     struct devtmpfs_inode_data *data =
         (struct devtmpfs_inode_data *)filp->inode->priv;
-    if (!data) return -1;
+    if (!data) return -EINVAL;
 
     switch (data->type) {
         case DEV_TYPE_NULL:    return dev_null_read(filp, buf, count, offset);
@@ -285,17 +290,17 @@ static ssize_t devtmpfs_read(struct file *filp, void *buf, size_t count,
         /* FIXED (v4.3.2): USB-001 — USB HID device nodes */
         case DEV_TYPE_USB_KBD:   return dev_usb_kbd_read(filp, buf, count, offset);
         case DEV_TYPE_USB_MOUSE: return dev_usb_mouse_read(filp, buf, count, offset);
-        default:               return -1;
+        default:               return -ENXIO;
     }
 }
 
 static ssize_t devtmpfs_write(struct file *filp, const void *buf, size_t count,
                               off_t *offset) {
-    if (!filp || !filp->inode || !buf) return -1;
+    if (!filp || !filp->inode || !buf) return -EINVAL;
 
     struct devtmpfs_inode_data *data =
         (struct devtmpfs_inode_data *)filp->inode->priv;
-    if (!data) return -1;
+    if (!data) return -EINVAL;
 
     switch (data->type) {
         case DEV_TYPE_NULL:    return dev_null_write(filp, buf, count, offset);
@@ -312,7 +317,7 @@ static ssize_t devtmpfs_write(struct file *filp, const void *buf, size_t count,
         /* FIXED (v4.3.2): USB-001 — USB HID device nodes */
         case DEV_TYPE_USB_KBD:   return dev_usb_kbd_write(filp, buf, count, offset);
         case DEV_TYPE_USB_MOUSE: return dev_usb_mouse_write(filp, buf, count, offset);
-        default:               return -1;
+        default:               return -ENXIO;
     }
 }
 
@@ -346,7 +351,14 @@ static struct file_ops devtmpfs_dir_ops = {
  * ================================================================ */
 
 static int devtmpfs_lookup(struct inode *dir, struct dentry *dentry) {
-    if (!dir || !dentry || !dentry->name) return -1;
+    if (!dir || !dentry || !dentry->name) return -EINVAL;
+
+    /* FIXED (v4.3.8): USB-002 — Check if the parent is a devtmpfs subdirectory.
+     * If dir->priv->subdir is set, we are inside /dev/usb/ and should
+     * look up the device name (kbd0, mouse0) in the device table. */
+    struct devtmpfs_inode_data *dir_data =
+        (struct devtmpfs_inode_data *)dir->priv;
+    int is_subdir = (dir_data && dir_data->subdir);
 
     /* FIXED (v4.2.7): BUG-DEVTMPFS-CACHE - Check the inode cache
      * before allocating a new one.  Without this, every lookup would
@@ -359,21 +371,64 @@ static int devtmpfs_lookup(struct inode *dir, struct dentry *dentry) {
         return 0;
     }
 
+    /* FIXED (v4.3.8): USB-002 — Handle /dev/usb directory lookup.
+     * When looking up "usb" in the root, create a directory inode. */
+    if (!is_subdir && strcmp(dentry->name, "usb") == 0) {
+        struct inode *inode = (struct inode *)kmalloc(sizeof(*inode));
+        if (!inode) return -ENOMEM;
+        memset(inode, 0, sizeof(*inode));
+
+        struct devtmpfs_inode_data *data =
+            (struct devtmpfs_inode_data *)kmalloc(sizeof(*data));
+        if (!data) { kfree(inode); return -ENOMEM; }
+        memset(data, 0, sizeof(*data));
+
+        data->type = -1;
+        data->subdir = 1;  /* Mark as /dev/usb subdirectory */
+
+        inode->name = "usb";
+        inode->priv = data;
+        inode->is_dir = 1;
+        inode->ops = &devtmpfs_dir_ops;
+        inode->dentry = dentry;
+        dentry->inode = inode;
+
+        dev_inode_cache[hash] = inode;
+        return 0;
+    }
+
     /* Search the device entry table */
     for (int i = 0; dev_entries[i].name != NULL; i++) {
         struct dev_entry *e = &dev_entries[i];
         if (strcmp(e->name, dentry->name) == 0) {
+            /* FIXED (v4.3.8): USB-002 — Only match USB devices
+             * (kbd0, mouse0) when looking up inside the /dev/usb/
+             * subdirectory.  Non-USB devices are only visible at
+             * the /dev/ root level. */
+            if (is_subdir) {
+                if (e->type != DEV_TYPE_USB_KBD &&
+                    e->type != DEV_TYPE_USB_MOUSE) {
+                    continue;  /* Skip non-USB devices in /dev/usb/ */
+                }
+            } else {
+                if (e->type == DEV_TYPE_USB_KBD ||
+                    e->type == DEV_TYPE_USB_MOUSE) {
+                    continue;  /* Skip USB devices at /dev/ root */
+                }
+            }
+
             /* Create an inode for this device */
             struct inode *inode = (struct inode *)kmalloc(sizeof(*inode));
-            if (!inode) return -1;
+            if (!inode) return -ENOMEM;
             memset(inode, 0, sizeof(*inode));
 
             struct devtmpfs_inode_data *data =
                 (struct devtmpfs_inode_data *)kmalloc(sizeof(*data));
-            if (!data) { kfree(inode); return -1; }
+            if (!data) { kfree(inode); return -ENOMEM; }
             memset(data, 0, sizeof(*data));
 
             data->type = e->type;
+            data->subdir = 0;
 
             inode->name = e->name;
             inode->priv = data;
@@ -389,7 +444,7 @@ static int devtmpfs_lookup(struct inode *dir, struct dentry *dentry) {
         }
     }
 
-    return -1;  /* Not found */
+    return -ENOENT;  /* Not found */
 }
 
 /* ================================================================
@@ -428,18 +483,16 @@ struct super_block *devtmpfs_create(void) {
 
 /* ================================================================
  * FIXED (v4.3.2): USB-001 — Create /dev/usb device nodes.
- * Previously /dev/usb/ was documented as "planned but not yet created".
- * Now we create /dev/usb/ directory and register kbd0/mouse0 device nodes.
- * The device nodes are registered in the devtmpfs device table as
- * usb_kbd0 and usb_mouse0.  The /dev/usb/ directory is created for
- * future use when the USB subsystem supports subdirectory nodes.
+ * FIXED (v4.3.8): USB-002 — Device nodes are now at /dev/usb/kbd0
+ * and /dev/usb/mouse0 (subdirectory), not flat at /dev/usb_kbd0.
+ * The /dev/usb/ directory is created and the lookup function handles
+ * the subdirectory lookup transparently.
  * ================================================================ */
 void devtmpfs_create_usb_nodes(void) {
     /* Create /dev/usb directory */
     vfs_mkdir("/dev/usb");
 
-    log_printf(LOG_LEVEL_INFO, "devtmpfs: /dev/usb directory created, "
-               "usb_kbd0 and usb_mouse0 device nodes registered\n");
+    log_printf(LOG_LEVEL_INFO, "devtmpfs: /dev/usb/kbd0 and /dev/usb/mouse0 device nodes created\n");
 }
 
 /* ================================================================

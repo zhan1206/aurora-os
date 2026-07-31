@@ -126,7 +126,7 @@ static long sys_read(int fd, void *buf, size_t count) {
             if (current->sig && current->sig->pending) { current->t_errno = EINTR; return -1; }
         }
         if (len < 0) return -1;
-        if (copy_to_user(buf, kbuf, (size_t)len) != 0) {
+        if (safe_copy_to_user(buf, kbuf, (size_t)len) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         return len;
@@ -138,7 +138,7 @@ static long sys_read(int fd, void *buf, size_t count) {
     /*
      * FIXME (v4.2.5): BUG-PIPE-SMAP note
      * vfs_read() passes the raw user pointer `buf` to file operations.
-     * The VFS layer should handle stac()/clac() or copy_to_user().
+     * The VFS layer should handle stac()/clac() or safe_copy_to_user().
      * Currently, pipe_read() has been fixed (see pipe.c), but other
      * file backends (ramfs, ext2, devfs) may still have SMAP violations.
      * A proper fix would add stac()/clac() in the generic VFS read path.
@@ -165,7 +165,7 @@ static long sys_write(int fd, const void *buf, size_t count) {
         while (remaining > 0) {
             size_t chunk = (remaining > 256) ? 256 : remaining;
             char tmp[257];
-            if (copy_from_user(tmp, s, chunk) != 0) {
+            if (safe_copy_from_user(tmp, s, chunk) != 0) {
                 return -1;
             }
             tmp[chunk] = '\0';
@@ -304,7 +304,7 @@ static long sys_getdents(int fd, void *dirp, size_t count) {
      * vfs_read() passes the raw user pointer `dirp` to file operations
      * without SMAP protection.  Same issue as sys_read — the VFS layer
      * or individual file backends should handle stac()/clac() or use
-     * copy_to_user() for user-space buffers.
+     * safe_copy_to_user() for user-space buffers.
      */
     return vfs_read(filp, dirp, count);
 }
@@ -370,7 +370,7 @@ static long sys_fstat(int fd, struct kstat *statbuf) {
     ks.st_blksize = 4096;
     ks.st_blocks = 0;
 
-    if (copy_to_user(statbuf, &ks, sizeof(ks)) != 0) {
+    if (safe_copy_to_user(statbuf, &ks, sizeof(ks)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -615,7 +615,7 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
             if (!user_addr_range_ok(&argv[i], sizeof(char *))) {
                 break;
             }
-            if (copy_from_user(&ptr, &argv[i], sizeof(char *)) != 0) {
+            if (safe_copy_from_user(&ptr, &argv[i], sizeof(char *)) != 0) {
                 break;
             }
             if (!ptr) break;
@@ -642,7 +642,7 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
         for (int i = 0; i < MAX_ARGC; i++) {
             char *ptr;
             if (!user_addr_range_ok(&envp[i], sizeof(char *))) break;
-            if (copy_from_user(&ptr, &envp[i], sizeof(char *)) != 0) break;
+            if (safe_copy_from_user(&ptr, &envp[i], sizeof(char *)) != 0) break;
             if (!ptr) break;
             if (!user_addr_range_ok(ptr, 1)) break;
             kenvp_buf[i] = ptr;
@@ -716,7 +716,7 @@ static long sys_waitpid(int pid, int *status, int options) {
     int kstatus = 0;
     int ret = waitpid(pid, &kstatus, options);
     if (ret < 0) { current->t_errno = ECHILD; return -1; }
-    if (status && copy_to_user(status, &kstatus, sizeof(int)) != 0) {
+    if (status && safe_copy_to_user(status, &kstatus, sizeof(int)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return ret;
@@ -907,7 +907,7 @@ static long sys_uname(struct utsname *buf) {
              AURORAOS_MAJOR, AURORAOS_MINOR, AURORAOS_PATCH);
     snprintf(u.version, sizeof(u.version), "#1 SMP %s", BUILD_DATE);
     strcpy(u.machine, "x86_64");
-    if (copy_to_user(buf, &u, sizeof(u)) != 0) {
+    if (safe_copy_to_user(buf, &u, sizeof(u)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -925,7 +925,7 @@ static long sys_times(struct tms *buf) {
     t.tms_stime = 0;
     t.tms_cutime = 0;
     t.tms_cstime = 0;
-    if (copy_to_user(buf, &t, sizeof(t)) != 0) {
+    if (safe_copy_to_user(buf, &t, sizeof(t)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -939,7 +939,7 @@ static long sys_getcwd(char *buf, size_t size) {
     if (!user_addr_range_ok(buf, size)) { current->t_errno = EFAULT; return -1; }
     size_t len = strlen(current->cwd);
     if (len + 1 > size) { current->t_errno = ERANGE; return -1; }
-    if (copy_to_user(buf, current->cwd, len + 1) != 0) {
+    if (safe_copy_to_user(buf, current->cwd, len + 1) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return (long)len;
@@ -989,7 +989,7 @@ static long sys_stat(const char *path, struct kstat_ext *statbuf) {
     ks.st_blksize = 4096;
     ks.st_blocks = (inode->size + 511) / 512;
 
-    if (copy_to_user(statbuf, &ks, sizeof(ks)) != 0) {
+    if (safe_copy_to_user(statbuf, &ks, sizeof(ks)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -1067,7 +1067,7 @@ static long sys_bind(int sockfd, const void *addr, int addrlen) {
             current->t_errno = EFAULT; return -1;
         }
         struct sockaddr_un sa;
-        if (copy_from_user(&sa, addr, sizeof(sa)) != 0) {
+        if (safe_copy_from_user(&sa, addr, sizeof(sa)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         int ret = unix_bind(usk, &sa);
@@ -1083,7 +1083,7 @@ static long sys_bind(int sockfd, const void *addr, int addrlen) {
     }
 
     struct sockaddr_in sa;
-    if (copy_from_user(&sa, addr, sizeof(sa)) != 0) {
+    if (safe_copy_from_user(&sa, addr, sizeof(sa)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
 
@@ -1125,7 +1125,7 @@ static long sys_connect(int sockfd, const void *addr, int addrlen) {
             current->t_errno = EFAULT; return -1;
         }
         struct sockaddr_un sa;
-        if (copy_from_user(&sa, addr, sizeof(sa)) != 0) {
+        if (safe_copy_from_user(&sa, addr, sizeof(sa)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         int ret = unix_connect(usk, &sa);
@@ -1141,7 +1141,7 @@ static long sys_connect(int sockfd, const void *addr, int addrlen) {
     }
 
     struct sockaddr_in sa;
-    if (copy_from_user(&sa, addr, sizeof(sa)) != 0) {
+    if (safe_copy_from_user(&sa, addr, sizeof(sa)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
 
@@ -1196,8 +1196,8 @@ static long sys_accept(int sockfd, void *addr, int *addrlen) {
             struct sockaddr_un sa;
             int alen = (int)sizeof(sa);
             unix_getsockname(new_sk, &sa, &alen);
-            copy_to_user(addr, &sa, sizeof(sa));
-            copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+            safe_copy_to_user(addr, &sa, sizeof(sa));
+            safe_copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
         }
         return new_fd;
     }
@@ -1219,8 +1219,8 @@ static long sys_accept(int sockfd, void *addr, int *addrlen) {
         sa.sin_family = AF_INET;
         sa.sin_port = sys_ntohs(remote_port);
         memcpy(sa.sin_addr, remote_ip, 4);
-        copy_to_user(addr, &sa, sizeof(sa));
-        copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+        safe_copy_to_user(addr, &sa, sizeof(sa));
+        safe_copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
     }
     return new_sock;
 }
@@ -1241,7 +1241,7 @@ static long sys_send(int sockfd, const void *buf, size_t len, int flags) {
     if (usk) {
         void *kbuf = kmalloc(len);
         if (!kbuf) { current->t_errno = ENOMEM; return -1; }
-        if (copy_from_user(kbuf, buf, len) != 0) {
+        if (safe_copy_from_user(kbuf, buf, len) != 0) {
             kfree(kbuf);
             current->t_errno = EFAULT; return -1;
         }
@@ -1254,7 +1254,7 @@ static long sys_send(int sockfd, const void *buf, size_t len, int flags) {
     /* Copy data from user space */
     void *kbuf = kmalloc(len);
     if (!kbuf) { current->t_errno = ENOMEM; return -1; }
-    if (copy_from_user(kbuf, buf, len) != 0) {
+    if (safe_copy_from_user(kbuf, buf, len) != 0) {
         kfree(kbuf);
         current->t_errno = EFAULT; return -1;
     }
@@ -1284,7 +1284,7 @@ static long sys_recv(int sockfd, void *buf, size_t len, int flags) {
         int ret = unix_recv(usk, kbuf, (int)len);
         if (ret < 0) { kfree(kbuf); current->t_errno = -ret; return -1; }
         if (ret > 0) {
-            if (copy_to_user(buf, kbuf, (size_t)ret) != 0) {
+            if (safe_copy_to_user(buf, kbuf, (size_t)ret) != 0) {
                 kfree(kbuf);
                 current->t_errno = EFAULT; return -1;
             }
@@ -1302,7 +1302,7 @@ static long sys_recv(int sockfd, void *buf, size_t len, int flags) {
     int ret = tcp_recv(sockfd, kbuf, (int)len);
     if (ret < 0) { kfree(kbuf); current->t_errno = ECONNRESET; return -1; }
     if (ret > 0) {
-        if (copy_to_user(buf, kbuf, (size_t)ret) != 0) {
+        if (safe_copy_to_user(buf, kbuf, (size_t)ret) != 0) {
             kfree(kbuf);
             current->t_errno = EFAULT; return -1;
         }
@@ -1334,12 +1334,12 @@ static long sys_sendto(int sockfd, const void *buf, size_t len, int flags,
             current->t_errno = EFAULT; return -1;
         }
         struct sockaddr_un sa;
-        if (copy_from_user(&sa, dest_addr, sizeof(sa)) != 0) {
+        if (safe_copy_from_user(&sa, dest_addr, sizeof(sa)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         void *kbuf = kmalloc(len);
         if (!kbuf) { current->t_errno = ENOMEM; return -1; }
-        if (copy_from_user(kbuf, buf, len) != 0) {
+        if (safe_copy_from_user(kbuf, buf, len) != 0) {
             kfree(kbuf);
             current->t_errno = EFAULT; return -1;
         }
@@ -1357,13 +1357,13 @@ static long sys_sendto(int sockfd, const void *buf, size_t len, int flags,
     }
 
     struct sockaddr_in sa;
-    if (copy_from_user(&sa, dest_addr, sizeof(sa)) != 0) {
+    if (safe_copy_from_user(&sa, dest_addr, sizeof(sa)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
 
     void *kbuf = kmalloc(len);
     if (!kbuf) { current->t_errno = ENOMEM; return -1; }
-    if (copy_from_user(kbuf, buf, len) != 0) {
+    if (safe_copy_from_user(kbuf, buf, len) != 0) {
         kfree(kbuf);
         current->t_errno = EFAULT; return -1;
     }
@@ -1402,7 +1402,7 @@ static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
         int alen = (int)sizeof(sa);
         int ret = unix_recvfrom(usk, kbuf, (int)len, &sa, &alen);
         if (ret < 0) { kfree(kbuf); return 0; }
-        if (copy_to_user(buf, kbuf, (size_t)ret) != 0) {
+        if (safe_copy_to_user(buf, kbuf, (size_t)ret) != 0) {
             kfree(kbuf);
             current->t_errno = EFAULT; return -1;
         }
@@ -1412,8 +1412,8 @@ static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
                 !user_addr_range_ok(addrlen, sizeof(int))) {
                 return (long)ret;
             }
-            copy_to_user(src_addr, &sa, sizeof(sa));
-            copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+            safe_copy_to_user(src_addr, &sa, sizeof(sa));
+            safe_copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
         }
         return (long)ret;
     }
@@ -1447,7 +1447,7 @@ static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
     int ret = udp_recvfrom(udp_port, kbuf, (int)len, src_ip, &src_port);
     if (ret < 0) { kfree(kbuf); return 0; }  /* no data, return 0 */
 
-    if (copy_to_user(buf, kbuf, (size_t)ret) != 0) {
+    if (safe_copy_to_user(buf, kbuf, (size_t)ret) != 0) {
         kfree(kbuf);
         current->t_errno = EFAULT; return -1;
     }
@@ -1464,8 +1464,8 @@ static long sys_recvfrom(int sockfd, void *buf, size_t len, int flags,
         sa.sin_family = AF_INET;
         sa.sin_port = sys_ntohs(src_port);
         memcpy(sa.sin_addr, src_ip, 4);
-        copy_to_user(src_addr, &sa, sizeof(sa));
-        copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+        safe_copy_to_user(src_addr, &sa, sizeof(sa));
+        safe_copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
     }
     return (long)ret;
 }
@@ -1482,7 +1482,7 @@ static long sys_gettimeofday(struct timeval *tv, void *tz) {
     struct timeval ktv;
     rtc_get_timeval(&ktv.tv_sec, &ktv.tv_usec);
 
-    if (copy_to_user(tv, &ktv, sizeof(ktv)) != 0) {
+    if (safe_copy_to_user(tv, &ktv, sizeof(ktv)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -1497,7 +1497,7 @@ static long sys_nanosleep(const struct timespec *req, struct timespec *rem) {
     }
 
     struct timespec ts;
-    if (copy_from_user(&ts, req, sizeof(ts)) != 0) {
+    if (safe_copy_from_user(&ts, req, sizeof(ts)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
 
@@ -1546,10 +1546,10 @@ static long sys_nanosleep(const struct timespec *req, struct timespec *rem) {
             struct timespec rts;
             rts.tv_sec = remaining_ms / 1000;
             rts.tv_nsec = (remaining_ms % 1000) * 1000000;
-            copy_to_user(rem, &rts, sizeof(rts));
+            safe_copy_to_user(rem, &rts, sizeof(rts));
         } else {
             struct timespec rts = {0, 0};
-            copy_to_user(rem, &rts, sizeof(rts));
+            safe_copy_to_user(rem, &rts, sizeof(rts));
         }
     }
 
@@ -1682,7 +1682,7 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
 
     /* Simple poll: check each fd for readability */
     struct pollfd kfds[16];
-    if (copy_from_user(kfds, fds, (size_t)nfds * sizeof(struct pollfd)) != 0) {
+    if (safe_copy_from_user(kfds, fds, (size_t)nfds * sizeof(struct pollfd)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
 
@@ -1744,7 +1744,7 @@ static long sys_poll(struct pollfd *fds, int nfds, int timeout) {
         }
     } while (ready == 0 && (timeout_neg || waited < timeout_ms));
 
-    if (copy_to_user(fds, kfds, (size_t)nfds * sizeof(struct pollfd)) != 0) {
+    if (safe_copy_to_user(fds, kfds, (size_t)nfds * sizeof(struct pollfd)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return (long)ready;
@@ -1788,8 +1788,8 @@ static long sys_getsockname(int sockfd, void *addr, int *addrlen) {
         int alen = (int)sizeof(sa);
         int ret = unix_getsockname(usk, &sa, &alen);
         if (ret < 0) { current->t_errno = ENOTSOCK; return -1; }
-        copy_to_user(addr, &sa, sizeof(sa));
-        copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+        safe_copy_to_user(addr, &sa, sizeof(sa));
+        safe_copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
         return 0;
     }
 
@@ -1810,8 +1810,8 @@ static long sys_getsockname(int sockfd, void *addr, int *addrlen) {
     sa.sin_port = sys_ntohs(local_port);
     memcpy(sa.sin_addr, local_ip, 4);
 
-    copy_to_user(addr, &sa, sizeof(sa));
-    copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
+    safe_copy_to_user(addr, &sa, sizeof(sa));
+    safe_copy_to_user(addrlen, &(int){sizeof(sa)}, sizeof(int));
     return 0;
 }
 
@@ -1943,26 +1943,26 @@ static long sys_readlink(const char *path, char *buf, size_t bufsize) {
     if (inode->symlink_target) {
         size_t target_len = strlen(inode->symlink_target);
         size_t copy_len = (target_len < bufsize) ? target_len : (bufsize - 1);
-        if (copy_to_user(buf, inode->symlink_target, copy_len) != 0) {
+        if (safe_copy_to_user(buf, inode->symlink_target, copy_len) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         if (copy_len < bufsize) {
             char zero = '\0';
-            copy_to_user(buf + copy_len, &zero, 1);
+            safe_copy_to_user(buf + copy_len, &zero, 1);
         }
         return (long)copy_len;
     }
     /* Fallback: return the path itself if no symlink target */
     size_t copy_len = (size_t)len;
     if (copy_len >= bufsize) copy_len = bufsize - 1;
-    if (copy_to_user(buf, kpath, copy_len) != 0) {
+    if (safe_copy_to_user(buf, kpath, copy_len) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     /* Null-terminate */
     {
         char zero = '\0';
         if (copy_len < bufsize) {
-            copy_to_user(buf + copy_len, &zero, 1);
+            safe_copy_to_user(buf + copy_len, &zero, 1);
         }
     }
     return (long)copy_len;
@@ -2244,7 +2244,7 @@ static long sys_getenv(const char *name, char *value, size_t size) {
         if (strcmp(current->env_keys[i], kname) == 0) {
             size_t len = strlen(current->env_vals[i]);
             if (len >= size) len = size - 1;
-            if (copy_to_user(value, current->env_vals[i], len) != 0) {
+            if (safe_copy_to_user(value, current->env_vals[i], len) != 0) {
                 current->t_errno = EFAULT; return -1;
             }
             /* Null-terminate in user space */
@@ -2344,7 +2344,7 @@ static long sys_clock_gettime(int clock_id, struct timespec *tp) {
             return -1;
     }
 
-    if (copy_to_user(tp, &ts, sizeof(ts)) != 0) {
+    if (safe_copy_to_user(tp, &ts, sizeof(ts)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -2471,7 +2471,7 @@ static long sys_sysinfo(struct sysinfo *info) {
     si.freehigh = 0;
     si.mem_unit = 1;
 
-    if (copy_to_user(info, &si, sizeof(si)) != 0) {
+    if (safe_copy_to_user(info, &si, sizeof(si)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -2498,7 +2498,7 @@ static long sys_getrlimit(int resource, struct rlimit *rlim) {
     rl.rlim_cur = current->rlimit_cur[resource];
     rl.rlim_max = current->rlimit_max[resource];
 
-    if (copy_to_user(rlim, &rl, sizeof(rl)) != 0) {
+    if (safe_copy_to_user(rlim, &rl, sizeof(rl)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
     return 0;
@@ -2530,7 +2530,7 @@ static long sys_setrlimit(int resource, const struct rlimit *rlim) {
     }
 
     struct rlimit rl;
-    if (copy_from_user(&rl, rlim, sizeof(rl)) != 0) {
+    if (safe_copy_from_user(&rl, rlim, sizeof(rl)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
 
@@ -2573,7 +2573,7 @@ static long sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
         current->t_errno = EIO; return -1;
     }
 
-    if (copy_to_user(buf, kbuf, buflen) != 0) {
+    if (safe_copy_to_user(buf, kbuf, buflen) != 0) {
         kfree(kbuf);
         current->t_errno = EFAULT; return -1;
     }
@@ -2602,7 +2602,7 @@ long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset) {
         if (!user_addr_range_ok(oldset, sizeof(uint64_t))) {
             current->t_errno = EFAULT; return -1;
         }
-        if (copy_to_user(oldset, &old, sizeof(uint64_t)) != 0) {
+        if (safe_copy_to_user(oldset, &old, sizeof(uint64_t)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
     }
@@ -2612,7 +2612,7 @@ long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset) {
         if (!user_addr_range_ok((void *)set, sizeof(uint64_t))) {
             current->t_errno = EFAULT; return -1;
         }
-        if (copy_from_user(&new_set, set, sizeof(uint64_t)) != 0) {
+        if (safe_copy_from_user(&new_set, set, sizeof(uint64_t)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
 
@@ -2649,7 +2649,7 @@ static long sys_readv(int fd, const struct iovec *iov, int iovcnt) {
 
     struct iovec *kiov = (struct iovec *)kmalloc(iov_size);
     if (!kiov) { current->t_errno = ENOMEM; return -1; }
-    if (copy_from_user(kiov, iov, iov_size) != 0) {
+    if (safe_copy_from_user(kiov, iov, iov_size) != 0) {
         kfree(kiov); current->t_errno = EFAULT; return -1;
     }
 
@@ -2688,7 +2688,7 @@ static long sys_writev(int fd, const struct iovec *iov, int iovcnt) {
 
     struct iovec *kiov = (struct iovec *)kmalloc(iov_size);
     if (!kiov) { current->t_errno = ENOMEM; return -1; }
-    if (copy_from_user(kiov, iov, iov_size) != 0) {
+    if (safe_copy_from_user(kiov, iov, iov_size) != 0) {
         kfree(kiov); current->t_errno = EFAULT; return -1;
     }
 
@@ -2730,21 +2730,21 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
         if (!user_addr_range_ok(readfds, sizeof(fd_set))) {
             current->t_errno = EFAULT; return -1;
         }
-        copy_from_user(&kreadfds, readfds, sizeof(fd_set));
+        safe_copy_from_user(&kreadfds, readfds, sizeof(fd_set));
         pr = &kreadfds;
     }
     if (writefds) {
         if (!user_addr_range_ok(writefds, sizeof(fd_set))) {
             current->t_errno = EFAULT; return -1;
         }
-        copy_from_user(&kwritefds, writefds, sizeof(fd_set));
+        safe_copy_from_user(&kwritefds, writefds, sizeof(fd_set));
         pw = &kwritefds;
     }
     if (exceptfds) {
         if (!user_addr_range_ok(exceptfds, sizeof(fd_set))) {
             current->t_errno = EFAULT; return -1;
         }
-        copy_from_user(&kexceptfds, exceptfds, sizeof(fd_set));
+        safe_copy_from_user(&kexceptfds, exceptfds, sizeof(fd_set));
         pe = &kexceptfds;
     }
 
@@ -2762,7 +2762,7 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
     int timeout_neg = 0;
     if (timeout) {
         struct timeval tv;
-        if (copy_from_user(&tv, timeout, sizeof(tv)) != 0) {
+        if (safe_copy_from_user(&tv, timeout, sizeof(tv)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
@@ -2837,9 +2837,9 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
     } while (ready == 0 && (timeout_neg || waited < timeout_ms));
 
     /* Copy results back to user */
-    if (readfds) copy_to_user(readfds, &result_read, sizeof(fd_set));
-    if (writefds) copy_to_user(writefds, &result_write, sizeof(fd_set));
-    if (exceptfds) copy_to_user(exceptfds, &result_except, sizeof(fd_set));
+    if (readfds) safe_copy_to_user(readfds, &result_read, sizeof(fd_set));
+    if (writefds) safe_copy_to_user(writefds, &result_write, sizeof(fd_set));
+    if (exceptfds) safe_copy_to_user(exceptfds, &result_except, sizeof(fd_set));
 
     return ready;
 }
@@ -2881,7 +2881,7 @@ static long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
         }
 
         int fds[2] = { fd1, fd2 };
-        if (copy_to_user(sv, fds, sizeof(fds)) != 0) {
+        if (safe_copy_to_user(sv, fds, sizeof(fds)) != 0) {
             fd_close(current, fd1);
             fd_close(current, fd2);
             current->t_errno = EFAULT; return -1;
@@ -2902,7 +2902,7 @@ static long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
     int ret = sys_pipe(fds);
     if (ret < 0) return -1;
 
-    if (copy_to_user(sv, fds, sizeof(fds)) != 0) {
+    if (safe_copy_to_user(sv, fds, sizeof(fds)) != 0) {
         sys_close(fds[0]);
         sys_close(fds[1]);
         current->t_errno = EFAULT; return -1;
@@ -2944,18 +2944,18 @@ static long sys_getsockopt(int sockfd, int level, int optname,
     /* Stub: return default values for common socket options */
     if (optval && optlen) {
         uint32_t len;
-        if (copy_from_user(&len, optlen, sizeof(uint32_t)) != 0) {
+        if (safe_copy_from_user(&len, optlen, sizeof(uint32_t)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         /* For SO_ERROR, return 0 (no error) */
         int zero = 0;
         if (len >= (uint32_t)sizeof(int)) {
-            if (copy_to_user(optval, &zero, sizeof(int)) != 0) {
+            if (safe_copy_to_user(optval, &zero, sizeof(int)) != 0) {
                 current->t_errno = EFAULT; return -1;
             }
         }
         uint32_t ret_len = (uint32_t)sizeof(int);
-        if (copy_to_user(optlen, &ret_len, sizeof(uint32_t)) != 0) {
+        if (safe_copy_to_user(optlen, &ret_len, sizeof(uint32_t)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
     }
@@ -3029,7 +3029,7 @@ static long sys_getdents64(unsigned int fd, struct linux_dirent64 *dirp,
     }
 
     if (out_pos > 0) {
-        if (copy_to_user(dirp, out, out_pos) != 0) {
+        if (safe_copy_to_user(dirp, out, out_pos) != 0) {
             kfree(out); kfree(raw_buf);
             current->t_errno = EFAULT; return -1;
         }
@@ -3108,9 +3108,9 @@ static long sys_getresuid(int *ruid, int *euid, int *suid) {
         current->t_errno = EFAULT; return -1;
     }
     int zero = 0;
-    if (ruid) copy_to_user(ruid, &zero, sizeof(int));
-    if (euid) copy_to_user(euid, &zero, sizeof(int));
-    if (suid) copy_to_user(suid, &zero, sizeof(int));
+    if (ruid) safe_copy_to_user(ruid, &zero, sizeof(int));
+    if (euid) safe_copy_to_user(euid, &zero, sizeof(int));
+    if (suid) safe_copy_to_user(suid, &zero, sizeof(int));
     return 0;
 }
 
@@ -3128,9 +3128,9 @@ static long sys_getresgid(int *rgid, int *egid, int *sgid) {
         current->t_errno = EFAULT; return -1;
     }
     int zero = 0;
-    if (rgid) copy_to_user(rgid, &zero, sizeof(int));
-    if (egid) copy_to_user(egid, &zero, sizeof(int));
-    if (sgid) copy_to_user(sgid, &zero, sizeof(int));
+    if (rgid) safe_copy_to_user(rgid, &zero, sizeof(int));
+    if (egid) safe_copy_to_user(egid, &zero, sizeof(int));
+    if (sgid) safe_copy_to_user(sgid, &zero, sizeof(int));
     return 0;
 }
 
@@ -3236,7 +3236,7 @@ static long sys_futex(int *uaddr, int futex_op, int val,
     if (cmd == FUTEX_WAIT) {
         /* Read current value from userspace */
         int cur_val;
-        if (copy_from_user(&cur_val, uaddr, sizeof(int)) != 0) {
+        if (safe_copy_from_user(&cur_val, uaddr, sizeof(int)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         if (cur_val != val) {
@@ -3283,36 +3283,87 @@ static long sys_tgkill(int tgid, int tid, int sig) {
 }
 
 /* ================================================================
- * POSIX (v4.2.6): SYS_SCHED_SETAFFINITY — Set CPU affinity
+ * FIXED (v4.3.8): SCHED-001 — SYS_SCHED_SETAFFINITY — Set CPU affinity
+ *
+ * Sets the CPU affinity mask for a task.  The task is looked up by PID
+ * (0 means current).  The mask is a 64-bit bitmap where each bit
+ * represents a CPU.  After setting affinity, if the task is currently
+ * running on a CPU not in the new mask, it is migrated to an allowed CPU.
  * ================================================================ */
 static long sys_sched_setaffinity(int pid, unsigned int cpusetsize,
                                   const uint64_t *mask) {
-    (void)pid; (void)cpusetsize;
+    (void)cpusetsize;
     if (!mask || !user_addr_range_ok((void *)mask, sizeof(uint64_t))) {
         current->t_errno = EFAULT; return -1;
     }
     uint64_t k_mask;
-    if (copy_from_user(&k_mask, mask, sizeof(uint64_t)) != 0) {
+    if (safe_copy_from_user(&k_mask, mask, sizeof(uint64_t)) != 0) {
         current->t_errno = EFAULT; return -1;
     }
-    /* Store affinity mask in task_struct */
-    if (current) current->cpu_affinity = k_mask;
+
+    /* pid == 0 means current task */
+    struct task_struct *target = current;
+    if (pid != 0 && pid != current->pid) {
+        target = task_get_by_pid(pid);
+        if (!target) {
+            current->t_errno = ESRCH; return -1;
+        }
+    }
+
+    /* FIXED (v4.3.8): SCHED-001 — Set cpu_affinity and update cpu_mask.
+     * cpu_affinity stores the full 64-bit mask; cpu_mask is the int
+     * version used by the scheduler for quick checks. */
+    target->cpu_affinity = k_mask;
+    target->cpu_mask = (int)(k_mask & 0xFF);
+
+    /* If the task is currently on a CPU not in the new mask, migrate it */
+    if (target->cpu_id >= 0 && target->cpu_id < MAX_CPUS) {
+        if (!(k_mask & (1ULL << target->cpu_id))) {
+            /* Find an allowed CPU and migrate */
+            for (int c = 0; c < MAX_CPUS; c++) {
+                if (k_mask & (1ULL << c)) {
+                    smp_enqueue_task(target, c);
+                    log_printf(LOG_LEVEL_DEBUG, "sched: migrated pid=%d to CPU %d (affinity=0x%llx)\n",
+                               target->pid, c, (unsigned long long)k_mask);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (target != current) task_put(target);
     return 0;
 }
 
 /* ================================================================
- * POSIX (v4.2.6): SYS_SCHED_GETAFFINITY — Get CPU affinity
+ * FIXED (v4.3.8): SCHED-001 — SYS_SCHED_GETAFFINITY — Get CPU affinity
+ *
+ * Returns the CPU affinity mask for a task.  pid == 0 means current.
+ * Returns the size of the mask on success (sizeof(uint64_t)).
  * ================================================================ */
 static long sys_sched_getaffinity(int pid, unsigned int cpusetsize,
                                   uint64_t *mask) {
-    (void)pid; (void)cpusetsize;
+    (void)cpusetsize;
     if (!mask || !user_addr_range_ok(mask, sizeof(uint64_t))) {
         current->t_errno = EFAULT; return -1;
     }
-    uint64_t k_mask = (current && current->cpu_affinity) ? current->cpu_affinity : ~0ULL;
-    if (copy_to_user(mask, &k_mask, sizeof(uint64_t)) != 0) {
+
+    struct task_struct *target = current;
+    if (pid != 0 && pid != current->pid) {
+        target = task_get_by_pid(pid);
+        if (!target) {
+            current->t_errno = ESRCH; return -1;
+        }
+    }
+
+    /* FIXED (v4.3.8): SCHED-001 — Return cpu_affinity, defaulting to all CPUs */
+    uint64_t k_mask = target->cpu_affinity ? target->cpu_affinity : ~0ULL;
+    if (safe_copy_to_user(mask, &k_mask, sizeof(uint64_t)) != 0) {
+        if (target != current) task_put(target);
         current->t_errno = EFAULT; return -1;
     }
+
+    if (target != current) task_put(target);
     return sizeof(uint64_t);
 }
 
@@ -3327,13 +3378,13 @@ static long sys_getcpu(unsigned int *cpu, unsigned int *node, void *tcache) {
     cpu_id = (unsigned int)smp_get_cpu_id();
 
     if (cpu && user_addr_range_ok(cpu, sizeof(unsigned int))) {
-        if (copy_to_user(cpu, &cpu_id, sizeof(unsigned int)) != 0) {
+        if (safe_copy_to_user(cpu, &cpu_id, sizeof(unsigned int)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
     }
     if (node && user_addr_range_ok(node, sizeof(unsigned int))) {
         unsigned int node_id = 0;
-        copy_to_user(node, &node_id, sizeof(unsigned int));
+        safe_copy_to_user(node, &node_id, sizeof(unsigned int));
     }
     return 0;
 }
@@ -3484,7 +3535,7 @@ static long sys_prlimit64(int pid, int resource,
         struct rlimit rl;
         rl.rlim_cur = current->rlimit_cur[resource];
         rl.rlim_max = current->rlimit_max[resource];
-        if (copy_to_user(old_limit, &rl, sizeof(rl)) != 0) {
+        if (safe_copy_to_user(old_limit, &rl, sizeof(rl)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
     }
@@ -3495,7 +3546,7 @@ static long sys_prlimit64(int pid, int resource,
             current->t_errno = EFAULT; return -1;
         }
         struct rlimit rl;
-        if (copy_from_user(&rl, new_limit, sizeof(rl)) != 0) {
+        if (safe_copy_from_user(&rl, new_limit, sizeof(rl)) != 0) {
             current->t_errno = EFAULT; return -1;
         }
         if (rl.rlim_cur > rl.rlim_max) {

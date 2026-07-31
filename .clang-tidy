@@ -1,8 +1,38 @@
-# FIXED (v4.3.6): CI-001 — clang-tidy configuration for AuroraOS
-Checks: '-*,bugprone-*,clang-analyzer-*,readability-*,performance-*'
+# FIXED (v4.3.8): CI-002 — Enhanced clang-tidy configuration for AuroraOS
+# Comprehensive static analysis with security, performance, and bug detection checks.
+Checks: >-
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  readability-*,
+  performance-*,
+  cert-*,
+  misc-*,
+  portability-*,
+  -readability-identifier-naming,
+  -readability-magic-numbers,
+  -misc-no-recursion,
+  -bugprone-easily-swappable-parameters
 WarningsAsErrors: ''
 HeaderFilterRegex: 'kernel/.*'
 AnalyzeTemporaryDtors: false
+FormatStyle: none
 CheckOptions:
   - key: readability-identifier-naming.ClassCase
     value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  - key: bugprone-assert-side-effect.AssertMacros
+    value: 'assert,panic,TEST_FAIL,TEST_PASS'
+  - key: bugprone-reserved-identifier.AllowedIdentifiers
+    value: '__stack_bottom;__stack_top;__KERNEL__;__user'

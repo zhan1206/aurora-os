@@ -163,7 +163,8 @@ iso: $(KERNEL) $(UEFI_EFI)
 	@echo "  ISO   os.iso"
 	mkdir -p $(ISODIR)/boot/grub
 	cp $(KERNEL) $(ISODIR)/boot/kernel.elf
-	printf 'set timeout=0\nset default=0\n\nmenuentry "AuroraOS" {\n    multiboot /boot/kernel.elf\n    boot\n}\n' > $(ISODIR)/boot/grub/grub.cfg
+	# FIXED (v4.3.8): MB2-002 — Use multiboot2 directive since Multiboot2 header is present in entry.S.
+	printf 'set timeout=0\nset default=0\n\nmenuentry "AuroraOS" {\n    multiboot2 /boot/kernel.elf\n    boot\n}\n' > $(ISODIR)/boot/grub/grub.cfg
 	grub-mkrescue -o os.iso $(ISODIR) 2>/dev/null
 
 ifeq ($(ARCH),x86_64)

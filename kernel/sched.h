@@ -209,6 +209,10 @@ struct task_struct {
     int       state_lock;      /* spinlock for state transitions */
 };
 
+/* FIXED (v4.3.8): HDR-001 — Include signal.h at end of file to avoid
+ * circular dependency. signal.h forward-declares struct task_struct
+ * and only uses pointers to it, so including it after all struct
+ * definitions are complete is safe. */
 #include "signal.h"
 
 /* ============ Per-CPU Run Queue (SMP) ============ */

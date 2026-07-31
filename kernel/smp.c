@@ -379,21 +379,39 @@ static void build_trampoline(uint64_t pml4_phys) {
  * ================================================================ */
 
 /* ================================================================
- * FIXED (v4.3.4): SMP-001 — Simple task stealing for load balancing
+ * FIXED (v4.3.8): SMP-002 — Improved task stealing for load balancing
  *
- * Steals a task from CPU 0's run queue to the target CPU's run queue.
- * Selects the task with the highest vruntime (least important) to
- * minimize disruption to CPU 0's scheduling.
+ * Steals a task from the busiest CPU's run queue to the target CPU's
+ * run queue.  Previously only stole from CPU 0, which was ineffective
+ * on systems with >2 CPUs.  Now iterates all online CPUs to find the
+ * one with the most stealable tasks, selecting the task with the
+ * highest vruntime (least important) to minimize disruption.
  * ================================================================ */
 static int smp_steal_task(int target_cpu) {
-    struct run_queue *src_rq = &per_cpu_rq[0];  /* steal from CPU 0 */
     struct run_queue *dst_rq = &per_cpu_rq[target_cpu];
+    int best_cpu = -1;
+    int best_count = 0;
+
+    /* FIXED (v4.3.8): SMP-002 — Find the busiest CPU to steal from */
+    for (int i = 0; i < num_cpus; i++) {
+        if (i == target_cpu) continue;
+        if (!cpu_data[i].online) continue;
+        struct run_queue *rq = &per_cpu_rq[i];
+        if (rq->count > 1 && rq->count > best_count) {
+            best_count = rq->count;
+            best_cpu = i;
+        }
+    }
+
+    if (best_cpu < 0) return -1;  /* No CPU has stealable tasks */
+
+    struct run_queue *src_rq = &per_cpu_rq[best_cpu];
 
     spin_lock(&src_rq->lock);
     spin_lock(&dst_rq->lock);
 
     if (src_rq->count <= 1) {
-        /* Only idle task on CPU 0, nothing to steal */
+        /* Only idle task, nothing to steal */
         spin_unlock(&dst_rq->lock);
         spin_unlock(&src_rq->lock);
         return -1;
@@ -439,8 +457,8 @@ static int smp_steal_task(int target_cpu) {
         victim->rb_node.key = victim->vruntime;
         rb_insert(&dst_rq->ready_tree, &victim->rb_node);
 
-        log_printf(LOG_LEVEL_DEBUG, "smp: stolen task %s (pid=%d) from CPU 0 to CPU %d\n",
-                   victim->name, victim->pid, target_cpu);
+        log_printf(LOG_LEVEL_DEBUG, "smp: stolen task %s (pid=%d) from CPU %d to CPU %d\n",
+                   victim->name, victim->pid, best_cpu, target_cpu);
     }
 
     spin_unlock(&dst_rq->lock);

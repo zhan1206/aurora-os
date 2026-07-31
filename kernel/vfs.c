@@ -537,10 +537,14 @@ void vfs_dentry_stats(int *total, int *evicted) {
  * Returns the inode for the final component, or NULL.
  * ================================================================ */
 
-/* Check if a path component is a traversal attempt ("." or "..") */
-static int is_path_traversal(const char *name, size_t len) {
-    if (len == 1 && name[0] == '.') return 0;  /* "." is valid: current directory */
-    if (len == 2 && name[0] == '.' && name[1] == '.') return 1;  /* ".." is traversal */
+/* Check if a path component is ".." (parent directory navigation).
+ * Returns 1 for "..", 2 for ".", 0 for normal names. */
+/* FIXED (v4.3.8): VFS-001 — Support ".." parent directory navigation.
+ * Previously ".." was rejected as path traversal.  Now we allow it
+ * by navigating to the parent dentry during path resolution. */
+static int is_special_component(const char *name, size_t len) {
+    if (len == 1 && name[0] == '.') return 2;  /* "." : current directory */
+    if (len == 2 && name[0] == '.' && name[1] == '.') return 1;  /* ".." : parent */
     return 0;
 }
 
@@ -589,15 +593,21 @@ struct inode *vfs_lookup(const char *path) {
         if (len == 0) { p++; continue; }  /* skip "//" */
         if (len > 255) return NULL;        /* component too long */
 
-        /* Reject path traversal ("..") */
-        if (is_path_traversal(start, len)) {
-            log_printf(LOG_LEVEL_WARN, "VFS: path traversal rejected: %.*s\n",
-                       (int)len, start);
-            return NULL;
+        /* FIXED (v4.3.8): VFS-001 — Handle ".." and "." components.
+         * ".." navigates to the parent dentry.  If already at root,
+         * ".." stays at root (POSIX behavior). */
+        int special = is_special_component(start, len);
+        if (special == 1) {
+            /* ".." — navigate to parent dentry */
+            if (cur->parent) {
+                cur = cur->parent;
+            }
+            /* If at root, ".." stays at root */
+            if (*p == '/') p++;
+            continue;
         }
-
-        /* Handle "." component: skip it, stay in current directory */
-        if (len == 1 && start[0] == '.') {
+        if (special == 2) {
+            /* "." — skip, stay in current directory */
             if (*p == '/') p++;
             continue;
         }

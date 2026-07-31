@@ -14,6 +14,8 @@
  *   /dev/stdin   - Standard input (fd 0 mapping)    (v4.2.6)
  *   /dev/stdout  - Standard output (fd 1 mapping)   (v4.2.6)
  *   /dev/stderr  - Standard error (fd 2 mapping)    (v4.2.6)
+ *   /dev/usb/kbd0   - USB HID keyboard device node    (v4.3.8)
+ *   /dev/usb/mouse0  - USB HID mouse device node       (v4.3.8)
  */
 
 #ifndef DEVTMPFS_H

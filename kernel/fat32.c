@@ -106,6 +106,11 @@ static int write_cluster(struct fat32_sb_info *sbi, uint32_t cluster,
 static uint32_t fat32_get_cluster(struct fat32_sb_info *sbi, uint32_t cluster) {
     if (cluster < 2 || cluster >= FAT32_CLUSTER_EOC_MAX)
         return FAT32_CLUSTER_EOC_MAX;
+    /* FIXED (v4.3.8): FAT32-002 — Validate cluster against actual FAT size.
+     * Ensures the cluster value is within the total_clusters range of the
+     * filesystem, preventing out-of-bounds reads on the FAT table. */
+    if (cluster >= sbi->total_clusters + 2)
+        return FAT32_CLUSTER_EOC_MAX;
 
     /* Check cache first */
     if (sbi->fat_cache && cluster < sbi->total_clusters + 2) {
@@ -141,6 +146,9 @@ static uint32_t fat32_get_cluster(struct fat32_sb_info *sbi, uint32_t cluster) {
 static int fat32_set_cluster(struct fat32_sb_info *sbi, uint32_t cluster,
                              uint32_t value) {
     if (cluster < 2 || cluster >= FAT32_CLUSTER_EOC_MAX)
+        return -EINVAL;
+    /* FIXED (v4.3.8): FAT32-002 — Validate cluster against actual FAT size. */
+    if (cluster >= sbi->total_clusters + 2)
         return -EINVAL;
 
     value &= FAT32_CLUSTER_MASK;

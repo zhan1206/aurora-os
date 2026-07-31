@@ -414,3 +414,167 @@ void *realloc(void *ptr, unsigned long size) {
     free(ptr);
     return new_ptr;
 }
+
+/* ================================================================
+ * FIXED (v4.3.8): LIBC-001 — Standard I/O: FILE, fopen/fclose/fread/fwrite
+ * ================================================================ */
+typedef struct {
+    int   fd;
+    int   eof;
+    int   error;
+    char *buf;
+    unsigned long buf_size;
+    unsigned long buf_pos;
+    unsigned long buf_len;
+} FILE;
+
+#define EOF (-1)
+#define BUFSIZ 4096
+
+static FILE _stdin  = {0, 0, 0, NULL, 0, 0, 0};
+static FILE _stdout = {1, 0, 0, NULL, 0, 0, 0};
+static FILE _stderr = {2, 0, 0, NULL, 0, 0, 0};
+
+FILE *stdin  = &_stdin;
+FILE *stdout = &_stdout;
+FILE *stderr = &_stderr;
+
+FILE *fopen(const char *path, const char *mode) {
+    int flags = 0;
+    if (mode[0] == 'r') flags = 0;
+    else if (mode[0] == 'w') flags = 0;  /* write/create */
+    else if (mode[0] == 'a') flags = 0;  /* append */
+    else return NULL;
+
+    int fd = (int)sys_call(2, (long)path, (long)flags, 0);  /* SYS_OPEN */
+    if (fd < 0) return NULL;
+
+    FILE *fp = (FILE *)malloc(sizeof(FILE));
+    if (!fp) { sys_call(3, fd, 0, 0); return NULL; }  /* SYS_CLOSE */
+    fp->fd = fd;
+    fp->eof = 0;
+    fp->error = 0;
+    fp->buf = (char *)malloc(BUFSIZ);
+    fp->buf_size = fp->buf ? BUFSIZ : 0;
+    fp->buf_pos = 0;
+    fp->buf_len = 0;
+    return fp;
+}
+
+int fclose(FILE *fp) {
+    if (!fp) return EOF;
+    int ret = (int)sys_call(3, fp->fd, 0, 0);  /* SYS_CLOSE */
+    if (fp->buf) free(fp->buf);
+    free(fp);
+    return ret;
+}
+
+unsigned long fread(void *ptr, unsigned long size, unsigned long nmemb, FILE *fp) {
+    if (!fp || !ptr || size == 0 || nmemb == 0) return 0;
+    unsigned long total = size * nmemb;
+    unsigned long read_total = 0;
+    char *dst = (char *)ptr;
+
+    while (read_total < total) {
+        /* Read directly from fd */
+        long n = sys_call(0, fp->fd, (long)(dst + read_total), (long)(total - read_total));
+        if (n <= 0) { fp->eof = (n == 0); fp->error = (n < 0); break; }
+        read_total += (unsigned long)n;
+    }
+    return read_total / size;
+}
+
+unsigned long fwrite(const void *ptr, unsigned long size, unsigned long nmemb, FILE *fp) {
+    if (!fp || !ptr || size == 0 || nmemb == 0) return 0;
+    unsigned long total = size * nmemb;
+    unsigned long written = 0;
+    const char *src = (const char *)ptr;
+
+    while (written < total) {
+        long n = sys_call(1, fp->fd, (long)(src + written), (long)(total - written));
+        if (n <= 0) { fp->error = 1; break; }
+        written += (unsigned long)n;
+    }
+    return written / size;
+}
+
+int fgetc(FILE *fp) {
+    unsigned char c;
+    if (fread(&c, 1, 1, fp) != 1) return EOF;
+    return (int)c;
+}
+
+int fputc(int c, FILE *fp) {
+    unsigned char ch = (unsigned char)c;
+    if (fwrite(&ch, 1, 1, fp) != 1) return EOF;
+    return c;
+}
+
+/* ================================================================
+ * FIXED (v4.3.8): LIBC-002 — getenv/setenv using syscalls
+ * ================================================================ */
+char *getenv(const char *name) {
+    /* SYS_GETENV: returns a pointer to a static buffer with the value */
+    long ret = sys_call(257, (long)name, 0, 0);  /* SYS_GETENV */
+    if (ret <= 0) return NULL;
+    return (char *)ret;
+}
+
+int setenv(const char *name, const char *value, int overwrite) {
+    /* SYS_SETENV */
+    return (int)sys_call(325, (long)name, (long)value, (long)overwrite);
+}
+
+/* ================================================================
+ * FIXED (v4.3.8): LIBC-003 — strtok: tokenize string by delimiters
+ * ================================================================ */
+char *strtok(char *str, const char *delim) {
+    static char *saved = NULL;
+    if (str) saved = str;
+    if (!saved) return NULL;
+
+    /* Skip leading delimiters */
+    while (*saved) {
+        int is_delim = 0;
+        for (const char *d = delim; *d; d++) {
+            if (*saved == *d) { is_delim = 1; break; }
+        }
+        if (!is_delim) break;
+        saved++;
+    }
+    if (*saved == '\0') return NULL;
+
+    char *token = saved;
+    /* Find end of token */
+    while (*saved) {
+        int is_delim = 0;
+        for (const char *d = delim; *d; d++) {
+            if (*saved == *d) { is_delim = 1; break; }
+        }
+        if (is_delim) {
+            *saved = '\0';
+            saved++;
+            return token;
+        }
+        saved++;
+    }
+    /* End of string: last token, no more calls */
+    saved = NULL;
+    return token;
+}
+
+/* ================================================================
+ * FIXED (v4.3.8): LIBC-004 — strcpy/strncpy string copy functions
+ * ================================================================ */
+char *strcpy(char *dst, const char *src) {
+    char *d = dst;
+    while ((*d++ = *src++));
+    return dst;
+}
+
+char *strncpy(char *dst, const char *src, unsigned long n) {
+    unsigned long i;
+    for (i = 0; i < n && src[i]; i++) dst[i] = src[i];
+    for (; i < n; i++) dst[i] = '\0';
+    return dst;
+}

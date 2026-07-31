@@ -7,6 +7,7 @@
 
 #include "include/hpet.h"
 #include "include/log.h"
+#include "include/errno.h"
 #include "acpi.h"
 #include "pagetable.h"
 #include <stdint.h>
@@ -40,7 +41,7 @@ int hpet_init(void) {
     struct acpi_sdt_header *hdr = acpi_find_table("HPET");
     if (!hdr) {
         log_printf(LOG_LEVEL_INFO, "hpet: no HPET table found, using PIT\n");
-        return -1;
+        return -ENODEV;
     }
 
     struct acpi_hpet *hpet_tbl = (struct acpi_hpet *)hdr;
@@ -48,14 +49,14 @@ int hpet_init(void) {
 
     if (!hpet_base_addr) {
         log_printf(LOG_LEVEL_INFO, "hpet: HPET address is 0, using PIT\n");
-        return -1;
+        return -ENODEV;
     }
 
     if (hpet_base_addr >= KERNEL_PHYS_MAX) {
         log_printf(LOG_LEVEL_WARN, "hpet: HPET address 0x%llx out of identity-mapped range\n",
                    (unsigned long long)hpet_base_addr);
         hpet_base_addr = 0;
-        return -1;
+        return -ENXIO;
     }
 
     volatile uint64_t *hpet = (volatile uint64_t *)phys_to_virt(hpet_base_addr);

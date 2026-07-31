@@ -10,6 +10,7 @@
 #include "drm.h"
 #include "mem.h"
 #include "include/log.h"
+#include "include/errno.h"
 #include "console.h"
 #include <string.h>
 
@@ -278,15 +279,15 @@ void drm_init_gop(void *fb_addr, uint32_t width, uint32_t height,
  * drm_fb_create: Create a new framebuffer
  * ================================================================ */
 int drm_fb_create(uint32_t width, uint32_t height, uint32_t bpp) {
-    if (!drm_initialized) return -1;
-    if (drm_dev.num_fbs >= DRM_MAX_FBS) return -1;
-    if (width == 0 || height == 0 || bpp == 0) return -1;
+    if (!drm_initialized) return -ENODEV;
+    if (drm_dev.num_fbs >= DRM_MAX_FBS) return -ENOSPC;
+    if (width == 0 || height == 0 || bpp == 0) return -EINVAL;
 
     uint32_t pitch = width * (bpp / 8);
     size_t size = (size_t)pitch * height;
 
     void *buf = kmalloc(size);
-    if (!buf) return -1;
+    if (!buf) return -ENOMEM;
     memset(buf, 0, size);
 
     int idx = drm_dev.num_fbs;
@@ -312,7 +313,7 @@ int drm_fb_create(uint32_t width, uint32_t height, uint32_t bpp) {
  * ================================================================ */
 int drm_fb_destroy(int fb_id) {
     struct drm_framebuffer *fb = drm_get_fb(fb_id);
-    if (!fb) return -1;
+    if (!fb) return -EINVAL;
 
     /* Don't free the GOP framebuffer */
     if (fb->buffer == drm_dev.gop_fb) {
@@ -447,12 +448,12 @@ void drm_fb_present(int fb_id) {
  * drm_mode_set: Set the display mode on a CRTC
  * ================================================================ */
 int drm_mode_set(int crtc_id, int fb_id, struct drm_mode *mode) {
-    if (crtc_id < 1 || crtc_id > drm_dev.num_crtcs) return -1;
+    if (crtc_id < 1 || crtc_id > drm_dev.num_crtcs) return -EINVAL;
 
     struct drm_crtc *crtc = &drm_dev.crtcs[crtc_id - 1];
     struct drm_framebuffer *fb = drm_get_fb(fb_id);
 
-    if (!fb) return -1;
+    if (!fb) return -EINVAL;
 
     crtc->framebuffer = fb;
     if (mode) crtc->mode = mode;
