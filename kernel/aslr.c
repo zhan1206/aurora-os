@@ -72,8 +72,14 @@ static inline void chacha20_quarter_round(uint32_t *a, uint32_t *b,
  * The input state is preserved; output is written to @out (must be 64 bytes).
  * The counter in chacha_state[12] is NOT incremented; the caller does that.
  */
+/* FIXED (v4.3.9): BOOT-01 — Use static buffer instead of 64-byte stack allocation.
+ * chacha20_block is called from chacha20_random which also has a 64-byte
+ * block on the stack, totaling 128 bytes. Moving to static is safe because
+ * all callers hold chacha_lock. */
+static uint32_t chacha20_block_x[16];
+
 static void chacha20_block(uint32_t *out) {
-    uint32_t x[16];
+    uint32_t *x = chacha20_block_x;
     int i;
 
     for (i = 0; i < 16; i++) {

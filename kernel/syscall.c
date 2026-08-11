@@ -77,13 +77,21 @@ static int fd_validate(int fd, uint32_t required_cap) {
 }
 
 /* AF_UNIX (v4.2.6): Check if an fd is a Unix domain socket and return it */
+/* FIXED (v4.3.9): BOOT-03 — Validate UNIX_SOCK_MAGIC before casting to
+ * struct unix_sock*.  Without this check, an arbitrary fd entry value
+ * could be cast to unix_sock*, causing type confusion and potential
+ * use-after-free or arbitrary memory access. */
 static inline struct unix_sock *fd_to_unix_sock(int fd) {
     if (fd < 0 || fd >= MAX_FDS) return NULL;
     uintptr_t entry = current->fd_table[fd];
     /* Valid kernel pointers are > 0x1000 and bit 0 = 0 (not a cap entry) */
     if (entry == (uintptr_t)-1 || entry == 0 || entry == 0x1 || (entry & 1))
         return NULL;
-    return (struct unix_sock *)entry;
+    struct unix_sock *usk = (struct unix_sock *)entry;
+    /* Validate magic value to prevent type confusion */
+    if (usk->magic != UNIX_SOCK_MAGIC)
+        return NULL;
+    return usk;
 }
 
 /* Simple stat structure for fstat syscall */
@@ -2637,7 +2645,8 @@ long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset) {
 /* ================================================================
  * FIXED (v4.2.3): SYS_READV — Scatter read
  * ================================================================ */
-static long sys_readv(int fd, const struct iovec *iov, int iovcnt) {
+/* FIXED (v4.3.9): BUILD-01 — Remove static to match header declaration */
+long sys_readv(int fd, const struct iovec *iov, int iovcnt) {
     if (!iov || iovcnt <= 0 || iovcnt > 1024) {
         current->t_errno = EINVAL; return -1;
     }
@@ -2676,7 +2685,8 @@ static long sys_readv(int fd, const struct iovec *iov, int iovcnt) {
 /* ================================================================
  * FIXED (v4.2.3): SYS_WRITEV — Gather write
  * ================================================================ */
-static long sys_writev(int fd, const struct iovec *iov, int iovcnt) {
+/* FIXED (v4.3.9): BUILD-01 — Remove static to match header declaration */
+long sys_writev(int fd, const struct iovec *iov, int iovcnt) {
     if (!iov || iovcnt <= 0 || iovcnt > 1024) {
         current->t_errno = EINVAL; return -1;
     }
@@ -2847,7 +2857,8 @@ static long sys_select(int nfds, fd_set *readfds, fd_set *writefds,
 /* ================================================================
  * FIXED (v4.2.3): SYS_SOCKETPAIR — Create a pair of connected sockets
  * ================================================================ */
-static long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
+/* FIXED (v4.3.9): BUILD-01 — Remove static to match header declaration */
+long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
     if (!sv) { current->t_errno = EFAULT; return -1; }
     if (!user_addr_range_ok(sv, 2 * sizeof(int))) {
         current->t_errno = EFAULT; return -1;

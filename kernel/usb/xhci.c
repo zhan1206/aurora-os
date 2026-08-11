@@ -5,7 +5,7 @@
  * and transfer rings.  Provides low-level transport for USB control,
  * bulk, and interrupt transfers.
  *
- * /* USB (v4.2.6) */
+ * // USB (v4.2.6)  — FIXED (v4.3.9): BUILD-04 — Fix nested comment
  */
 #include "xhci.h"
 #include "xhci_dma.h"  /* XHCI_DMA (v4.2.7) */

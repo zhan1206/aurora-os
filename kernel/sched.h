@@ -107,6 +107,11 @@ struct task_struct {
     /* --- Identity --- */
     int       pid;             /* process ID */
     char      name[32];        /* process name */
+    /* FIXED (v4.3.9): BUILD-02 — Add UID/GID fields to task_struct */
+    uint32_t  uid;             /* User ID */
+    uint32_t  gid;             /* Group ID */
+    uint32_t  euid;            /* Effective UID */
+    uint32_t  egid;            /* Effective GID */
 
     /* --- State machine --- */
     task_state_t state;        /* current task state */

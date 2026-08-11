@@ -112,5 +112,7 @@ uint32_t lapic_read_id(void);
 int lapic_is_bsp(void);
 
 void ioapic_init(uint64_t ioapic_base);
+/* FIXED (v4.3.9): RUN-06/RUN-07 — I/O APIC interrupt routing */
+void ioapic_route(int irq, int vector, int dest);
 
 #endif /* APIC_H */

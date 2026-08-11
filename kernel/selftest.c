@@ -204,8 +204,11 @@ static void test_scheduler(void) {
     int status = -1;
     int pid = -1;
     for (int spin = 0; spin < 1000; spin++) {
-        /* Yield to let the child run and exit */
-        asm volatile("sti; nop; nop; cli");
+        /* FIXED (v4.3.9): BOOT-04 — Use yield() instead of inline asm.
+         * sti;nop;cli doesn't properly yield the CPU; it only briefly
+         * enables interrupts which may not trigger a context switch.
+         * Calling yield() directly ensures the child runs and exits. */
+        yield();
         pid = waitpid(saved_pid, &status, WNOHANG);
         if (pid == saved_pid) break;
     }
@@ -792,17 +795,18 @@ static void test_http_parse(void) {
     TEST_PASS("HTTP default port");
 
     /* Test that http_get with NULL URL returns error */
-    int ret = http_get(NULL, NULL, 0);
+    int ret = http_get(NULL, NULL, 0, 0);
     if (ret != -1) {
         TEST_FAIL("HTTP NULL URL should return -1");
     } else {
         TEST_PASS("HTTP NULL URL rejected");
     }
 
+    /* FIXED (v4.3.9): RUN-03 — Add timeout to HTTP GET test */
     /* Test with a well-formed URL - verify the function doesn't crash */
     char buf[256];
     memset(buf, 0, sizeof(buf));
-    ret = http_get("http://example.com/", buf, sizeof(buf));
+    ret = http_get("http://example.com/", buf, sizeof(buf), 5000);
     /* In QEMU without network, http_get should return an error code, not crash */
     if (ret == 0 || ret == -1) {
         TEST_PASS("HTTP GET attempt (no crash, returned as expected)");
@@ -1417,7 +1421,7 @@ static void test_concurrent_stress(void) {
     for (int i = 0; i < CONCURRENT_TASK_COUNT; i++) {
         int status;
         for (int spin = 0; spin < 5000; spin++) {
-            asm volatile("sti; nop; nop; cli");
+            yield();
             if (waitpid(pids[i], &status, WNOHANG) == pids[i]) break;
         }
     }
@@ -1486,7 +1490,7 @@ static void test_smp_stress(void) {
     for (int i = 0; i < SMP_STRESS_TASKS; i++) {
         int status;
         for (int spin = 0; spin < 5000; spin++) {
-            asm volatile("sti; nop; nop; cli");
+            yield();
             if (waitpid(pids[i], &status, WNOHANG) == pids[i]) break;
         }
     }

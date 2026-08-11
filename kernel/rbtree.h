@@ -39,5 +39,7 @@ struct rb_node *rb_find(struct rb_root *root, uint64_t key);
 struct rb_node *rb_find_min(struct rb_root *root);
 struct rb_node *rb_first(struct rb_root *root);
 struct rb_node *rb_next(struct rb_node *node);
+/* FIXED (v4.3.9): RUN-02 — vruntime tiebreaker for scheduler */
+int rb_compare_vruntime(struct rb_node *a, struct rb_node *b);
 
 #endif /* RBTREE_H */

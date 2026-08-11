@@ -17,6 +17,7 @@
  * Globals — LAPIC virtual base
  * ================================================================ */
 static volatile uint32_t *lapic_vbase = NULL;
+static volatile uint32_t *ioapic_base_v = NULL;  /* FIXED (v4.3.9): RUN-06/RUN-07 — for ioapic_route */
 static int lapic_timer_divisor = 0;
 static uint32_t lapic_timer_calib_count = 0;
 static int bsp_lapic_id = -1;
@@ -345,7 +346,7 @@ void ioapic_init(uint64_t ioapic_base) {
         return;
     }
 
-    volatile uint32_t *ioapic_base_v = (volatile uint32_t *)(uintptr_t)ioapic_virt;
+    ioapic_base_v = (volatile uint32_t *)(uintptr_t)ioapic_virt;
 
     /* Read IOAPIC version */
     *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_REGSEL) = IOAPIC_VER;
@@ -378,4 +379,38 @@ void ioapic_init(uint64_t ioapic_base) {
      * Normally IRQ0 is pin 2 on the I/O APIC, but we use the APIC timer
      * instead, so we just mask everything for now. */
     log_printf(LOG_LEVEL_INFO, "apic: IOAPIC initialized, legacy PIC disabled\n");
+}
+
+/* FIXED (v4.3.9): RUN-06 — Fix ioapic_route mask (0x0000FF00, not 0xFFFFFF00)
+ * FIXED (v4.3.9): RUN-07 — Set I/O APIC destination to broadcast (0xFF) */
+void ioapic_route(int irq, int vector, int dest) {
+    if (!ioapic_base_v) return;
+
+    uint32_t regsel = IOAPIC_REDTBL_BASE + irq * 2;
+
+    /* Read low 32 bits */
+    *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_REGSEL) = regsel;
+    uint32_t low = *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN);
+
+    /* FIXED (v4.3.9): RUN-06 — Clear vector/type/delivery fields with 0x0000FF00 mask */
+    low &= ~0x0000FF00;
+    low |= (uint32_t)(vector & 0xFF) << 0;  /* Vector */
+    /* Clear mask bit explicitly */
+    low &= ~(1U << 16);  /* Unmask */
+
+    /* Write low 32 bits */
+    *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_REGSEL) = regsel;
+    *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN) = low;
+
+    /* FIXED (v4.3.9): RUN-07 — Set destination to broadcast (logical mode, all CPUs) */
+    /* Read high 32 bits */
+    *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_REGSEL) = regsel + 1;
+    uint32_t high = *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN);
+
+    high &= ~(0xFFU << 24);
+    high |= (0xFFU << 24);  /* Destination: broadcast to all */
+
+    *(volatile uint32_t *)((uintptr_t)ioapic_base_v + IOAPIC_IOWIN) = high;
+
+    (void)dest;
 }

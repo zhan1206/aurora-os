@@ -43,15 +43,23 @@ int do_sys_kill(int pid, int sig) {
      *   - SIGKILL/SIGSTOP/SIGCHLD: always allowed within the same UID
      * Protect init (pid=1) from arbitrary signals.  (BUG 3.6)
      */
-    if (target->pid != current->pid) {
-        /* Protect init: only SIGKILL, SIGSTOP, SIGCHLD allowed */
-        if (target->pid == 1) {
-            if (sig != SIGKILL && sig != SIGSTOP && sig != SIGCHLD) {
-                /* REFCOUNT (v4.2.6): Release reference held by task_get_by_pid */
+    /* FIXED (v4.3.9): RUN-01 — Protect init (PID=1) from all signals except SIGCHLD */
+    if (target->pid == 1) {
+        /* Init process is protected from all signals except SIGCHLD */
+        if (sig == SIGCHLD) {
+            /* Allow SIGCHLD if init has a handler installed */
+            if (!target->sig || target->sig->actions[sig].sa_handler == SIG_DFL) {
                 task_put(target);
-                return -1;
+                return 0;
             }
+        } else {
+            /* Ignore all other signals for init */
+            task_put(target);
+            return -1;
         }
+    }
+
+    if (target->pid != current->pid) {
         /* Simple UID check: all processes run as UID 0 for now,
          * so this check always passes.  When multi-user support
          * is added, this should verify that sender's UID matches

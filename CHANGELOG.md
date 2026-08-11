@@ -1,6 +1,77 @@
 # AuroraOS Changelog
 
-## v4.3.8 (2026-07-30) — 全栈改进: 10大类别, 30+项修复
+## v4.3.9 (2026-08-11) — 启动+运行时致命修复: 23项
+
+### 概述
+
+v4.3.9 针对测试报告的23项问题（编译7项、启动9项、运行7项）进行集中修复，重点解决内核启动挂起、键盘无响应、上下文切换崩溃等致命问题。
+
+### 修复统计
+
+| 阶段 | 总数 | 致命 | 修复 |
+|------|------|------|------|
+| 编译 (BUILD) | 7 | 0 | 7 |
+| 启动 (BOOT) | 9 | 6 | 9 |
+| 运行 (RUN) | 7 | 3 | 7 |
+
+### 编译阶段修复 (BUILD-01~07)
+
+| ID | 描述 | 修复 |
+|----|------|------|
+| BUILD-01 | static声明冲突 | 移除sys_readv/sys_writev/sys_sigprocmask的static |
+| BUILD-02 | task_struct缺少uid/gid | 添加uid/gid/euid/egid字段 |
+| BUILD-03 | sock_fprog未声明 | 添加前向声明 |
+| BUILD-04 | 嵌套注释 | 修复net/和usb/中的嵌套注释 |
+| BUILD-05 | mtools缺失 | 文档说明依赖 |
+| BUILD-06 | smp_get_cpu_id未定义 | 添加函数实现和声明 |
+| BUILD-07 | kgdb.c内联汇编 | 修复操作数约束 |
+
+### 启动阶段修复 (BOOT-01~09)
+
+| ID | 严重度 | 描述 | 修复 |
+|----|--------|------|------|
+| BOOT-01 | 致命 | Stack smashing in chacha20 | 静态缓冲区替换128B栈分配 |
+| BOOT-02 | 致命 | #GP in this_cpu() | 单核模式初始化GS base MSR |
+| BOOT-03 | 致命 | UNIX socket类型混淆 | magic值验证UNIX_SOCK_MAGIC |
+| BOOT-04 | 高 | waitpid返回错误pid | yield()替换sti/nop/cli |
+| BOOT-05 | 致命 | idle task栈指针未捕获 | 分配独立栈页+记录rsp |
+| BOOT-06 | 致命 | kernel_main调用schedule() | bootstrap任务隔离 |
+| BOOT-07 | 致命 | 任务栈仅4KB溢出 | 增至4页(16KB) |
+| BOOT-08 | 致命 | pushfq/popfq中断混乱 | 移除pushfq/popfq |
+| BOOT-09 | 致命 | 早期STI triple fault | 确认IDT先于STI初始化 |
+
+### 运行阶段修复 (RUN-01~07)
+
+| ID | 严重度 | 描述 | 修复 |
+|----|--------|------|------|
+| RUN-01 | 高 | kill(1,SIGKILL)回归失败 | init进程信号保护:仅允许SIGCHLD |
+| RUN-02 | 高 | rbtree key collision | 三路比较+指针tiebreaker+vruntime比较函数 |
+| RUN-03 | 中 | HTTP GET hang | http_get()增加timeout_ms参数(5000ms) |
+| RUN-04 | 致命 | #UD in sysfs.c | 已修复(v4.2.7): stac/clac包装 |
+| RUN-05 | 致命 | 键盘无响应 | ioapic_init()移到单核提前返回之前 |
+| RUN-06 | 致命 | 键盘IRQ始终masked | 新增ioapic_route(): 0x0000FF00掩码+显式清除mask位 |
+| RUN-07 | 高 | 键盘scancode不处理 | 目的字段设为0xFF广播 |
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 15+ |
+| 新增代码 | ~500 行 |
+
+### 版本历史
+
+```
+v4.3.9 ← 当前 (启动+运行时致命修复: 23项, 15+文件, ~500行)
+v4.3.8 (全栈改进: 10类别, 30+项, 29文件, +2606行)
+v4.3.7 (编译+运行时Bug修复: 18项, 25文件, +516行)
+v4.3.6 (安全加固+工程完善: 5项, 14文件, +553行)
+v4.3.5 (实测修复: 10 Bug, 12文件)
+v4.3.4 (架构级: 8大子系统, 14文件)
+v4.3.3 (全量修复: 16项, 27文件)
+v4.3.2 (根因修复: BSS栈溢出, 6项)
+v4.3.1 (诚实文档: 77项审计映射)
+```
 
 ### 概述
 

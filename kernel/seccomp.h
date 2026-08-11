@@ -26,6 +26,8 @@
 
 /* Forward declaration */
 struct task_struct;
+/* FIXED (v4.3.9): BUILD-03 — Forward-declare struct sock_fprog for seccomp_set_filter */
+struct sock_fprog;
 
 /* ================================================================
  * Classic BPF instruction set

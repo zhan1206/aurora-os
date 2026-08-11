@@ -75,8 +75,11 @@ static int http_parse_url(const char *url, char *hostname, int hostname_size,
 /* ================================================================
  * http_get - Perform HTTP GET request
  * ================================================================ */
-int http_get(const char *url, char *response_buf, size_t buf_size) {
+/* FIXED (v4.3.9): RUN-03 — Add timeout to HTTP GET to prevent hangs */
+int http_get(const char *url, char *response_buf, size_t buf_size, int timeout_ms) {
     if (!url || !response_buf || buf_size == 0) return -1;
+
+    if (timeout_ms <= 0) timeout_ms = 5000;  /* default 5 seconds */
 
     char hostname[256];
     uint16_t port;
@@ -113,17 +116,26 @@ int http_get(const char *url, char *response_buf, size_t buf_size) {
         return -1;
     }
 
+    /* FIXED (v4.3.9): RUN-03 — timeout-aware polling across all phases */
+    int timeout_remaining = timeout_ms;
+
     /* Wait for connection to establish (poll for SYN-ACK) */
     {
         int retry;
-        for (retry = 0; retry < 50; retry++) {
+        for (retry = 0; retry < 50 && timeout_remaining > 0; retry++) {
             net_poll();
+            timeout_remaining--;
             uint8_t peer_ip[4];
             uint16_t peer_port;
             if (tcp_getpeername(sock, peer_ip, &peer_port) == 0) {
                 /* Socket is connected */
                 break;
             }
+        }
+        if (timeout_remaining <= 0) {
+            log_printf(LOG_LEVEL_ERR, "http: connect timeout\n");
+            tcp_close(sock);
+            return -1;
         }
     }
 
@@ -162,8 +174,9 @@ int http_get(const char *url, char *response_buf, size_t buf_size) {
     static int http_buf_len = 0;
     http_buf_len = 0;
 
-    for (retry = 0; retry < 200; retry++) {
+    for (retry = 0; retry < 200 && timeout_remaining > 0; retry++) {
         net_poll();
+        timeout_remaining--;
 
         char tmp[512];
         int n = tcp_recv(sock, tmp, (int)sizeof(tmp));

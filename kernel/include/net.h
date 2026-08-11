@@ -435,6 +435,7 @@ void dns_set_server(const uint8_t ip[4]);
 void dns_init(void);  /* FIXED (v4.2.2): initialize DNS cache lock */
 
 /* HTTP */
-int  http_get(const char *url, char *response_buf, size_t buf_size);
+/* FIXED (v4.3.9): RUN-03 — timeout_ms parameter to prevent hangs */
+int  http_get(const char *url, char *response_buf, size_t buf_size, int timeout_ms);
 
 #endif /* NET_H */

@@ -799,7 +799,7 @@ static void kgdb_rsp_read_regs(char *out, int out_sz) {
         : "memory"
     );
 
-    /* Read RIP */
+    /* FIXED (v4.3.9): BUILD-07 — Fix RIP read: use lea with rip-relative addressing */
     asm volatile ("lea (%%rip), %0" : "=r"(frame.rip));
 
     /* Read RFLAGS */

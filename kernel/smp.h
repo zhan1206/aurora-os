@@ -33,6 +33,7 @@
  * ================================================================ */
 
 struct cpu_data {
+    struct cpu_data *self;              /* FIXED (v4.3.9): BOOT-02 — pointer to self at GS:0 */
     int cpu_id;                          /* logical CPU number (0..MAX_CPUS-1) */
     int lapic_id;                        /* local APIC ID from hardware */
     struct task_struct *current_task;    /* currently running task on this CPU */
@@ -93,6 +94,10 @@ void smp_send_ipi(int cpu_id, int vector);
  * Sends IPI_TLB_VECTOR to every online CPU except self.
  */
 void smp_tlb_shootdown(uint64_t vaddr);
+
+/* FIXED (v4.3.9): BUILD-06 — Add declarations for smp_get_cpu_id and smp_tlb_shootdown_all */
+int smp_get_cpu_id(void);
+void smp_tlb_shootdown_all(void);
 
 /* ================================================================
  * Unified Lock Abstraction (v4.0.9)

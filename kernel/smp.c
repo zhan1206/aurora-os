@@ -528,6 +528,7 @@ void ap_entry(void) {
 
     /* Set GS base to point to our cpu_data */
     /* wrmsr IA32_GS_BASE (0xC0000101) */
+    cpu->self = cpu;  /* FIXED (v4.3.9): BOOT-02 — set self pointer at GS:0 */
     uint64_t gs_base = (uint64_t)(uintptr_t)cpu;
     uint32_t gs_lo = (uint32_t)(gs_base & 0xFFFFFFFF);
     uint32_t gs_hi = (uint32_t)(gs_base >> 32);
@@ -745,6 +746,15 @@ void smp_init(void *mb_info) {
         cpu_data[0].lapic_id = (int)lapic_read_id();
         cpu_data[0].online = 1;
         cpu_data[0].current_task = NULL;
+        /* FIXED (v4.3.9): BOOT-02 — Initialize GS base in single-CPU mode */
+        {
+            uint64_t gs = (uint64_t)(uintptr_t)&cpu_data[0];
+            uint32_t lo = (uint32_t)(gs & 0xFFFFFFFF);
+            uint32_t hi = (uint32_t)(gs >> 32);
+            asm volatile ("mov $0xC0000101, %%ecx; mov %0, %%eax; mov %1, %%edx; wrmsr"
+                :: "r"(lo), "r"(hi) : "eax", "ecx", "edx", "memory");
+        }
+        cpu_data[0].self = &cpu_data[0];
         smp_initialized = 1;
         spin_unlock(&smp_init_lock);
         return;
@@ -758,6 +768,15 @@ void smp_init(void *mb_info) {
         cpu_data[0].lapic_id = (int)lapic_read_id();
         cpu_data[0].online = 1;
         cpu_data[0].current_task = NULL;
+        /* FIXED (v4.3.9): BOOT-02 — Initialize GS base in single-CPU mode */
+        {
+            uint64_t gs = (uint64_t)(uintptr_t)&cpu_data[0];
+            uint32_t lo = (uint32_t)(gs & 0xFFFFFFFF);
+            uint32_t hi = (uint32_t)(gs >> 32);
+            asm volatile ("mov $0xC0000101, %%ecx; mov %0, %%eax; mov %1, %%edx; wrmsr"
+                :: "r"(lo), "r"(hi) : "eax", "ecx", "edx", "memory");
+        }
+        cpu_data[0].self = &cpu_data[0];
         smp_initialized = 1;
         spin_unlock(&smp_init_lock);
         return;
@@ -815,17 +834,29 @@ void smp_init(void *mb_info) {
 
     log_printf(LOG_LEVEL_INFO, "smp: detected %d CPU(s)\n", num_cpus);
 
+    /* FIXED (v4.3.9): RUN-05 — Always initialize I/O APIC, even in single-CPU mode.
+     * I/O APIC is needed for IRQ routing (e.g., keyboard IRQ) even with 1 CPU. */
+    if (ioapic_base) {
+        ioapic_init(ioapic_base);
+    } else {
+        log_printf(LOG_LEVEL_WARN, "IOAPIC: no I/O APIC found, using PIC fallback\n");
+    }
+
     /* If only one CPU, we're done */
     if (num_cpus <= 1) {
         cpu_data[0].online = 1;
+        /* FIXED (v4.3.9): BOOT-02 — Initialize GS base in single-CPU mode */
+        {
+            uint64_t gs = (uint64_t)(uintptr_t)&cpu_data[0];
+            uint32_t lo = (uint32_t)(gs & 0xFFFFFFFF);
+            uint32_t hi = (uint32_t)(gs >> 32);
+            asm volatile ("mov $0xC0000101, %%ecx; mov %0, %%eax; mov %1, %%edx; wrmsr"
+                :: "r"(lo), "r"(hi) : "eax", "ecx", "edx", "memory");
+        }
+        cpu_data[0].self = &cpu_data[0];
         smp_initialized = 1;
         spin_unlock(&smp_init_lock);
         return;
-    }
-
-    /* Initialize I/O APIC */
-    if (ioapic_base) {
-        ioapic_init(ioapic_base);
     }
 
     /* Build trampoline code at 0x8000 */
@@ -878,6 +909,7 @@ void smp_init(void *mb_info) {
     ap_online_count = 1;  /* BSP is already online */
 
     /* Set GS base for BSP */
+    cpu_data[0].self = &cpu_data[0];  /* FIXED (v4.3.9): BOOT-02 — set self pointer at GS:0 */
     uint64_t gs_base = (uint64_t)(uintptr_t)&cpu_data[0];
     uint32_t gs_lo = (uint32_t)(gs_base & 0xFFFFFFFF);
     uint32_t gs_hi = (uint32_t)(gs_base >> 32);
@@ -997,6 +1029,31 @@ void smp_tlb_shootdown(uint64_t vaddr) {
  * This is the function that the trampoline code jumps to.
  * It's the same as ap_entry — provided for API compatibility.
  * ================================================================ */
+
+/* FIXED (v4.3.9): BUILD-06 — smp_get_cpu_id implementation */
+int smp_get_cpu_id(void) {
+    return current_cpu_id();
+}
+
+/* FIXED (v4.3.9): BUILD-06 — smp_tlb_shootdown_all implementation */
+void smp_tlb_shootdown_all(void) {
+    int my_cpu = -1;
+    struct cpu_data *me = this_cpu();
+    if (me) my_cpu = me->cpu_id;
+
+    for (int i = 0; i < num_cpus; i++) {
+        if (i == my_cpu) continue;
+        if (!cpu_data[i].online) continue;
+        smp_send_ipi(i, IPI_TLB_VECTOR);
+    }
+
+    /* Invalidate local TLB completely */
+    asm volatile (
+        "mov %%cr3, %%rax\n"
+        "mov %%rax, %%cr3\n"
+        ::: "rax", "memory"
+    );
+}
 
 void ap_startup(void) {
     ap_entry();

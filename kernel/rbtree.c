@@ -181,13 +181,20 @@ void rb_insert(struct rb_root *root, struct rb_node *node) {
     struct rb_node *parent = NULL;
     struct rb_node **link = &root->root;
 
+    /* FIXED (v4.3.9): RUN-02 — Handle vruntime ties in rbtree insert */
     /* Standard BST insert */
     while (*link) {
         parent = *link;
         if (node->key < parent->key) {
             link = &parent->left;
-        } else {
+        } else if (node->key > parent->key) {
             link = &parent->right;
+        } else {
+            /* Key collision: use pointer as tiebreaker */
+            if ((uintptr_t)node < (uintptr_t)parent)
+                link = &parent->left;
+            else
+                link = &parent->right;
         }
     }
 
@@ -413,6 +420,14 @@ struct rb_node *rb_find(struct rb_root *root, uint64_t key) {
         }
     }
     return NULL;
+}
+
+/* FIXED (v4.3.9): RUN-02 — compare_vruntime for scheduler tiebreaking */
+int rb_compare_vruntime(struct rb_node *a, struct rb_node *b) {
+    if (a->key < b->key) return -1;
+    if (a->key > b->key) return 1;
+    /* Tiebreaker: use pointer address */
+    return ((uintptr_t)a < (uintptr_t)b) ? -1 : 1;
 }
 
 /*

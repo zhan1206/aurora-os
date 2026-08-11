@@ -314,7 +314,16 @@ void scheduler_init(void) {
     current = (struct task_struct *)kmalloc(sizeof(struct task_struct));
     ASSERT(current != NULL);
     memset(current, 0, sizeof(*current));
-    current->rsp        = NULL;
+    /* FIXED (v4.3.9): BOOT-05 — Allocate a dedicated kernel stack for the idle
+     * task.  Previously rsp was NULL, meaning the idle task shared the boot
+     * stack with kernel_main.  With its own stack, the idle task's RSP is
+     * properly captured by context_switch on the first schedule() call. */
+    {
+        void *idle_stack = alloc_page();
+        ASSERT(idle_stack != NULL);
+        current->rsp        = (uint64_t)(uintptr_t)idle_stack + PAGE_SIZE;
+        current->stack_phys = idle_stack;
+    }
     current->cr3        = get_kernel_cr3();
     current->pid        = 0;
     current->state      = TASK_RUNNING;
@@ -413,64 +422,54 @@ struct task_struct *create_task(void (*fn)(void)) {
     uint64_t *sp = (uint64_t *)stack_top;
 
     /*
-     * FIXED (v4.1.4): context_switch pushes 7 values (pushfq + 6 callee-saved)
-     * then saves RSP.  On restore, it pops 7 values then rets.  The stack
-     * must have exactly 8 slots (7 pushed + 1 ret addr) below stack_top.
-     * The previous code only pushed fn as the ret addr, causing context_switch
-     * to pop garbage values from beyond the stack.  (BUG-004)
+     * FIXED (v4.3.9): BOOT-08 — context_switch pushes 6 registers (rbp, rbx, r12-r15)
+     * then saves RSP.  On restore, it pops 6 values then rets.  The stack
+     * must have exactly 7 slots (6 registers + 1 ret addr) below stack_top.
      */
     if (fn) {
         /*
-         * FIXED (v4.3.7): BUG-1A — Stack frame order must match context_switch
-         * pop order.  context_switch pushes: pushfq, rbp, rbx, r12, r13, r14, r15
+         * FIXED (v4.3.9): BOOT-08 — Frame order must match new context_switch
+         * (no pushfq/popfq).  context_switch pushes: rbp, rbx, r12, r13, r14, r15
          * then saves RSP.  On restore it pops in reverse: r15, r14, r13, r12,
-         * rbx, rbp, pushfq, ret.  So the frame at RSP must be:
-         *   [RSP+0]=r15, [RSP+8]=r14, ..., [RSP+48]=rflags, [RSP+56]=ret_addr.
-         * The previous code had the order reversed (ret_addr at [0], r15 at [7]),
-         * causing context_switch to load garbage into registers and crash.
+         * rbx, rbp, ret.  So the frame at RSP must be:
+         *   [RSP+0]=r15, [RSP+8]=r14, ..., [RSP+40]=rbp, [RSP+48]=ret_addr.
          */
-        uint64_t *frame = sp - 8;
+        uint64_t *frame = sp - 7;
         frame[0] = 0;              /* r15 (popped first by context_switch) */
         frame[1] = 0;              /* r14 */
         frame[2] = 0;              /* r13 */
         frame[3] = 0;              /* r12 */
         frame[4] = 0;              /* rbx */
         frame[5] = 0;              /* rbp */
-        frame[6] = 0x202;          /* rflags (IF=1, popped by popfq) */
-        frame[7] = (uint64_t)fn;   /* return address (popped by ret) */
+        frame[6] = (uint64_t)fn;   /* return address (popped by ret) */
         sp = frame;
     } else {
         /*
-         * FIXED (v4.3.7): BUG-1A — Fork child: 23 slots = 8 context_switch
+         * FIXED (v4.3.9): BOOT-08 — Fork child: 22 slots = 7 context_switch
          * + 2 user_rsp/rip + 13 syscall trapframe.
          *
          * Layout at RSP (lowest → highest address):
-         *   [0..7]   context_switch frame (r15..ret_addr) — popped by context_switch
-         *   [8..9]   user_rsp, user_rip — skipped by add $16, %rsp
-         *   [10..22] syscall regs (r15..rax) — popped by syscall_return_point
-         *
-         * context_switch pops in order: r15, r14, r13, r12, rbx, rbp, rflags, ret.
-         * syscall_return_point pops in order: r15, r14, r13, r12, r11, r10,
-         *   r9, r8, rsi, rdi, rdx, rcx, rax.
+         *   [0..6]   context_switch frame (r15..ret_addr) — 7 slots
+         *   [7..8]   user_rsp, user_rip — skipped by add $16, %rsp
+         *   [9..21]  syscall regs (r15..rax) — 13 slots
          */
-        uint64_t *frame_start = sp - 23;
-        for (int i = 0; i < 23; i++) frame_start[i] = 0;
+        uint64_t *frame_start = sp - 22;
+        for (int i = 0; i < 22; i++) frame_start[i] = 0;
 
-        /* --- context_switch frame at [0..7] --- */
+        /* --- context_switch frame at [0..6] --- */
         /* [0]=r15, [1]=r14, [2]=r13, [3]=r12, [4]=rbx, [5]=rbp — already zeroed */
-        frame_start[6] = 0x202;  /* rflags (IF=1) */
-        frame_start[7] = (uint64_t)(uintptr_t)&syscall_return_point;  /* ret addr */
+        frame_start[6] = (uint64_t)(uintptr_t)&syscall_return_point;  /* ret addr */
 
-        /* --- user RSP/RIP at [8..9] (skipped by add $16, %rsp) --- */
-        frame_start[8] = 0;          /* user RSP (will be set by fork) */
-        frame_start[9] = 0x400000;   /* user RIP = default entry */
+        /* --- user RSP/RIP at [7..8] (skipped by add $16, %rsp) --- */
+        frame_start[7] = 0;          /* user RSP (will be set by fork) */
+        frame_start[8] = 0x400000;   /* user RIP = default entry */
 
-        /* --- syscall regs at [10..22] --- */
-        /* [10]=r15, [11]=r14, [12]=r13, [13]=r12 — already zeroed */
-        frame_start[14] = 0x202;     /* R11 = user RFLAGS (IF=1) */
-        /* [15]=r10, [16]=r9, [17]=r8, [18]=rsi, [19]=rdi, [20]=rdx — already zeroed */
-        frame_start[21] = 0x400000;  /* RCX = user RIP */
-        /* [22]=rax = 0 (return value, already zeroed) */
+        /* --- syscall regs at [9..21] --- */
+        /* [9]=r15, [10]=r14, [11]=r13, [12]=r12 — already zeroed */
+        frame_start[13] = 0x202;     /* R11 = user RFLAGS (IF=1) */
+        /* [14]=r10, [15]=r9, [16]=r8, [17]=rsi, [18]=rdi, [19]=rdx — already zeroed */
+        frame_start[20] = 0x400000;  /* RCX = user RIP */
+        /* [21]=rax = 0 (return value, already zeroed) */
 
         sp = frame_start;
     }

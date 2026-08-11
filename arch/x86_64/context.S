@@ -8,8 +8,11 @@
  * new_rsp: new RSP value to load
  */
 context_switch:
-    /* Save RFLAGS to preserve interrupt flag state */
-    pushfq
+    /* FIXED (v4.3.9): BOOT-08 — Remove pushfq/popfq from context_switch.
+     * Rely on the caller's interrupt state. The task frame already has
+     * rflags at the correct position, pushed by the caller or set at
+     * task creation time. pushfq/popfq would corrupt the interrupt flag
+     * state if the caller had interrupts disabled. */
 
     /* Save registers callee-saved (rbx, rbp, r12-r15) */
     push %rbp
@@ -32,9 +35,6 @@ context_switch:
     pop %r12
     pop %rbx
     pop %rbp
-
-    /* Restore RFLAGS from new context's saved value */
-    popfq
 
     /* Return to new context (ret will pop RIP from new stack) */
     ret

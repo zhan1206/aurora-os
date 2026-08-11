@@ -136,6 +136,65 @@ static void task_fn2(void) {
 }
 
 /* ================================================================
+ * Bootstrap task — runs post-init code in a proper task context
+ *
+ * FIXED (v4.3.9): BOOT-06 — Previously kernel_main() called yield()
+ * (which calls schedule()) directly from the idle task context.
+ * The idle task should not call schedule() because it IS the idle
+ * task.  Now the post-init work runs in a dedicated bootstrap task,
+ * and kernel_main() enters a pure idle loop after creating it.
+ * ================================================================ */
+static void bootstrap_task(void) {
+    /* === Phase 4: Self-test & Launch === */
+    kernel_selftest();
+
+    /* GUI (v4.2.6) — Create demo windows */
+    {
+        struct drm_window *shell_win = drm_window_create(50, 50, 400, 300, "Shell");
+        struct drm_window *welcome_win = drm_window_create(200, 150, 350, 200, "Welcome");
+
+        if (welcome_win) {
+            void *fb = drm_window_get_fb(welcome_win);
+            if (fb) {
+                drm_fill_rect(fb, welcome_win->width * 4, 0, 0,
+                              welcome_win->width, welcome_win->height, 0x003E2E2E);
+                drm_fill_rect(fb, welcome_win->width * 4, 20, 30,
+                              welcome_win->width - 40, 40, 0x002E3E5E);
+                drm_fill_rect(fb, welcome_win->width * 4, 20, 90,
+                              welcome_win->width - 40, 80, 0x003E2E4E);
+            }
+            drm_window_mark_dirty(welcome_win);
+        }
+
+        if (shell_win) {
+            void *fb = drm_window_get_fb(shell_win);
+            if (fb) {
+                drm_fill_rect(fb, shell_win->width * 4, 0, 0,
+                              shell_win->width, shell_win->height, 0x002E2E3E);
+                drm_fill_rect(fb, shell_win->width * 4, 10, 10,
+                              shell_win->width - 20, 20, 0x003E3E5E);
+                drm_fill_rect(fb, shell_win->width * 4, 10, 40,
+                              shell_win->width - 20, shell_win->height - 50, 0x002E3E3E);
+            }
+            drm_window_mark_dirty(shell_win);
+        }
+
+        if (welcome_win) drm_window_raise(welcome_win);
+
+        drm_compositor_render();
+        drm_compositor_swap();
+    }
+
+    /* Demo tasks */
+    create_task(task_fn1);
+    create_task(task_fn2);
+    create_task(shell_main);
+
+    /* Bootstrap task done — exit so the idle task takes over */
+    do_exit_current(0);
+}
+
+/* ================================================================
  * kernel_main — Boot sequence with visual status reporting
  *
  * @magic:    Multiboot magic (0x2BADB002 for MB1, 0x36d76289 for MB2)
@@ -298,7 +357,21 @@ void kernel_main(uint32_t magic, void *mb_info) {
 
     printk_console_ready();
 
-    /* === Phase 3: Kernel Subsystems === */
+    /* === Phase 3: Kernel Subsystems ===
+     *
+     * FIXED (v4.3.9): BOOT-09 — IDT must be initialized before any STI.
+     * The boot sequence is:
+     *   1. scheduler_init() — no STI
+     *   2. syscall_init()   — no STI
+     *   3. irq_init()       — sets up IDT gates, load_idt(), PIC remap,
+     *                         then STI at the end.  This is the FIRST
+     *                         STI in the kernel boot sequence.
+     *   4. smp_init()       — after IDT is ready
+     *   5. pit_init()       — after IDT is ready
+     *
+     * All STI instructions in sched.c (sti;hlt paths) are only reached
+     * after irq_init() has enabled interrupts.  No STI exists in the
+     * boot entry (entry.S) or early init code. */
     printk("scheduler_init...\n");
     scheduler_init();
     printk("scheduler_init done\n");
@@ -435,55 +508,18 @@ void kernel_main(uint32_t magic, void *mb_info) {
     console_draw_hr(SEP_LINE);
     console_putc('\n');
 
-    /* === Phase 4: Self-test & Launch === */
-    kernel_selftest();
+    /* FIXED (v4.3.9): BOOT-06 — Create a bootstrap task instead of
+     * calling schedule() directly from the idle task context.
+     * The bootstrap task runs selftest, creates GUI windows, and
+     * launches demo tasks.  kernel_main() enters the idle loop. */
+    create_task(bootstrap_task);
 
-    /* GUI (v4.2.6) — Create demo windows */
-    {
-        struct drm_window *shell_win = drm_window_create(50, 50, 400, 300, "Shell");
-        struct drm_window *welcome_win = drm_window_create(200, 150, 350, 200, "Welcome");
-
-        if (welcome_win) {
-            /* Draw welcome message on the Welcome window */
-            void *fb = drm_window_get_fb(welcome_win);
-            if (fb) {
-                drm_fill_rect(fb, welcome_win->width * 4, 0, 0,
-                              welcome_win->width, welcome_win->height, 0x003E2E2E);
-                /* We draw text using screen-level draw; for now place a colored rect */
-                drm_fill_rect(fb, welcome_win->width * 4, 20, 30,
-                              welcome_win->width - 40, 40, 0x002E3E5E);
-                drm_fill_rect(fb, welcome_win->width * 4, 20, 90,
-                              welcome_win->width - 40, 80, 0x003E2E4E);
-            }
-            drm_window_mark_dirty(welcome_win);
-        }
-
-        if (shell_win) {
-            void *fb = drm_window_get_fb(shell_win);
-            if (fb) {
-                drm_fill_rect(fb, shell_win->width * 4, 0, 0,
-                              shell_win->width, shell_win->height, 0x002E2E3E);
-                drm_fill_rect(fb, shell_win->width * 4, 10, 10,
-                              shell_win->width - 20, 20, 0x003E3E5E);
-                drm_fill_rect(fb, shell_win->width * 4, 10, 40,
-                              shell_win->width - 20, shell_win->height - 50, 0x002E3E3E);
-            }
-            drm_window_mark_dirty(shell_win);
-        }
-
-        /* Raise Welcome to top */
-        if (welcome_win) drm_window_raise(welcome_win);
-
-        /* Render and present the composited frame */
-        drm_compositor_render();
-        drm_compositor_swap();
+    /* FIXED (v4.3.9): BOOT-06 — Idle loop: call schedule() to yield to
+     * runnable tasks, then HLT with interrupts enabled.  When the timer
+     * interrupt fires, schedule_tick() sets need_resched, and the
+     * interrupt return path calls schedule() via check_resched(). */
+    while (1) {
+        schedule();
+        asm volatile ("sti; hlt" ::: "memory");
     }
-
-    /* Demo tasks */
-    create_task(task_fn1);
-    create_task(task_fn2);
-    create_task(shell_main);
-
-    /* Scheduling loop */
-    while (1) yield();
 }

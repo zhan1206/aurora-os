@@ -75,6 +75,7 @@ struct unix_sock *unix_socket_create(int type) {
     sk->read_open  = 1;
     sk->write_open = 1;
     sk->refcount   = 1;  /* FIXED (v4.3.3): UNIX-001 — atomic refcount */
+    sk->magic      = UNIX_SOCK_MAGIC;  /* FIXED (v4.3.9): BOOT-03 — type confusion guard */
     spin_init(&sk->lock);
 
     if (type == SOCK_STREAM) {

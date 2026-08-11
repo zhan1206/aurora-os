@@ -109,7 +109,14 @@ struct unix_sock {
     int              read_open;        /* 1 = read side still open */
     int              write_open;       /* 1 = write side still open */
     int              refcount;         /* FIXED (v4.3.3): UNIX-001 — atomic refcount */
+
+    /* FIXED (v4.3.9): BOOT-03 — Magic value to prevent type confusion.
+     * fd_to_unix_sock() validates this magic before casting an fd entry
+     * to struct unix_sock*, preventing arbitrary pointer dereference. */
+    uint32_t         magic;
 };
+
+#define UNIX_SOCK_MAGIC  0x554E4958  /* "UNIX" */
 
 /* ================================================================
  * Public API                                                   /* AF_UNIX (v4.2.6) */
