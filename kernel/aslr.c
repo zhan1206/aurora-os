@@ -19,6 +19,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* FIXED (v4.4.2): BUILD-06 — kernel_cr3 used in kaslr_apply_kernel_slide */
+extern uint64_t kernel_cr3;
+
 /* ================================================================
  * ChaCha20 CSPRNG
  * ================================================================ */

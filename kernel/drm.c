@@ -694,7 +694,7 @@ void drm_compositor_init(void) {
     size_t fb_size = (size_t)dev->gop_pitch * dev->gop_height;
     g_compositor.screen_fb = kmalloc(fb_size);
     if (!g_compositor.screen_fb) {
-        log_printf(LOG_LEVEL_ERROR, "drm: failed to allocate compositor back buffer\n");
+        log_printf(LOG_LEVEL_ERR, "drm: failed to allocate compositor back buffer\n");  /* FIXED (v4.4.2): BUILD-07 — LOG_LEVEL_ERROR → LOG_LEVEL_ERR */
         return;
     }
     memset(g_compositor.screen_fb, 0, fb_size);

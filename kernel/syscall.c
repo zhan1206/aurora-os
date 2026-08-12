@@ -1003,6 +1003,22 @@ static long sys_stat(const char *path, struct kstat_ext *statbuf) {
     return 0;
 }
 
+/* FIXED (v4.4.2): BUILD-11 — UDP_SOCKET_MAGIC moved before first use in sys_socket */
+
+/*
+ * FIXED (v4.2.8): BUG-UDP-SENTINEL — UDP socket sentinel.
+ * Previously 0x1 was used, which conflicted with capability tag checks
+ * (entry == 0x1 is a special case in the capability system).
+ * 0x55445053 = "UDPS" in ASCII, a unique magic value.
+ * The port is encoded in bits 16-31: UDP_SOCKET_MAGIC | (port << 16).
+ */
+#define UDP_SOCKET_MAGIC        0x55445053
+#define UDP_SOCKET_PORT_MASK    0xFFFF0000
+#define UDP_SOCKET_GET_PORT(v)  ((uint16_t)(((v) >> 16) & 0xFFFF))
+#define UDP_SOCKET_MAKE(port)   (UDP_SOCKET_MAGIC | ((uintptr_t)(port) << 16))
+#define UDP_SOCKET_IS_UDP(v)    (((v) & 0xFFFFFFFF) == UDP_SOCKET_MAGIC || \
+                                 ((v) & ~UDP_SOCKET_PORT_MASK) == UDP_SOCKET_MAGIC)
+
 /* ================================================================
  * SYS_SOCKET — Create a network socket
  * ================================================================ */
@@ -1043,20 +1059,6 @@ static long sys_socket(int domain, int type, int protocol) {
 static inline uint16_t sys_ntohs(uint16_t n) {
     return ((n & 0xFF) << 8) | ((n & 0xFF00) >> 8);
 }
-
-/*
- * FIXED (v4.2.8): BUG-UDP-SENTINEL — UDP socket sentinel.
- * Previously 0x1 was used, which conflicted with capability tag checks
- * (entry == 0x1 is a special case in the capability system).
- * 0x55445053 = "UDPS" in ASCII, a unique magic value.
- * The port is encoded in bits 16-31: UDP_SOCKET_MAGIC | (port << 16).
- */
-#define UDP_SOCKET_MAGIC        0x55445053
-#define UDP_SOCKET_PORT_MASK    0xFFFF0000
-#define UDP_SOCKET_GET_PORT(v)  ((uint16_t)(((v) >> 16) & 0xFFFF))
-#define UDP_SOCKET_MAKE(port)   (UDP_SOCKET_MAGIC | ((uintptr_t)(port) << 16))
-#define UDP_SOCKET_IS_UDP(v)    (((v) & 0xFFFFFFFF) == UDP_SOCKET_MAGIC || \
-                                 ((v) & ~UDP_SOCKET_PORT_MASK) == UDP_SOCKET_MAGIC)
 
 /* ================================================================
  * SYS_BIND — Bind a socket to an address

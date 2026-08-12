@@ -65,6 +65,14 @@ jobs:
           fi
           echo "No nested comments found."
 
+      # FIXED (v4.4.2): CI-011 — Run all QA scripts
+      - name: Run QA scripts
+        run: |
+          bash scripts/check_nested_comments.sh
+          bash scripts/check_header_includes.sh
+          bash scripts/check_static_vs_header.sh
+          bash scripts/audit_changelog.sh
+
   # ────────────────────────────────────────────────────────────────────
   #  Lint — Static code analysis (runs after checkstyle)
   # ────────────────────────────────────────────────────────────────────

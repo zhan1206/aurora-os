@@ -5,6 +5,7 @@
 #define SYSCALL_H
 
 #include <stdint.h>
+#include <stddef.h>  /* FIXED (v4.4.2): BUILD-02 — for size_t */
 
 /* System call numbers (matching Linux x86_64 ABI where applicable) */
 enum {
@@ -246,7 +247,7 @@ void syscall_init(void);
 int sys_pipe(int *fds);
 
 /* System call implementations (from syscall.c) */
-long sys_fork(void);
+long sys_fork(int flags);  /* FIXED (v4.4.2): BUILD-10 — signature matches implementation */
 
 /* FIXED (v4.2.3): New POSIX syscall implementations */
 long sys_sigprocmask(int how, const uint64_t *set, uint64_t *oldset);

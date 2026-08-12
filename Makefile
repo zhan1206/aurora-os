@@ -64,7 +64,8 @@ BUILD_TYPE ?= release
 # Remove this flag for development builds where module signing is not required.
 # FIXED (v4.4.0): BUILD-08 — -Werror=comment to catch nested comments
 # FIXED (v4.4.1): BUILD-09 — Remove build path for reproducibility
-CFLAGS_BASE := -ffreestanding -Wall -Wextra -Werror=comment -fno-pic -fstack-protector-strong -mno-sse \
+# FIXED (v4.4.2): BUILD-12 — -Werror=enum-conversion to catch enum/int mixups
+CFLAGS_BASE := -ffreestanding -Wall -Wextra -Werror=comment -Werror=enum-conversion -fno-pic -fstack-protector-strong -mno-sse \
                -fdebug-prefix-map=$(CURDIR)=. \
                -mgeneral-regs-only -mno-red-zone -Ikernel/include -std=gnu17 \
                -DBUILD_DATE="\"$(BUILD_DATE)\"" -DGIT_HASH="\"$(GIT_HASH)\"" \

@@ -13,6 +13,7 @@
 #define ACPI_H
 
 #include <stdint.h>
+#include <stddef.h>  /* FIXED (v4.4.2): BUILD-02 — for size_t */
 
 /* ================================================================
  * MADT entry types

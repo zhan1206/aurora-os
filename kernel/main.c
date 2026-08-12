@@ -6,6 +6,7 @@
  */
 #include "include/print.h"
 #include "include/kstdio.h"
+#include "vfs.h"  /* FIXED (v4.4.2): BUILD-04 — for vfs_mount */
 #include "include/theme.h"
 #include "include/version.h"
 #include "include/net.h"

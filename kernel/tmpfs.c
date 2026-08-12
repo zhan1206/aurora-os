@@ -26,6 +26,7 @@
  * compatibility with the kernel page cache.
  * ================================================================ */
 struct tmpfs_inode {
+    struct inode inode;  /* FIXED (v4.4.2): BUILD-11 — add inode member */
     uint32_t ino;
     uint32_t mode;
     uint32_t uid, gid;

@@ -5,7 +5,7 @@
  * management, and device tracking.  Works as the protocol layer above
  * the xHCI host controller driver.
  *
- * /* FIXED (v4.4.0): USB (v4.2.6) */
+ * FIXED (v4.4.0): USB (v4.2.6)
  */
 #ifndef USB_H
 #define USB_H

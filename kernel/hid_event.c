@@ -10,18 +10,11 @@
 #include "mem.h"
 #include "include/log.h"
 #include "include/hid_event.h"
+#include <string.h>  /* FIXED (v4.4.2): BUILD-05 — for memcpy */
 
 #define HID_EVENT_QUEUE_SIZE 256
 
-struct hid_event {
-    hid_event_type_t type;
-    uint32_t keycode;    /* for keyboard */
-    int mouse_x, mouse_y; /* for mouse */
-    int mouse_button;     /* 0=left, 1=right, 2=middle */
-    int mouse_dz;         /* scroll delta */
-    uint64_t timestamp;
-};
-
+/* FIXED (v4.4.2): BUILD-08 — struct hid_event defined in hid_event.h, duplicate removed */
 static struct hid_event g_event_queue[HID_EVENT_QUEUE_SIZE];
 static int g_event_head = 0;
 static int g_event_tail = 0;

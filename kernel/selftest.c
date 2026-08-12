@@ -18,6 +18,7 @@
 #include "vfs.h"
 #include "fs.h"
 #include "syscall.h"
+#include "include/syscall_numbers.h"  /* FIXED (v4.4.2): BUILD-10 — syscall numbers */
 #include "signal.h"
 #include "rtc.h"
 #include "include/log.h"

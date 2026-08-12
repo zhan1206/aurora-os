@@ -11,6 +11,7 @@
 #include "module.h"
 #include "elf.h"
 #include "vfs.h"
+#include "include/errno.h"  /* FIXED (v4.4.2): BUILD-03 — for EBUSY */
 #include "mem.h"
 #include "include/log.h"
 #include "include/kstdio.h"
