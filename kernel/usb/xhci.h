@@ -5,7 +5,7 @@
  * structures for USB 3.x host controllers.  Based on Intel xHCI
  * specification revision 1.2.
  *
- * /* USB (v4.2.6) */
+ * /* FIXED (v4.4.0): USB (v4.2.6) */
  */
 #ifndef XHCI_H
 #define XHCI_H

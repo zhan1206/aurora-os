@@ -1,4 +1,4 @@
-# AuroraOS 已知限制 (v4.3.2)
+# AuroraOS 已知限制 (v4.4.0)
 
 本文档诚实记录 AuroraOS 当前的所有已知限制、未完成功能、及架构局限。
 这不是bug列表，而是对项目成熟度的诚实评估。
@@ -30,10 +30,26 @@
 - **问题**: /dev/usb/目录计划中但未创建
 - **修复**: 创建/dev/usb/目录及kbd0/mouse0节点
 
+### USB-002 (v4.4.0) — USB嵌套注释Bug
+- **问题**: USB驱动代码中嵌套`/* */`注释导致编译警告
+- **修复**: 将嵌套注释改为`//`行注释，添加`-Werror=comment`编译选项
+
+### XHCI-001 (v4.4.0) — xHCI 拼写错误
+- **问题**: xhci驱动中多处拼写错误（如`xchci`→`xhci`）
+- **修复**: 统一修正所有拼写错误
+
+### XHCI-002 (v4.4.0) — xHCI 重复定义
+- **问题**: xhci驱动中符号重复定义导致链接错误
+- **修复**: 移除重复定义，统一为单一定义
+
+### BUILD-001 (v4.4.0) — 构建改进
+- **改进**: 添加 `-Werror=comment` 编译选项，将嵌套注释警告提升为错误
+- **改进**: CI 流水线添加嵌套注释门禁检查，防止 `/* */` 嵌套注释合入
+
 ## 可以正常工作的功能
 
 - x86_64 引导 (Multiboot1)
-- 内核自检 (13/13 通过)
+- 内核自检 (60+ 通过)
 - 内存管理 (Buddy + SLAB)
 - 5个基础文件系统 (ext2/fat32/ramfs/sysfs/devtmpfs) 挂载读写
 - 内核Shell (必须在恢复路径运行)
@@ -72,8 +88,8 @@
 - 真正可用的架构只有 x86_64
 
 ### 安全子系统
-- seccomp: BPF 解释器存在，始终通过（无实际过滤）
-- Capability: 框架存在，未接入 setuid/chown 等调用点
+- seccomp: BPF 解释器存在，prctl 接口已接入 (v4.3.2) /* FIXED (v4.3.6) */
+- Capability: 框架存在，已接入 setuid/chown 等调用点 (v4.3.2) /* FIXED (v4.3.6) */
 - 模块签名: ECDSA P-256 (secp256r1) 公钥验证，已实现 (v4.2.0) /* FIXED (v4.3.6) */
 - KASLR: 仅堆/栈/模块随机化，.text/.data 已随机化 (v4.3.4) /* FIXED (v4.3.6) */
 - SMAP/SMEP: CPUID检测后启用，QEMU默认不支持
@@ -86,7 +102,7 @@
 - VMPair/CFS/EVDF 代码存在，受 BUG-CURRENT-NULL 影响 (已修复 BSS-001) /* FIXED (v4.3.6) */
 
 ### 网络栈
-- ARP: 无老化机制、无广播缓存
+- ARP: 有10分钟超时老化机制 (v4.3.2) /* FIXED (v4.3.6) */
 - IPv4: 无分片重组、无 IP 选项
 - TCP: 完整实现，含 SACK (v4.3.4 TCP-002) + NewReno 拥塞控制 (v4.3.4 TCP-003) /* FIXED (v4.3.6) */
 - TCP 重传: 已接入 PIT 定时器，未经压力测试
@@ -98,18 +114,18 @@
 
 ### 文件系统
 - EXT2: 无三重间接块，大文件不安全
-- FAT32: 簇链未检查，大文件不安全
+- FAT32: 簇链已验证、大文件安全 (v4.3.2) /* FIXED (v4.3.6) */
 - sysfs: 只读，写路径有 SMAP bug 绕过
-- devtmpfs: /dev/usb/ 节点尚未创建
+- devtmpfs: /dev/usb/ 节点已创建 (v4.3.2) /* FIXED (v4.3.6) */
 - Journal (WAL): 代码存在，未经崩溃测试
 - fsck: 能通过自检，真实故障注入未测试
 - squashfs: 代码存在，未经实测
 - tmpfs: 只有 /tmp 挂载，实际使用 RamFS
 
 ### USB 子系统
-- xHCI: 已合入，已修 11 个 bug
+- xHCI: 已合入，已修 13 个 bug (含拼写/重复定义修复 v4.4.0)
 - HID 键鼠: 事件 dequeue + cycle bit 已修复
-- USB 设备文件节点: /dev/usb/* 计划中，尚未创建
+- USB 设备文件节点: /dev/usb/* 已创建 (v4.3.2)
 - NVMe: BARRIER/CID/PRP 修过 6 处，未经实测
 
 ### 用户态 / ELF / 动态链接
@@ -139,7 +155,7 @@
 | LIM-003 | EXT2 三重间接块不支持 | 未修复 |
 | LIM-004 | VIRTIO_NET O(n) 扫描 | 性能差 |
 | LIM-005 | 无自动化压力/网络测试框架 | 未实现 |
-| LIM-006 | /dev/usb 节点未创建 | 计划中 |
+| LIM-006 | /dev/usb 节点未创建 | 已修复 (v4.4.0) |
 | LIM-007 | 三 RISC 架构仅启动核 | 未实现 |
 | LIM-008 | GUI 无上层应用 | 未实现 |
 

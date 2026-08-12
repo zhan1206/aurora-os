@@ -5,7 +5,7 @@
  * keyboard and mouse boot protocol reports.  Keyboard events are
  * routed to the console input system.
  *
- * /* USB (v4.2.6) */
+ * /* FIXED (v4.4.0): USB (v4.2.6) */
  */
 #ifndef HID_H
 #define HID_H

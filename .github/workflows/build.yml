@@ -56,6 +56,15 @@ jobs:
           chmod +x .github/workflows/checkstyle.sh
           .github/workflows/checkstyle.sh
 
+      # FIXED (v4.4.0): CI-004 — nested comment gate
+      - name: Check for nested comments
+        run: |
+          if grep -rnE '^\s*\*.*/\*.*\*/' kernel/ --include='*.c' --include='*.h'; then
+            echo "ERROR: Nested comments found in kernel source!"
+            exit 1
+          fi
+          echo "No nested comments found."
+
   # ────────────────────────────────────────────────────────────────────
   #  Lint — Static code analysis (runs after checkstyle)
   # ────────────────────────────────────────────────────────────────────
@@ -261,6 +270,18 @@ jobs:
           echo "kernel_size=${KERNEL_SIZE}" >> "$GITHUB_OUTPUT"
           echo "iso_size=${ISO_SIZE}" >> "$GITHUB_OUTPUT"
           echo "::endgroup::"
+
+      # ── Zero Warnings Build ──────────────────────────────────────
+      # FIXED (v4.4.0): CI-005 — build with -Werror to ensure zero warnings
+      - name: Build with zero warnings
+        run: |
+          make clean
+          make CFLAGS="-Werror -Wall -Wextra" 2>&1 | tee build.log
+          if grep -i "warning" build.log; then
+            echo "ERROR: Build has warnings!"
+            exit 1
+          fi
+          echo "Build: zero warnings."
 
       # ── Static Analysis (clang-tidy) ────────────────────────────
       # FIXED (v4.3.6): CI-001 — clang-tidy static analysis for debug builds

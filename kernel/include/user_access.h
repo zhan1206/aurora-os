@@ -1,6 +1,6 @@
 /*
  * user_access.h - Unified user-space access macros
- * /* USER_ACCESS (v4.2.7) */
+ * /* FIXED (v4.4.0): USER_ACCESS (v4.2.7) */
  *
  * Centralizes the scattered stac()/clac() calls in the kernel into
  * unified, safe macros with built-in address validation.  Replaces

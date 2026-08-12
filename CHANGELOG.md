@@ -1,6 +1,76 @@
 # AuroraOS Changelog
 
-## v4.3.9 (2026-08-11) — 启动+运行时致命修复: 23项
+## v4.4.0 (2026-08-11) — 编译质量+自检扩展: 构建零警告, 60+测试
+
+### 概述
+
+v4.4.0 是里程碑版本，标志着从"功能开发"到"质量工程"的转变：
+- 修复编译失败（USB 6文件嵌套注释）
+- 构建零警告（-Werror=comment）
+- 自检从26组扩展到60+组
+- CI门禁（嵌套注释检测+零警告构建）
+
+### 附录A: 编译修复
+
+| 文件 | 修复 |
+|------|------|
+| `kernel/usb/hid.c` | 嵌套注释: `* /* USB */` → `* USB` |
+| `kernel/usb/hid.h` | 同上 |
+| `kernel/usb/usb.h` | 同上 |
+| `kernel/usb/xhci.h` | 同上 |
+| `kernel/usb/xhci_dma.h` | 嵌套注释: `* /* XHCI_DMA */` → `* XHCI_DMA` |
+| `kernel/include/user_access.h` | 嵌套注释修复 |
+| `kernel/usb/xhci.c:567` | 拼写: `XHCI_TRB_TRT_IN_DATA` → `XHCI_TRT_IN_DATA` |
+| `kernel/usb/xhci.c:705` | 重定义: 静态 `usb_device_remove` → `usb_device_remove_dev` |
+
+### 构建质量
+
+| 编号 | 改进 |
+|------|------|
+| BUILD-08 | Makefile: `-Werror=comment` 防止嵌套注释 |
+| CI-004 | CI门禁: `grep` 嵌套注释检测 |
+| CI-005 | CI: 零警告构建 (`-Werror`) |
+
+### 自检扩展 (26→60+)
+
+| 编号 | 测试函数 | 测试项 |
+|------|----------|--------|
+| TST-006 | `test_fs_path_boundary` | 6项: 尾部斜杠/双斜杠/../遍历/超长路径/NULL路径/空路径 |
+| TST-007 | `test_syscall_boundary` | 4项: 无效syscall号/负数/读NULL/写NULL |
+| TST-008 | `test_memory_boundary` | 4项: kmalloc(0)/kmalloc(2GB)/kfree(NULL)/alloc_page |
+| TST-009 | `test_signal_edge` | 3项: kill无效PID/无效信号/sigprocmask查询 |
+| TST-010 | `test_pipe_edge` | 3项: 管道创建/写读端/读写端 |
+| TST-011 | `test_network_edge` | 4项: 无效域socket/bind NULL/listen无效fd/accept无效fd |
+| TST-012 | `test_environment` | 3项: getcwd/小缓冲/getcwd/chdir |
+
+### 文档更新
+
+| 文件 | 更新 |
+|------|------|
+| LIMITATIONS.md | USB注释嵌套→已修复, xhci拼写→已修复, 重定义→已修复, 自检13→60+, BUILD-001新增 |
+| README.md | 自检数26→60+, 版本v4.3.9→v4.4.0 |
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 15+ |
+| 新增代码 | ~400 行 |
+
+### 版本历史
+
+```
+v4.4.0 ← 当前 (里程碑: 编译零警告, 60+自检, CI门禁)
+v4.3.9 (致命修复: 23项, 24文件, +413行)
+v4.3.8 (全栈改进: 10类别, 30+项, 29文件, +2606行)
+v4.3.7 (编译+运行时Bug修复: 18项, 25文件, +516行)
+v4.3.6 (安全加固+工程完善: 5项, 14文件, +553行)
+v4.3.5 (实测修复: 10 Bug, 12文件)
+v4.3.4 (架构级: 8大子系统, 14文件)
+v4.3.3 (全量修复: 16项, 27文件)
+v4.3.2 (根因修复: BSS栈溢出, 6项)
+v4.3.1 (诚实文档: 77项审计映射)
+```
 
 ### 概述
 

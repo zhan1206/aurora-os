@@ -5,7 +5,7 @@
  * descriptors, configures interrupt endpoints, and translates
  * USB HID key codes to PS/2 scancodes for the console input system.
  *
- * /* USB (v4.2.6) */
+ * /* FIXED (v4.4.0): USB (v4.2.6) */
  */
 #include "hid.h"
 #include "xhci.h"

@@ -564,7 +564,7 @@ int xhci_get_descriptor(struct xhci_controller *hc, uint8_t slot_id,
     setup_trb.parameter = sp[0];
     setup_trb.status = (uint32_t)(8 & 0x1FFFF);  /* TRB Transfer Length = 8 */
     setup_trb.control = (XHCI_TRB_SETUP_STAGE << XHCI_TRB_TYPE_SHIFT)
-                      | XHCI_TRB_TRT_IN_DATA;
+                      | XHCI_TRT_IN_DATA;  /* FIXED (v4.4.0): typo fix */
 
     /* Build Data Stage TRB */
     struct xhci_trb data_trb;
@@ -702,7 +702,8 @@ int xhci_set_configuration(struct xhci_controller *hc, uint8_t slot_id,
  * Remove a USB device from the global device list and free its
  * associated resources (device context, endpoint rings, slot).
  * ================================================================ */
-static void usb_device_remove(struct usb_device *dev) {
+/* FIXED (v4.4.0): renamed from usb_device_remove to avoid duplicate definition */
+static void usb_device_remove_dev(struct usb_device *dev) {
     if (!dev) return;
 
     /* Remove from the global linked list */
@@ -895,7 +896,7 @@ static void xhci_handle_port_status_change(struct xhci_controller *hc, uint32_t 
                 log_printf(LOG_LEVEL_INFO,
                            "xHCI: removing device vid=%04x pid=%04x from port %d\n",
                            dev->dev_desc.idVendor, dev->dev_desc.idProduct, port_id);
-                usb_device_remove(dev);
+                usb_device_remove_dev(dev);
                 break;
             }
             dev = next;

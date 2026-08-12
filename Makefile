@@ -62,7 +62,8 @@ BUILD_TYPE ?= release
 
 # -DMODULE_SIGN_CHECK enforces SHA-256 signature verification on all loaded modules.
 # Remove this flag for development builds where module signing is not required.
-CFLAGS_BASE := -ffreestanding -Wall -Wextra -fno-pic -fstack-protector-strong -mno-sse \
+# FIXED (v4.4.0): BUILD-08 — -Werror=comment to catch nested comments
+CFLAGS_BASE := -ffreestanding -Wall -Wextra -Werror=comment -fno-pic -fstack-protector-strong -mno-sse \
                -mgeneral-regs-only -mno-red-zone -Ikernel/include -std=gnu17 \
                -DBUILD_DATE="\"$(BUILD_DATE)\"" -DGIT_HASH="\"$(GIT_HASH)\"" \
                -DBUILD_TYPE="\"$(BUILD_TYPE)\"" -DMODULE_SIGN_CHECK

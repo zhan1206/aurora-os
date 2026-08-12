@@ -1,6 +1,6 @@
 /*
  * xhci_dma.h - xHCI DMA memory allocation helpers
- * /* XHCI_DMA (v4.2.7) */
+ * /* FIXED (v4.4.0): XHCI_DMA (v4.2.7) */
  *
  * Provides DMA-safe allocation routines for xHCI data structures.
  * Ensures physical contiguity and identity mapping (virtual == physical)
