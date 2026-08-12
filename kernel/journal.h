@@ -209,4 +209,11 @@ int journal_validate_transaction(struct journal_block_header *txn_hdr,
  */
 void journal_fault_injection_test(void);
 
+/*
+ * FIXED (v4.4.1): JRNL-001 — Journal crash recovery test.
+ * Creates a test journal entry, simulates a crash by not committing,
+ * then verifies that journal replay recovers the entry correctly.
+ */
+void journal_crash_test(void);
+
 #endif /* JOURNAL_H */

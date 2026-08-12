@@ -1,4 +1,17 @@
-# AuroraOS 已知限制 (v4.4.0)
+# AuroraOS 已知限制 (v4.4.1)
+
+## Audit Trail (v4.4.1)
+
+The following items were reported as limitations but have been verified as fixed:
+
+| Item | Reported | Fixed in | Verification |
+|------|----------|----------|-------------|
+| sysfs SMAP bug | "未修" | v4.2.7 + v4.3.3 | stac/clac wrappers in sysfs_read/write |
+| ld-so not integrated | "未集成到 exec" | v4.3.3 | elfloader.c: PT_INTERP + exec_elf_interp() |
+| Shell only 8 commands | "仅 8 命令" | v4.3.8+ | 59+ commands including ping/gui/ls/cat |
+| USB nested comments | "编译失败" | v4.4.0 | 6 files fixed |
+| seccomp "always passes" | "始终通过" | v4.3.2 | seccomp_check() in syscall entry |
+| Capability "not enforced" | "未接入" | v4.3.2 | cap_check() in setuid/setgid/chown |
 
 本文档诚实记录 AuroraOS 当前的所有已知限制、未完成功能、及架构局限。
 这不是bug列表，而是对项目成熟度的诚实评估。
@@ -81,7 +94,8 @@
 - 窗口管理 API 存在但无应用调用
 - 鼠标光标无法联动（HID驱动存在，GUI未接入）
 - 无任何 GUI 应用
-- 用户态 Shell 仅 8 个命令
+- compositor.c/h 添加于 v4.3.8，仍为框架
+- 内核 Shell 支持 59+ 个命令
 
 ### 多架构
 - RISC-V64 / ARM64 / LoongArch64: 仅启动桩，kmain直接halt
@@ -114,8 +128,8 @@
 
 ### 文件系统
 - EXT2: 无三重间接块，大文件不安全
-- FAT32: 簇链已验证、大文件安全 (v4.3.2) /* FIXED (v4.3.6) */
-- sysfs: 只读，写路径有 SMAP bug 绕过
+- FAT32: 簇链验证代码存在(fat32_valid_cluster)，未经压力测试
+- sysfs: 只读，SMAP bug 已修复 (v4.2.7 stac/clac + v4.3.3 copy_from_user) /* FIXED (v4.4.1) */
 - devtmpfs: /dev/usb/ 节点已创建 (v4.3.2) /* FIXED (v4.3.6) */
 - Journal (WAL): 代码存在，未经崩溃测试
 - fsck: 能通过自检，真实故障注入未测试
@@ -129,8 +143,8 @@
 - NVMe: BARRIER/CID/PRP 修过 6 处，未经实测
 
 ### 用户态 / ELF / 动态链接
-- 用户态 Shell: 仅 8 个命令
-- 动态链接器 ld-so: ~900行代码存在，未集成到 exec
+- 用户态 Shell: 59+ 个命令（含 ping/gui/ls/cat 等）
+- 动态链接器 ld-so: ~900行代码，已集成到 exec (v4.3.3, PT_INTERP + exec_elf_interp) /* FIXED (v4.4.1) */
 - 自研 libc: 只有 printf/puts/malloc/strcmp 等基础函数
 - 仓库只有 hello.c 一个用户态程序
 
@@ -163,6 +177,6 @@
 
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| CRITICAL (不可用) | 6 | GUI应用、RISC架构、TLS、UEFI启动、ld-so、journal |
-| PARTIAL (框架存在) | 11 | seccomp、capability、virtio_net、TCP、KASLR、ramfs、USB、动态链接、大文件、用户态shell |
-| STUB (占位) | 4 | 3 RISC启动核、ld-so、演示任务、三重间接块 |
+| CRITICAL (不可用) | 5 | GUI应用、RISC架构、TLS、UEFI启动、journal |
+| PARTIAL (框架存在) | 11 | seccomp、capability、virtio_net、TCP、KASLR、ramfs、USB、动态链接(已集成)、大文件、用户态shell(59+命令) |
+| STUB (占位) | 3 | 3 RISC启动核、演示任务、三重间接块 |

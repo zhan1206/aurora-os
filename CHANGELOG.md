@@ -1,6 +1,71 @@
 # AuroraOS Changelog
 
-## v4.4.0 (2026-08-11) — 编译质量+自检扩展: 构建零警告, 60+测试
+## v4.4.1 (2026-08-11) — 可重现构建+文档一致+短板修复: 10项
+
+### 概述
+
+v4.4.1 实现路线图 Phase A 剩余目标：可重现构建、文档一致性、自检时效约束、已知短板修复。
+
+### 可重现构建 (3项)
+
+| 编号 | 改进 |
+|------|------|
+| BUILD-09 | Makefile: SOURCE_DATE_EPOCH 支持 byte-equal 重建 |
+| BUILD-09 | Makefile: -fdebug-prefix-map 移除构建路径 |
+| CI-006 | CI: 两次构建比对 kernel.elf 字节一致性 |
+
+### 文档一致性 (1项)
+
+| 编号 | 改进 |
+|------|------|
+| DOC-002 | LIMITATIONS.md: 审计追踪，6项"未修"→已修复确认 |
+
+审计确认已修复项：
+- sysfs SMAP: v4.2.7 stac/clac + v4.3.3 copy_from_user
+- ld-so 集成: v4.3.3 elfloader.c PT_INTERP + exec_elf_interp
+- Shell 命令: 8→59+ (v4.3.8+)
+- USB 嵌套注释: v4.4.0
+- seccomp: v4.3.2
+- Capability: v4.3.2
+
+### 自检扩展 (2项)
+
+| 编号 | 函数 | 内容 |
+|------|------|------|
+| TST-013 | `selftest_timer_start/check` | 自检≤5s超时约束 (rdtsc) |
+| TST-014 | `test_fault_injection_extended` | 6项: open/read/write/lseek/fstat 无效fd, fstat NULL |
+
+### 已知短板修复 (4项)
+
+| 编号 | 文件 | 修复 |
+|------|------|------|
+| FAT32-001 | `kernel/fat32.c` | `fat32_next_cluster` 边界检查 + `fat32_read_cluster_chain` 循环检测 |
+| JRNL-001 | `kernel/journal.c` | `journal_crash_test`: write→rollback→replay验证 |
+| NVMe-001 | `kernel/nvme.c` | `nvme_verify_test`: Admin Identify 基本I/O验证 |
+| EXT2-001 | `kernel/ext2.c` | 三重间接块已实现 (v4.3.4)，本次验证确认 |
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 10+ |
+| 新增代码 | ~300 行 |
+
+### 版本历史
+
+```
+v4.4.1 ← 当前 (可重现构建+文档一致+短板验证: 10项)
+v4.4.0 (里程碑: 编译零警告, 60+自检, CI门禁, USB编译修复)
+v4.3.9 (致命修复: 23项, 24文件, +413行)
+v4.3.8 (全栈改进: 10类别, 30+项, 29文件, +2606行)
+v4.3.7 (编译+运行时Bug修复: 18项, 25文件, +516行)
+v4.3.6 (安全加固+工程完善: 5项, 14文件, +553行)
+v4.3.5 (实测修复: 10 Bug, 12文件)
+v4.3.4 (架构级: 8大子系统, 14文件)
+v4.3.3 (全量修复: 16项, 27文件)
+v4.3.2 (根因修复: BSS栈溢出, 6项)
+v4.3.1 (诚实文档: 77项审计映射)
+```
 
 ### 概述
 

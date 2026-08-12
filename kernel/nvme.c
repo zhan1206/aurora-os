@@ -757,3 +757,47 @@ void nvme_init(void) {
 
     log_printf(LOG_LEVEL_INFO, "nvme: %d controller(s) initialized\n", found);
 }
+
+/*
+ * FIXED (v4.4.1): NVMe-001 — NVMe basic I/O verification test.
+ * Reads controller identity data to verify the NVMe controller
+ * is functional.  Skips silently if no controller is detected.
+ */
+void nvme_verify_test(void) {
+    log_printf(LOG_LEVEL_INFO, "nvme: basic I/O verification test...\n");
+
+    if (nvme_ctrl_list == NULL) {
+        log_printf(LOG_LEVEL_INFO, "nvme: no controller detected, test skipped\n");
+        return;
+    }
+
+    /* Use the first controller to verify I/O */
+    struct nvme_controller *ctrl = nvme_ctrl_list;
+
+    /* Read identity data via the existing nvme_identify path */
+    struct nvme_identify_ctrl *id_ctrl =
+        (struct nvme_identify_ctrl *)kmalloc(sizeof(*id_ctrl));
+    if (!id_ctrl) {
+        log_printf(LOG_LEVEL_WARN, "nvme: verify test: allocation failed\n");
+        return;
+    }
+    memset(id_ctrl, 0, sizeof(*id_ctrl));
+
+    struct nvme_sqe cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADMIN_IDENTIFY;
+    cmd.nsid = 0;
+    cmd.prp1 = (uint64_t)(uintptr_t)id_ctrl;
+    cmd.cdw10 = NVME_IDENTIFY_CTRL;
+
+    struct nvme_cqe result;
+    int ret = nvme_admin_cmd(ctrl, &cmd, &result);
+    if (ret == 0 && (result.status & NVME_STATUS_SC_MASK) == NVME_STATUS_SC_SUCCESS) {
+        log_printf(LOG_LEVEL_INFO, "nvme: identity read OK, model=%.40s\n", id_ctrl->mn);
+    } else {
+        log_printf(LOG_LEVEL_WARN, "nvme: identity read failed (status=0x%04x)\n",
+                   result.status);
+    }
+
+    kfree(id_ctrl);
+}

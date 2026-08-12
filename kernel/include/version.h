@@ -12,9 +12,9 @@
 
 #define AURORAOS_MAJOR      4
 #define AURORAOS_MINOR      4
-#define AURORAOS_PATCH      0
+#define AURORAOS_PATCH      1
 
-#define AURORAOS_VERSION    "AuroraOS v4.4.0"
+#define AURORAOS_VERSION    "AuroraOS v4.4.1"
 
 /* These are set by the Makefile via -D flags */
 #ifndef BUILD_DATE
@@ -27,6 +27,19 @@
 
 #ifndef BUILD_TYPE
 #define BUILD_TYPE          "release"
+#endif
+
+/* FIXED (v4.4.1): BUILD-09 — Reproducible build via SOURCE_DATE_EPOCH */
+#ifdef BUILD_EPOCH
+  /* Deterministic build: use the provided epoch */
+  #define BUILD_DATE          __DATE__
+  #define BUILD_TIME          __TIME__
+  #define BUILD_EPOCH_VAL     BUILD_EPOCH
+#else
+  /* Normal build: use compiler date/time */
+  #define BUILD_DATE          __DATE__
+  #define BUILD_TIME          __TIME__
+  #define BUILD_EPOCH_VAL     0
 #endif
 
 /* Full version string for display */

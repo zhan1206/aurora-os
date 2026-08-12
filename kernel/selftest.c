@@ -48,6 +48,34 @@
 #define PIE_DEFAULT_BASE  0x555555554000ULL
 #endif
 
+/* FIXED (v4.4.1): TST-013 — Self-test timing constraint
+ * All self-tests must complete within 5 seconds.
+ * If they take longer, the test suite is considered failed. */
+static uint64_t g_selftest_start_ticks = 0;
+static uint64_t g_selftest_timeout_ticks = 0;
+
+static uint64_t get_ticks(void) {
+    uint32_t lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static void selftest_timer_start(void) {
+    g_selftest_start_ticks = get_ticks();
+    /* Rough timeout: assume ~2GHz TSC, 5 seconds = 10B cycles */
+    g_selftest_timeout_ticks = g_selftest_start_ticks + (uint64_t)10000000000ULL;
+}
+
+static int selftest_timer_check(void) {
+    uint64_t now = get_ticks();
+    if (now > g_selftest_timeout_ticks) {
+        log_printf(LOG_LEVEL_WARN, "selftest: TIMEOUT (>5s) at %lu ticks\n",
+                   (unsigned long)(now - g_selftest_start_ticks));
+        return 1; /* timed out */
+    }
+    return 0;
+}
+
 /* ================================================================
  * Test 1: Buddy allocator
  * ================================================================ */
@@ -1261,6 +1289,64 @@ static void test_fault_injection(void) {
     }
 }
 
+/* FIXED (v4.4.1): TST-014 — Extended failure injection
+ * Tests additional edge cases: open with O_CREAT to nonexistent dir,
+ * read/write/lseek/fstat on invalid fds, and fstat with NULL pointer. */
+static void test_fault_injection_extended(void) {
+    log_printf(LOG_LEVEL_INFO, "--- Extended Fault Injection Tests ---\n");
+
+    /* Test: open with O_CREAT but no mode */
+    int fd = sys_open("/nonexistent/test_file", O_CREAT);
+    if (fd < 0) {
+        TEST_PASS("fault: open nonexistent dir");
+    } else {
+        sys_close(fd);
+        TEST_FAIL("fault: open nonexistent dir");
+    }
+
+    /* Test: read from invalid fd */
+    char buf[16];
+    int ret = sys_read(99999, buf, sizeof(buf));
+    if (ret == -1 && current->t_errno == EBADF) {
+        TEST_PASS("fault: read invalid fd");
+    } else {
+        TEST_FAIL("fault: read invalid fd");
+    }
+
+    /* Test: write to invalid fd */
+    ret = sys_write(99999, "test", 4);
+    if (ret == -1 && current->t_errno == EBADF) {
+        TEST_PASS("fault: write invalid fd");
+    } else {
+        TEST_FAIL("fault: write invalid fd");
+    }
+
+    /* Test: lseek invalid fd */
+    ret = sys_lseek(99999, 0, SEEK_SET);
+    if (ret == -1 && current->t_errno == EBADF) {
+        TEST_PASS("fault: lseek invalid fd");
+    } else {
+        TEST_FAIL("fault: lseek invalid fd");
+    }
+
+    /* Test: fstat invalid fd */
+    struct stat st;
+    ret = sys_fstat(99999, &st);
+    if (ret == -1 && (current->t_errno == EBADF || current->t_errno == EINVAL)) {
+        TEST_PASS("fault: fstat invalid fd");
+    } else {
+        TEST_FAIL("fault: fstat invalid fd");
+    }
+
+    /* Test: fstat NULL pointer */
+    ret = sys_fstat(0, NULL);
+    if (ret == -1 && (current->t_errno == EFAULT || current->t_errno == EINVAL)) {
+        TEST_PASS("fault: fstat NULL");
+    } else {
+        TEST_FAIL("fault: fstat NULL");
+    }
+}
+
 /* FIXED (v4.3.8): TST-005 — Regression tests for previously fixed bugs.
  * Re-runs critical bug-fix verifications to ensure fixes don't regress.
  *
@@ -1715,6 +1801,9 @@ static void test_environment(void) {
 void kernel_selftest(void) {
     log_printf(LOG_LEVEL_INFO, "\n======== Kernel Self-Test ========\n");
 
+    /* FIXED (v4.4.1): TST-013 — Start the self-test timer */
+    selftest_timer_start();
+
     /*
      * FIXED (v4.3.2): BSS-001 — Check stack canary BEFORE running selftest.
      * The kernel stack is now 64KB in a separate .stack section.  If the
@@ -1748,6 +1837,9 @@ void kernel_selftest(void) {
     test_dentry_cache();
     test_signal_kill_edge();
 
+    /* FIXED (v4.4.1): TST-013 — Timeout check after first group */
+    if (selftest_timer_check()) { TEST_FAIL("selftest: timeout"); return; }
+
     /* FIXED (v4.3.1): TST-001 — Guard against BUG-CURRENT-NULL before scheduler tests.
      * If current is NULL (e.g., due to BSS corruption or early boot), the scheduler
      * tests would dereference NULL and triple-fault.  Skip all scheduler-dependent
@@ -1763,6 +1855,8 @@ void kernel_selftest(void) {
     test_concurrent_stress();
     /* FIXED (v4.3.8): TST-004 */
     test_fault_injection();
+    /* FIXED (v4.4.1): TST-014 — Extended failure injection */
+    test_fault_injection_extended();
     /* FIXED (v4.3.8): TST-005 */
     test_regression();
     /* FIXED (v4.3.8): SMP-003 */
@@ -1781,6 +1875,9 @@ void kernel_selftest(void) {
     test_network_edge();
     /* FIXED (v4.4.0): TST-012 — Environmental tests */
     test_environment();
+
+    /* FIXED (v4.4.1): TST-013 — Timeout check after scheduler-dependent tests */
+    if (selftest_timer_check()) { TEST_FAIL("selftest: timeout"); return; }
 
 skip_sched_tests:
     test_pie_loading();

@@ -63,7 +63,9 @@ BUILD_TYPE ?= release
 # -DMODULE_SIGN_CHECK enforces SHA-256 signature verification on all loaded modules.
 # Remove this flag for development builds where module signing is not required.
 # FIXED (v4.4.0): BUILD-08 — -Werror=comment to catch nested comments
+# FIXED (v4.4.1): BUILD-09 — Remove build path for reproducibility
 CFLAGS_BASE := -ffreestanding -Wall -Wextra -Werror=comment -fno-pic -fstack-protector-strong -mno-sse \
+               -fdebug-prefix-map=$(CURDIR)=. \
                -mgeneral-regs-only -mno-red-zone -Ikernel/include -std=gnu17 \
                -DBUILD_DATE="\"$(BUILD_DATE)\"" -DGIT_HASH="\"$(GIT_HASH)\"" \
                -DBUILD_TYPE="\"$(BUILD_TYPE)\"" -DMODULE_SIGN_CHECK
@@ -81,6 +83,17 @@ CFLAGS_RELEASE := -O2 -DNDEBUG
 
 # Default: release
 CFLAGS := $(CFLAGS_BASE) $(CFLAGS_RELEASE)
+
+# FIXED (v4.4.1): BUILD-09 — Reproducible build with SOURCE_DATE_EPOCH
+# Set SOURCE_DATE_EPOCH for deterministic builds (reproducible.org)
+# Usage: SOURCE_DATE_EPOCH=0 make
+ifdef SOURCE_DATE_EPOCH
+  CFLAGS += -DBUILD_EPOCH=$(SOURCE_DATE_EPOCH)
+  CFLAGS += -Wno-builtin-macro-redefined
+  CFLAGS += -D__DATE__=\"$(shell date -u -d @$(SOURCE_DATE_EPOCH) +'%b %d %Y')\"
+  CFLAGS += -D__TIME__=\"$(shell date -u -d @$(SOURCE_DATE_EPOCH) +'%H:%M:%S')\"
+endif
+
 LDFLAGS := -nostdlib -T linker.ld
 
 SRCDIR   := kernel

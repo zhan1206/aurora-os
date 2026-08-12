@@ -345,4 +345,11 @@ struct nvme_controller {
  * ================================================================ */
 void nvme_init(void);
 
+/*
+ * FIXED (v4.4.1): NVMe-001 — NVMe basic I/O verification test.
+ * Reads controller identity data to verify the NVMe controller
+ * is functional.  Skips silently if no controller is detected.
+ */
+void nvme_verify_test(void);
+
 #endif /* NVME_H */

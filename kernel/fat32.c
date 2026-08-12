@@ -136,6 +136,66 @@ static uint32_t fat32_get_cluster(struct fat32_sb_info *sbi, uint32_t cluster) {
 }
 
 /*
+ * FIXED (v4.4.1): FAT32-001 — Cluster chain bounds checking
+ * fat32_next_cluster: Returns the next cluster in the chain.
+ * Validates cluster against FAT32 range (2 to 0x0FFFFFF7) and
+ * against the FAT table size to prevent out-of-bounds reads.
+ * Returns the next cluster number, or 0x0FFFFFFF (EOC) on error/end.
+ */
+static uint32_t fat32_next_cluster(struct fat32_sb_info *sbi, uint32_t cluster) {
+    /* FAT32 cluster range: 2 to 0x0FFFFFF7 */
+    if (cluster < 2 || cluster >= 0x0FFFFFF7) {
+        log_printf(LOG_LEVEL_ERR, "FAT32: cluster %u out of bounds\n", cluster);
+        return 0x0FFFFFFF; /* EOC */
+    }
+
+    /* Check against FAT table size */
+    if (cluster >= sbi->total_clusters + 2) {
+        log_printf(LOG_LEVEL_ERR, "FAT32: cluster %u exceeds FAT size %u\n",
+                   cluster, sbi->total_clusters);
+        return 0x0FFFFFFF;
+    }
+
+    return sbi->fat_cache[cluster] & FAT32_CLUSTER_MASK;
+}
+
+/*
+ * FIXED (v4.4.1): FAT32-001 — Cluster chain traversal with loop detection.
+ * Reads data from a cluster chain into buf, with a safety limit on
+ * the number of iterations to prevent infinite loops on corrupted
+ * FAT tables.
+ * Returns 0 on success, -EIO on error.
+ */
+static int fat32_read_cluster_chain(struct fat32_sb_info *sbi,
+                                     uint32_t start_cluster,
+                                     void *buf, size_t size) {
+    uint32_t cluster = start_cluster;
+    int max_iterations = 1000000; /* Safety limit */
+    int iterations = 0;
+    size_t bytes_read = 0;
+    uint32_t cluster_size = sbi->cluster_size;
+
+    while (cluster >= 2 && cluster < 0x0FFFFFF7) {
+        if (++iterations > max_iterations) {
+            log_printf(LOG_LEVEL_ERR, "FAT32: cluster chain too long\n");
+            return -EIO;
+        }
+
+        size_t to_copy = (size - bytes_read < cluster_size) ?
+                         (size - bytes_read) : cluster_size;
+        if (read_cluster(sbi, cluster, (uint8_t *)buf + bytes_read) < 0) {
+            return -EIO;
+        }
+        bytes_read += to_copy;
+        if (bytes_read >= size) break;
+
+        cluster = fat32_next_cluster(sbi, cluster);
+    }
+
+    return 0;
+}
+
+/*
  * Write a FAT32 entry to the FAT table.
  * Updates all FAT copies if multiple FATs are present.
  * @sbi: filesystem private data
