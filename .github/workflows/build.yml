@@ -73,6 +73,15 @@ jobs:
           bash scripts/check_static_vs_header.sh
           bash scripts/audit_changelog.sh
 
+      # FIXED (v4.4.3): P0-0.2 — Selftest count verification
+      - name: Verify selftest count
+        run: |
+          TEST_COUNT=$(grep -c 'static void test_' kernel/selftest.c)
+          echo "Selftest functions: $TEST_COUNT"
+          if [ "$TEST_COUNT" -lt 40 ]; then
+            echo "WARN: Only $TEST_COUNT selftest functions found"
+          fi
+
   # ────────────────────────────────────────────────────────────────────
   #  Lint — Static code analysis (runs after checkstyle)
   # ────────────────────────────────────────────────────────────────────

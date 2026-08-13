@@ -1,6 +1,92 @@
 # AuroraOS Changelog
 
-## v4.4.2 (2026-08-13) — 编译缺口修复+QA脚本: 15编译修复, 5脚本, 诚实CHANGELOG
+## v4.4.3 (2026-08-13) — P0+P2: 编译告警强化, PR模板, /proc/selftest, crash dump
+
+### 概述
+
+v4.4.3 实现 P0（编译质量+CHANGELOG诚实化）和 P2（可观测性）关键目标：
+- 6 个 -Werror 标志阻塞所有静默 warning
+- PR 模板强制关联 selftest + CHANGELOG
+- audit_changelog.sh 自动校验测试计数与文档一致性
+- /proc/selftest 节点暴露 40+ 测试 PASS/FAIL
+- panic 时自动写 crash dump 到 /tmp/crash.dmp
+
+### P0: 编译质量 (P0-0.3)
+
+| 编号 | 改进 |
+|------|------|
+| BUILD-13 | Makefile: `-Werror=sign-compare` 阻塞符号比较 warning |
+| BUILD-14 | Makefile: `-Werror=type-limits` 阻塞类型限制 warning |
+
+当前 CFLAGS 已包含 6 个 `-Werror` 标志: comment, enum-conversion, sign-compare, type-limits, + Wall, Wextra
+
+### P0: CHANGELOG 诚实化 (P0-0.2)
+
+| 编号 | 改进 |
+|------|------|
+| DOC-003 | `.github/PULL_REQUEST_TEMPLATE.md`: 强制 selftest + CHANGELOG 检查清单 |
+| CI-012 | `scripts/audit_changelog.sh`: 自动统计 `test_` 函数数，校验 README badge |
+| CI-013 | CI: `Verify selftest count` 步骤，少于 40 个 test_ 函数时 warn |
+
+### P2: 可观测性 (P2-2.2)
+
+| 编号 | 改进 |
+|------|------|
+| PROC-001 | `kernel/include/selftest.h`: 新建 selftest 结果追踪 API |
+| PROC-002 | `kernel/selftest.c`: TEST_PASS/TEST_FAIL 宏记录到 `g_selftest_results` 数组 |
+| PROC-003 | `kernel/procfs.c`: `/proc/selftest` 节点: 摘要 + 全部测试 PASS/FAIL 表格 |
+
+```
+$ cat /proc/selftest
+AuroraOS Selftest Results
+========================
+Total:  42
+Passed: 40
+Failed: 2
+Status: SOME FAILED
+
+Test Name                                         Result
+---------                                         ------
+alloc_page/free_page single page                  [PASS]
+alloc_pages(1)/free_pages                         [PASS]
+...
+```
+
+### P2: Crash Dump 持久化 (P2-2.3)
+
+| 编号 | 改进 |
+|------|------|
+| CRASH-001 | `kernel/include/crash_dump.h`: 新建 crash dump 声明 |
+| CRASH-002 | `kernel/panic.c`: `crash_dump_write_to_disk()`: 寄存器+栈回溯+selftest 结果 |
+| CRASH-003 | `kernel/panic.c`: panic() 调用 `crash_dump_write_to_disk()` 写 `/tmp/crash.dmp` |
+
+Crash dump 内容: 版本号 / 时间戳 / CR2/CR3/RIP/RSP/RBP / 栈回溯(32帧) / selftest 结果 / ring buffer
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 8 |
+| 新建文件 | 3 (selftest.h, crash_dump.h, PULL_REQUEST_TEMPLATE.md) |
+| 新增代码 | ~400 行 |
+
+### 版本历史
+
+```
+v4.4.3 ← 当前 (P0+P2: 6个Werror, PR模板, /proc/selftest, crash dump)
+v4.4.2 (编译缺口修复: 15项+5脚本, 0错0警告)
+v4.4.1 (可重现构建+文档一致+短板验证: 10项)
+v4.4.0 (里程碑: 编译零警告, 60+测试项, CI门禁)
+v4.3.9 (致命修复: 23项)
+v4.3.8 (全栈改进: 10类别, 30+项)
+v4.3.7 (编译+运行时Bug修复: 18项)
+v4.3.6 (安全加固+工程完善: 5项)
+v4.3.5 (实测修复: 10 Bug)
+v4.3.4 (架构级: 8大子系统)
+v4.3.3 (全量修复: 16项)
+v4.3.2 (根因修复: BSS栈溢出)
+v4.3.1 (诚实文档: 77项审计映射)
+```
 
 ### 概述
 

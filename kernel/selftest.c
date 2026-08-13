@@ -38,11 +38,54 @@
 #include <string.h>
 #include <stdint.h>
 
-#define TEST_PASS(msg) log_printf(LOG_LEVEL_INFO, "  [PASS] %s\n", msg)
+/* FIXED (v4.4.3): P2-2.2 — Selftest result tracking for /proc/selftest */
+#define MAX_SELFTEST_RESULTS 128
+
+struct selftest_result {
+    char name[64];
+    int passed;  /* 1 = passed, 0 = failed */
+};
+
+static struct selftest_result g_selftest_results[MAX_SELFTEST_RESULTS];
+static int g_selftest_result_count = 0;
+static int g_selftest_pass_count = 0;
+static int g_selftest_fail_count = 0;
+
+void selftest_record_result(const char *name, int passed) {
+    if (g_selftest_result_count >= MAX_SELFTEST_RESULTS) return;
+    struct selftest_result *r = &g_selftest_results[g_selftest_result_count++];
+    snprintf(r->name, sizeof(r->name), "%s", name);
+    r->passed = passed;
+    if (passed) g_selftest_pass_count++;
+    else g_selftest_fail_count++;
+}
+
+void selftest_get_summary(int *total, int *passed, int *failed) {
+    *total = g_selftest_result_count;
+    *passed = g_selftest_pass_count;
+    *failed = g_selftest_fail_count;
+}
+
+const struct selftest_result *selftest_get_result(int index) {
+    if (index < 0 || index >= g_selftest_result_count) return NULL;
+    return &g_selftest_results[index];
+}
+
+int selftest_get_result_count(void) {
+    return g_selftest_result_count;
+}
+
+/* FIXED (v4.4.3): P2-2.2 — Track results in g_selftest_results array */
+#define TEST_PASS(msg) do { \
+    selftest_record_result(msg, 1); \
+    log_printf(LOG_LEVEL_INFO, "  [PASS] %s\n", msg); \
+} while(0)
+
 #define TEST_FAIL(msg) do { \
+    selftest_record_result(msg, 0); \
     log_printf(LOG_LEVEL_ERR, "  [FAIL] %s\n", msg); \
     panic("selftest failed: %s\n", msg); \
-} while (0)
+} while(0)
 
 /* Default PIE (Position-Independent Executable) base address for x86_64 */
 #ifndef PIE_DEFAULT_BASE

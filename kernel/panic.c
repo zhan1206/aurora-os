@@ -12,6 +12,11 @@
 #include "include/kstdio.h"
 #include "include/print.h"
 #include "include/portio.h"
+#include "include/selftest.h"   /* FIXED (v4.4.3): P2-2.3 — selftest summary for crash dump */
+#include "include/version.h"    /* FIXED (v4.4.3): P2-2.3 — AURORAOS_VERSION, BUILD_DATE, BUILD_TIME */
+#include "include/string.h"     /* FIXED (v4.4.3): P2-2.3 — snprintf for crash dump */
+#include "vfs.h"                /* FIXED (v4.4.3): P2-2.3 — vfs_open/write/close for crash dump */
+#include "fs.h"                 /* FIXED (v4.4.3): P2-2.3 — O_CREAT, O_WRONLY */
 #include "layout.h"
 #include "console.h"
 #include <stdarg.h>
@@ -153,6 +158,91 @@ static void panic_crash_dump(const char *msg) {
     log_printf(LOG_LEVEL_ERR, "========================================\n");
 }
 
+/* FIXED (v4.4.3): P2-2.3 — Crash dump persistence to /tmp/crash.dmp */
+#define CRASH_DUMP_MAX_SIZE (64 * 1024)
+
+static char g_crash_dump_buf[CRASH_DUMP_MAX_SIZE];
+static int g_crash_dump_len = 0;
+
+static void crash_dump_append(const char *str) {
+    int slen = strlen(str);
+    if (g_crash_dump_len + slen >= CRASH_DUMP_MAX_SIZE - 1) return;
+    memcpy(g_crash_dump_buf + g_crash_dump_len, str, slen);
+    g_crash_dump_len += slen;
+}
+
+void crash_dump_write_to_disk(const char *reason) {
+    g_crash_dump_len = 0;
+    char line[256];
+
+    /* Header */
+    snprintf(line, sizeof(line), "=== AURORAOS CRASH DUMP ===\n");
+    crash_dump_append(line);
+    snprintf(line, sizeof(line), "Reason: %s\n", reason);
+    crash_dump_append(line);
+    snprintf(line, sizeof(line), "Version: %s\n", AURORAOS_VERSION);
+    crash_dump_append(line);
+    snprintf(line, sizeof(line), "Build: %s %s\n", BUILD_DATE, BUILD_TIME);
+    crash_dump_append(line);
+    crash_dump_append("\n");
+
+    /* Register dump */
+    crash_dump_append("--- Registers ---\n");
+    uint64_t cr2, cr3, rip, rsp, rbp;
+    asm volatile("mov %%cr2, %0" : "=r"(cr2));
+    asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    snprintf(line, sizeof(line), "CR2:  0x%x\n", cr2);
+    crash_dump_append(line);
+    snprintf(line, sizeof(line), "CR3:  0x%x\n", cr3);
+    crash_dump_append(line);
+
+    asm volatile("lea (%%rip), %0" : "=r"(rip));
+    asm volatile("mov %%rsp, %0" : "=r"(rsp));
+    asm volatile("mov %%rbp, %0" : "=r"(rbp));
+    snprintf(line, sizeof(line), "RIP:  0x%x\n", rip);
+    crash_dump_append(line);
+    snprintf(line, sizeof(line), "RSP:  0x%x\n", rsp);
+    crash_dump_append(line);
+    snprintf(line, sizeof(line), "RBP:  0x%x\n", rbp);
+    crash_dump_append(line);
+
+    /* Stack backtrace */
+    crash_dump_append("\n--- Stack Backtrace (max 32 frames) ---\n");
+    uint64_t *frame = (uint64_t *)rbp;
+    for (int i = 0; i < 32 && frame; i++) {
+        if ((uint64_t)frame < 0xFFFFFFFF80000000ULL) break;
+        uint64_t ret_addr = frame[1];
+        snprintf(line, sizeof(line), "  #%d: 0x%x\n", i, ret_addr);
+        crash_dump_append(line);
+        uint64_t next_frame = frame[0];
+        if (next_frame == 0 || next_frame <= (uint64_t)frame) break;
+        frame = (uint64_t *)next_frame;
+    }
+
+    /* Selftest results */
+    crash_dump_append("\n--- Selftest Results ---\n");
+    int total, passed, failed;
+    selftest_get_summary(&total, &passed, &failed);
+    snprintf(line, sizeof(line), "Total: %d, Passed: %d, Failed: %d\n", total, passed, failed);
+    crash_dump_append(line);
+
+    /* Ring buffer note */
+    crash_dump_append("\n--- Ring Buffer (last entries) ---\n");
+    crash_dump_append("(ring buffer not available in crash context)\n");
+
+    crash_dump_append("\n=== END OF CRASH DUMP ===\n");
+
+    /* Try to write to /tmp/crash.dmp */
+    struct file *fd = vfs_open("/tmp/crash.dmp", O_CREAT | O_WRONLY);
+    if (fd) {
+        vfs_write(fd, g_crash_dump_buf, g_crash_dump_len);
+        vfs_close(fd);
+        log_printf(LOG_LEVEL_ERR, "CRASH DUMP: written to /tmp/crash.dmp (%d bytes)\n", g_crash_dump_len);
+    } else {
+        log_printf(LOG_LEVEL_ERR, "CRASH DUMP: could not open /tmp/crash.dmp\n");
+    }
+}
+
 /* ================================================================
  * panic() — Emergency display
  * ================================================================ */
@@ -239,6 +329,8 @@ void panic(const char *fmt, ...) {
         crash_msg[n] = '\0';
         va_end(ap);
         panic_crash_dump(crash_msg);
+        /* FIXED (v4.4.3): P2-2.3 — Write crash dump before halting */
+        crash_dump_write_to_disk(crash_msg);
     }
 
     /* Full red screen — emergency visual takeover */

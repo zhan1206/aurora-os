@@ -31,6 +31,7 @@
 #include "include/log.h"
 #include "include/kstdio.h"
 #include "include/version.h"
+#include "include/selftest.h"  /* FIXED (v4.4.3): P2-2.2 — /proc/selftest */
 #include <string.h>
 #include <stdint.h>
 
@@ -582,6 +583,45 @@ static int read_kmsg(char *buf, size_t size) {
     return log_ring_read(buf, size);
 }
 
+/* FIXED (v4.4.3): P2-2.2 — /proc/selftest node */
+static int read_selftest(char *buf, size_t size) {
+    if (size < 256) return -1;
+    int total, passed, failed;
+    selftest_get_summary(&total, &passed, &failed);
+
+    int len = 0;
+    len += snprintf(buf + len, size - (size_t)len,
+                    "AuroraOS Selftest Results\n"
+                    "========================\n"
+                    "Total:  %d\n"
+                    "Passed: %d\n"
+                    "Failed: %d\n"
+                    "Status: %s\n\n",
+                    total, passed, failed,
+                    failed == 0 ? "ALL PASSED" : "SOME FAILED");
+
+    len += snprintf(buf + len, size - (size_t)len,
+                    "Test Name                                       Result\n");
+    len += snprintf(buf + len, size - (size_t)len,
+                    "----------------------------------------        ------\n");
+
+    for (int i = 0; i < selftest_get_result_count(); i++) {
+        const struct selftest_result *r = selftest_get_result(i);
+        if (!r) continue;
+        /* Pad name to 48 chars with spaces */
+        int name_len = strlen(r->name);
+        len += snprintf(buf + len, size - (size_t)len, "%s", r->name);
+        for (int p = name_len; p < 48 && len < (int)size - 1; p++)
+            buf[len++] = ' ';
+        len += snprintf(buf + len, size - (size_t)len, " %s\n",
+                        r->passed ? "[PASS]" : "[FAIL]");
+    }
+
+    if (len >= (int)size) len = (int)size - 1;
+    buf[len] = '\0';
+    return len;
+}
+
 /* ================================================================
  * Procfs entry table
  * ================================================================ */
@@ -595,6 +635,7 @@ static struct procfs_entry procfs_entries[] = {
     { "filesystems", read_filesystems, 0 },
     { "cmdline",     read_cmdline,     0 },
     { "kmsg",        read_kmsg,        0 },
+    { "selftest",    read_selftest,    0 },  /* FIXED (v4.4.3): P2-2.2 */
     { "self",        NULL,             1 },  /* directory for /proc/self */
     { NULL,          NULL,             0 },  /* sentinel */
 };

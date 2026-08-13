@@ -1,52 +1,40 @@
-## 变更描述
+# FIXED (v4.4.3): P0-0.2 — PR template with selftest + CHANGELOG enforcement
 
-<!-- 请清晰简洁地描述本次变更的内容和目的。 -->
+## Description
+<!-- Briefly describe the changes -->
 
-## 关联 Issue
+## Checklist
 
-<!-- 请关联相关的 Issue，例如：Closes #123, Fixes #456 -->
+### Build
+- [ ] `make clean && make` produces 0 errors, 0 warnings
+- [ ] `make iso` produces bootable os.iso
 
-- Closes #
+### Selftest
+- [ ] `kernel_selftest()` runs and all tests pass
+- [ ] Selftest PASS/FAIL counts match expectations:
+  - [ ] If new tests added: updated test count in README.md badge
+  - [ ] If tests fixed: confirmed the fix with a regression test
 
-## 变更类型
+### CHANGELOG
+- [ ] CHANGELOG.md updated with this version's changes
+- [ ] Changes are categorized (Fix/Feature/Docs/Build/Test)
+- [ ] No false claims (e.g., "已修复" when actually not fixed)
+- [ ] `scripts/audit_changelog.sh` passes
 
-<!-- 请选择本次变更的类型（可多选）： -->
+### QA Scripts
+- [ ] `bash scripts/check_nested_comments.sh` passes
+- [ ] `bash scripts/check_header_includes.sh` passes
+- [ ] `bash scripts/check_static_vs_header.sh` passes
+- [ ] `bash scripts/audit_changelog.sh` passes
 
-- [ ] feat — 新功能
-- [ ] fix — Bug 修复
-- [ ] docs — 文档更新
-- [ ] refactor — 代码重构（不改变功能）
-- [ ] perf — 性能优化
-- [ ] test — 测试相关
-- [ ] chore — 构建、CI 或辅助工具变更
+### Documentation
+- [ ] LIMITATIONS.md updated if any limitation was fixed or discovered
+- [ ] README.md badges updated if version/test count changed
 
-## 测试验证
+## Related Issues
+<!-- Link to issues/PRs -->
 
-<!-- 请描述你如何测试了这些变更，包括测试环境和测试结果： -->
-
-- **测试环境**：
-  - 操作系统：<!-- 例如：Ubuntu 22.04 -->
-  - 编译器：<!-- 例如：GCC 13.2.0 -->
-  - QEMU 版本：<!-- 例如：QEMU 8.2.0 -->
-  - 构建配置：<!-- 例如：make CONFIG_SMP=y -->
-
-- **测试步骤**：
-  1. 
-  2. 
-  3. 
-
-- **测试结果**：
-  <!-- 请描述测试结果，是否通过，有无异常 -->
-
-## 检查清单
-
-<!-- 在提交 PR 之前，请确认以下事项： -->
-
-- [ ] 代码已通过编译，无警告
-- [ ] 代码风格符合项目规范
-- [ ] 已添加/更新相关测试
-- [ ] 所有测试通过
-- [ ] 已更新相关文档（如适用）
-- [ ] 提交信息清晰描述了变更内容
-- [ ] 未包含任何敏感信息（密钥、密码等）
-- [ ] 在 QEMU 中测试通过，无崩溃或异常
+## Test Results
+```
+<!-- Paste selftest output here -->
+```
