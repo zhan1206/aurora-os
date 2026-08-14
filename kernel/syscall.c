@@ -613,11 +613,15 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
      * The previous limit of 32 argv pointers was arbitrary and could cause
      * buffer overflow or truncation.  Now we scan to find the actual argc
      * and allocate accordingly.  (BUG-ARGV-LIMIT) */
+    #define MAX_ARGC 256
+    int argc = 0;
+    char *kargv_buf[MAX_ARGC];
+    int envc = 0;
+    char *kenvp_buf[MAX_ARGC];
+    /* FIXED (v4.4.4): P0-3 — Moved kargv_buf/kenvp_buf to function scope
+     * so they can be passed to exec_elf_replace(). */
     if (argv) {
         /* Count argv entries (up to a reasonable limit) */
-        #define MAX_ARGC 256
-        int argc = 0;
-        char *kargv_buf[MAX_ARGC];
         for (int i = 0; i < MAX_ARGC; i++) {
             char *ptr;
             if (!user_addr_range_ok(&argv[i], sizeof(char *))) {
@@ -645,8 +649,6 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
     }
     /* FIXED (v4.2.8): BUG-EXECVE-ENVP — Process envp similarly to argv */
     if (envp) {
-        int envc = 0;
-        char *kenvp_buf[MAX_ARGC];
         for (int i = 0; i < MAX_ARGC; i++) {
             char *ptr;
             if (!user_addr_range_ok(&envp[i], sizeof(char *))) break;
@@ -656,8 +658,6 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
             kenvp_buf[i] = ptr;
             envc = i + 1;
         }
-        /* Pass envp to exec_elf_replace via a global/static buffer */
-        /* (envp is ultimately passed to the new process's user stack) */
     }
 
     /*
@@ -674,7 +674,12 @@ static long sys_execve(const char *path, char *const argv[], char *const envp[])
      * (Top 10 #1 / BUG-PROC-H1 / BUG-PROC-H4)
      */
     uint64_t new_rsp = 0, new_pml4 = 0;
-    void *entry = exec_elf_replace(kpath, &new_rsp, &new_pml4);
+    /* FIXED (v4.4.4): P0-3 — Pass kargv_buf and kenvp_buf to exec_elf_replace.
+     * Previously envp was parsed but never forwarded, so child programs
+     * received no environment variables. */
+    void *entry = exec_elf_replace(kpath, &new_rsp, &new_pml4,
+                                   argc > 0 ? kargv_buf : NULL,
+                                   envc > 0 ? kenvp_buf : NULL);
     if (!entry) {
         current->t_errno = ENOENT;
         return -1;
@@ -815,27 +820,32 @@ long sys_fork(int flags) {
      * same register state (except RAX, which will be 0).
      *
      * The child's stack layout (from create_task):
-     *   sp → [13 regs (trapframe)] [6 callee-saved] [ret=syscall_return_point]
+     *   [0..6]   context_switch frame (r15..ret_addr) — 7 slots
+     *   [7..8]   user_rsp, user_rip — skipped by add $16, %rsp
+     *   [9..21]  syscall regs (r15..rax) — 13 slots
      *
-     * The 13 regs are at sp[0..12] in syscall_entry push order:
-     *   r15,r14,r13,r12,r11,r10,r9,r8,rsi,rdi,rdx,rcx,rax
+     * FIXED (v4.4.4): P0-2 — Trapframe was written at child_sp[0..12],
+     * overwriting the context_switch frame and user_rsp/user_rip slots.
+     * create_task() reserves the syscall regs at [9..21], so we must
+     * write there to avoid corrupting the child's context_switch restore
+     * frame and the user_rsp/user_rip values.
      */
     if (current->current_tf && child->rsp) {
         struct trapframe *parent_tf = (struct trapframe *)current->current_tf;
         uint64_t *child_sp = (uint64_t *)child->rsp;
-        child_sp[0]  = parent_tf->r15;
-        child_sp[1]  = parent_tf->r14;
-        child_sp[2]  = parent_tf->r13;
-        child_sp[3]  = parent_tf->r12;
-        child_sp[4]  = parent_tf->r11;
-        child_sp[5]  = parent_tf->r10;
-        child_sp[6]  = parent_tf->r9;
-        child_sp[7]  = parent_tf->r8;
-        child_sp[8]  = parent_tf->rsi;
-        child_sp[9]  = parent_tf->rdi;
-        child_sp[10] = parent_tf->rdx;
-        child_sp[11] = parent_tf->rcx;   /* user RIP */
-        child_sp[12] = 0;                  /* child returns 0 (but also set in syscall_trap) */
+        child_sp[9]  = parent_tf->r15;
+        child_sp[10] = parent_tf->r14;
+        child_sp[11] = parent_tf->r13;
+        child_sp[12] = parent_tf->r12;
+        child_sp[13] = parent_tf->r11;
+        child_sp[14] = parent_tf->r10;
+        child_sp[15] = parent_tf->r9;
+        child_sp[16] = parent_tf->r8;
+        child_sp[17] = parent_tf->rsi;
+        child_sp[18] = parent_tf->rdi;
+        child_sp[19] = parent_tf->rdx;
+        child_sp[20] = parent_tf->rcx;   /* user RIP */
+        child_sp[21] = 0;                  /* child returns 0 (but also set in syscall_trap) */
     }
 
     /* Child inherits parent's fd table, with file refcounts incremented.

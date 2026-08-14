@@ -41,7 +41,8 @@ int block_dev_read(struct block_device *bdev, void *buf, uint64_t sector,
     /* Overflow-safe bounds check: sector + count could overflow */
     if (sector > bdev->total_sectors ||
         (uint64_t)count > bdev->total_sectors - sector) return -1;
-    return bdev->read(buf, sector, count);
+    /* FIXED (v4.4.4): P2-12 — pass bdev to driver callback */
+    return bdev->read(bdev, buf, sector, count);
 }
 
 int block_dev_write(struct block_device *bdev, const void *buf,
@@ -50,5 +51,6 @@ int block_dev_write(struct block_device *bdev, const void *buf,
     if (count <= 0) return -1;
     if (sector > bdev->total_sectors ||
         (uint64_t)count > bdev->total_sectors - sector) return -1;
-    return bdev->write(buf, sector, count);
+    /* FIXED (v4.4.4): P2-12 — pass bdev to driver callback */
+    return bdev->write(bdev, buf, sector, count);
 }

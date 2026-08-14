@@ -620,21 +620,21 @@ static int nvme_io_submit(struct nvme_controller *ctrl,
  * Block Device Operations
  * ================================================================ */
 
-static struct nvme_controller *g_active_nvme = NULL;
+static int nvme_read(struct block_device *bdev, void *buf, uint64_t sector, int count) {
+    struct nvme_controller *ctrl = (struct nvme_controller *)bdev->priv;
+    if (!ctrl || !ctrl->namespaces) return -1;
 
-static int nvme_read(void *buf, uint64_t sector, int count) {
-    if (!g_active_nvme || !g_active_nvme->namespaces) return -1;
-
-    uint32_t nsid = g_active_nvme->namespaces->nsid;
-    return nvme_io_submit(g_active_nvme, NVME_NVM_READ, nsid,
+    uint32_t nsid = ctrl->namespaces->nsid;
+    return nvme_io_submit(ctrl, NVME_NVM_READ, nsid,
                           sector, (uint32_t)count, buf);
 }
 
-static int nvme_write(const void *buf, uint64_t sector, int count) {
-    if (!g_active_nvme || !g_active_nvme->namespaces) return -1;
+static int nvme_write(struct block_device *bdev, const void *buf, uint64_t sector, int count) {
+    struct nvme_controller *ctrl = (struct nvme_controller *)bdev->priv;
+    if (!ctrl || !ctrl->namespaces) return -1;
 
-    uint32_t nsid = g_active_nvme->namespaces->nsid;
-    return nvme_io_submit(g_active_nvme, NVME_NVM_WRITE, nsid,
+    uint32_t nsid = ctrl->namespaces->nsid;
+    return nvme_io_submit(ctrl, NVME_NVM_WRITE, nsid,
                           sector, (uint32_t)count, (void *)buf);
 }
 
@@ -666,7 +666,11 @@ static int nvme_probe_device(struct pci_device *pci) {
         return -1;
     }
 
-    ctrl->bar_addr = (volatile uint32_t *)(uintptr_t)(bar0 & PCI_BAR_MEM_MASK);
+    /* FIXED (v4.4.4): P2-11 — NVMe: use uint64_t mask for 64-bit BAR.
+     * PCI_BAR_MEM_MASK (0xFFFFFFF0U) is 32-bit and would truncate the upper
+     * 32 bits of a BAR above 4GB.  Use ~0xFULL to clear only the BAR type
+     * bits (bits 0-3) while preserving the full 64-bit address. */
+    ctrl->bar_addr = (volatile uint32_t *)(uintptr_t)(bar0 & ~0xFULL);
 
     /* Check for MSI-X capability */
     uint8_t msix_cap = pci_find_capability(pci, PCI_CAP_ID_MSIX);
@@ -713,9 +717,8 @@ static int nvme_probe_device(struct pci_device *pci) {
         ctrl->bdev.read = nvme_read;
         ctrl->bdev.write = nvme_write;
         ctrl->bdev.ioctl = NULL;
-        ctrl->bdev.priv = ctrl;
+        ctrl->bdev.priv = (void *)ctrl;  /* FIXED (v4.4.4): P2-12 — driver uses bdev->priv */
 
-        g_active_nvme = ctrl;
         block_dev_register(&ctrl->bdev);
 
         log_printf(LOG_LEVEL_INFO, "nvme: block device '%s' registered\n",

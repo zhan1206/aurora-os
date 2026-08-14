@@ -142,24 +142,19 @@ static void chacha20_encrypt(uint8_t *out, const uint8_t *in, size_t len) {
 }
 
 /*
- * chacha20_random: Generate 64 random bytes (2 ChaCha20 blocks).
+ * chacha20_random: Generate 64 random bytes (1 ChaCha20 block).
  * Returns the number of bytes written (always 64).
  */
+/* FIXED (v4.4.4): P0-1 — Remove redundant second ChaCha20 block that overflowed
+ * the 64-byte stack buffer. Each ChaCha20 block produces 64 bytes (16 uint32_t),
+ * so one block is sufficient to fill the entire 64-byte output buffer. */
 static int chacha20_random(uint8_t *buf) {
     uint32_t block[16];
 
-    /* First block */
     chacha20_block(block);
     chacha_state[12]++;
     for (int i = 0; i < 16; i++) {
         ((uint32_t *)buf)[i] = block[i];
-    }
-
-    /* Second block */
-    chacha20_block(block);
-    chacha_state[12]++;
-    for (int i = 0; i < 16; i++) {
-        ((uint32_t *)(buf + 32))[i] = block[i];
     }
 
     return 64;

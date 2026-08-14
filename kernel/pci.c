@@ -8,12 +8,22 @@
 #include "include/portio.h"
 #include "include/log.h"
 #include "mem.h"
+#include "smp.h"
 #include "include/string.h"
 #include <stdint.h>
 
 /* PCI configuration address/data ports */
 #define PCI_CONFIG_ADDR     0xCF8
 #define PCI_CONFIG_DATA     0xCFC
+
+/*
+ * FIXED (v4.4.4): P1-7 — PCI config space access must be atomic.
+ * The 0xCF8/0xCFC port pair is a shared resource.  Concurrent access
+ * (e.g., from an ISR and a kernel thread) can corrupt the address
+ * register at 0xCF8, causing reads/writes to target the wrong
+ * configuration register.
+ */
+static spinlock_t pci_config_lock = {0};
 
 /* Linked list of discovered PCI devices */
 static struct pci_device *pci_device_list = NULL;
@@ -36,6 +46,7 @@ static inline uint32_t pci_make_addr(uint8_t bus, uint8_t device,
 uint32_t pci_read_config32(uint8_t bus, uint8_t device, uint8_t function,
                            uint8_t offset) {
     uint32_t addr = pci_make_addr(bus, device, function, offset);
+    spin_lock(&pci_config_lock);
     outb(PCI_CONFIG_ADDR, (uint8_t)(addr & 0xFF));
     outb(PCI_CONFIG_ADDR + 1, (uint8_t)((addr >> 8) & 0xFF));
     outb(PCI_CONFIG_ADDR + 2, (uint8_t)((addr >> 16) & 0xFF));
@@ -45,6 +56,7 @@ uint32_t pci_read_config32(uint8_t bus, uint8_t device, uint8_t function,
                | ((uint32_t)inb(PCI_CONFIG_DATA + 1) << 8)
                | ((uint32_t)inb(PCI_CONFIG_DATA + 2) << 16)
                | ((uint32_t)inb(PCI_CONFIG_DATA + 3) << 24);
+    spin_unlock(&pci_config_lock);
     return lo;
 }
 
@@ -63,6 +75,7 @@ uint8_t pci_read_config8(uint8_t bus, uint8_t device, uint8_t function,
 void pci_write_config32(uint8_t bus, uint8_t device, uint8_t function,
                         uint8_t offset, uint32_t value) {
     uint32_t addr = pci_make_addr(bus, device, function, offset);
+    spin_lock(&pci_config_lock);
     outb(PCI_CONFIG_ADDR, (uint8_t)(addr & 0xFF));
     outb(PCI_CONFIG_ADDR + 1, (uint8_t)((addr >> 8) & 0xFF));
     outb(PCI_CONFIG_ADDR + 2, (uint8_t)((addr >> 16) & 0xFF));
@@ -71,6 +84,7 @@ void pci_write_config32(uint8_t bus, uint8_t device, uint8_t function,
     outb(PCI_CONFIG_DATA + 1, (uint8_t)((value >> 8) & 0xFF));
     outb(PCI_CONFIG_DATA + 2, (uint8_t)((value >> 16) & 0xFF));
     outb(PCI_CONFIG_DATA + 3, (uint8_t)((value >> 24) & 0xFF));
+    spin_unlock(&pci_config_lock);
 }
 
 void pci_write_config16(uint8_t bus, uint8_t device, uint8_t function,

@@ -327,6 +327,15 @@ static uint64_t split_huge_page(uint64_t *pd, int pd_idx, uint64_t vaddr) {
     pd[pd_idx] = pt_phys | PTE_STRUCT_FLAGS;
 
     /*
+     * FIXED (v4.4.4): P1-6 — split_huge_page: decrement the 2MB huge page's
+     * ref_count after splitting.  The 2MB page was tracked as a single unit;
+     * after splitting into 512 4KB pages, each sub-page tracks its own
+     * ref_count (incremented above).  The 2MB-level ref_count must be
+     * decremented to avoid a permanent reference leak.
+     */
+    page_ref_dec(huge_base);
+
+    /*
      * FIXED (v4.2.4): Use smp_tlb_shootdown() instead of local invlpg().
      * On SMP systems, other CPUs may still have stale 2MB TLB entries
      * for this region.  Without broadcasting the TLB invalidation, a
@@ -1342,8 +1351,12 @@ void pf_handler_c(uint64_t error_code) {
         uint64_t phys_page = pte & PTE_ADDR_MASK;
         uint32_t ref = page_ref_get(phys_page);
 
-        spin_unlock(&pt_lock);
-
+        /* FIXED (v4.4.4): P1-5 — COW race: hold pt_lock during ref_count
+         * check and PTE CAS.  The lock must cover both the ref_count read
+         * and the PTE modification so that another CPU cannot clone the
+         * page table (increment ref_count) between the two operations.
+         * Without the lock, a CAS winner could incorrectly make the page
+         * writable while it is still shared. */
         if (ref <= 1) {
             /*
              * Only one reference — just make it writable.
@@ -1354,6 +1367,7 @@ void pf_handler_c(uint64_t error_code) {
              */
             uint64_t new_pte = pte | PTE_RW;
             if (__sync_bool_compare_and_swap(&pt[pt_idx], pte, new_pte)) {
+                spin_unlock(&pt_lock);
                 /* FIXED (v4.2.4): Use smp_tlb_shootdown() instead of
                  * local invlpg().  On SMP systems, another CPU may have
                  * a stale read-only TLB entry for this page.  Without
@@ -1362,10 +1376,12 @@ void pf_handler_c(uint64_t error_code) {
                 smp_tlb_shootdown(cr2);
                 log_printf(LOG_LEVEL_DEBUG, "COW: single-ref page at %p, made writable\n",
                            (void *)cr2);
+                return;
             }
-            /* If CAS failed, another CPU already handled it — just return */
-            return;
+            /* CAS failed: another CPU changed the PTE, fall through to COW */
         }
+
+        spin_unlock(&pt_lock);
 
         /* Multiple references — perform COW copy */
         log_printf(LOG_LEVEL_DEBUG, "COW: fault at %p, ref_count=%d, copying\n",

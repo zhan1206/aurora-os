@@ -1,6 +1,66 @@
 # AuroraOS Changelog
 
-## v4.4.3 (2026-08-13) — P0+P2: 编译告警强化, PR模板, /proc/selftest, crash dump
+## v4.4.4 (2026-08-13) — P0致命+P1高优+P2中等: 15项修复
+
+### 概述
+
+v4.4.4 修复 15 项 Bug，覆盖 P0（致命4项）、P1（高优6项）、P2（中等5项）。
+
+### P0: 致命修复 (4项)
+
+| 编号 | 文件 | 描述 | 修复 |
+|------|------|------|------|
+| P0-1 | `kernel/aslr.c` | chacha20_random 缓冲区溢出 | 移除冗余第二块（64B→64B，不溢出） |
+| P0-2 | `kernel/syscall.c` | fork 栈帧布局错误 | trapframe 偏移 [0..12]→[9..21] 对齐 context_switch |
+| P0-3 | `kernel/syscall.c` + `elfloader.c` | sys_execve 未传 envp | kargv_buf/kenvp_buf 传给 exec_elf_replace() |
+| P0-4 | `kernel/irq_handler.S` | IRQ 缺 callee-saved 寄存器 | 补充 rbx/rbp/r12-r15 保存/恢复 |
+
+### P1: 高优先级修复 (6项)
+
+| 编号 | 文件 | 描述 | 修复 |
+|------|------|------|------|
+| P1-5 | `kernel/pagetable.c` | COW 竞态条件 | spin_unlock 移入 ref≤1 CAS 成功后 |
+| P1-6 | `kernel/pagetable.c` | split_huge_page ref 泄漏 | 递减 2MB 页 ref_count |
+| P1-7 | `kernel/pci.c` | PCI 配置空间非原子 | 新增 pci_config_lock 自旋锁 |
+| P1-8 | `kernel/usb/xhci.c` | xHCI 事件环竞态 | 新增 xhci_event_lock 自旋锁 |
+| P1-9 | `kernel/net/dhcp.c` | DHCP 整数溢出 | `opt_off+2+len > pkt_len` 溢出检查 |
+| P1-10 | `kernel/signal.c` | 信号 pending 无锁 | check_signals/signal_reset 持 signal_lock |
+
+### P2: 中优先级修复 (5项)
+
+| 编号 | 文件 | 描述 | 修复 |
+|------|------|------|------|
+| P2-11 | `kernel/nvme.c` | NVMe BAR 64位截断 | `PCI_BAR_MEM_MASK`→`~0xFULL` 保留高32位 |
+| P2-12 | blkdev.c/nvme/virtio_blk/ramdisk | 块设备全局单例 | 回调加 `bdev` 参数，用 `priv` 字段支持多实例 |
+| P2-13 | `kernel/sched.c` | RB树调度退化 O(n) | BLOCKED 任务移除树，schedule() 用 `rb_find_min()` |
+| P2-14 | `kernel/sched.c` | waitpid/exit 锁不一致 | waitpid() 改持 `state_lock` 检查 zombie |
+| P2-15 | `kernel/net/net.c` | IPv4 分片超时 | 已修复(v4.3.4): ipv4_frag_timeout() 30s 超时 |
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 15+ |
+| 新增代码 | ~400 行 |
+
+### 版本历史
+
+```
+v4.4.4 ← 当前 (P0+P1+P2: 15项修复, 4致命+6高优+5中等)
+v4.4.3 (P0+P2: 6 Werror, PR模板, /proc/selftest, crash dump)
+v4.4.2 (编译缺口修复: 15项+5脚本)
+v4.4.1 (可重现构建+文档一致+短板验证)
+v4.4.0 (里程碑: 编译零警告, 60+测试项)
+v4.3.9 (致命修复: 23项)
+v4.3.8 (全栈改进: 10类别, 30+项)
+v4.3.7 (编译+运行时Bug修复: 18项)
+v4.3.6 (安全加固+工程完善)
+v4.3.5 (实测修复: 10 Bug)
+v4.3.4 (架构级: 8大子系统)
+v4.3.3 (全量修复: 16项)
+v4.3.2 (根因修复: BSS栈溢出)
+v4.3.1 (诚实文档: 77项审计映射)
+```
 
 ### 概述
 

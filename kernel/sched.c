@@ -587,24 +587,19 @@ void schedule(void) {
     }
 
     /*
-     * Use the red-black tree to find the task with the smallest vruntime
-     * among READY tasks in O(log n). This replaces the O(n) linked-list scan.
-     * Falls back to idle task if the tree is empty.
+     * FIXED (v4.4.4): P2-13 — RB tree scheduler: use O(log n) min-node lookup.
+     * Previously the code did an in-order traversal of the entire RB tree,
+     * skipping BLOCKED tasks, which was O(n).  Now blocked tasks are removed
+     * from the tree (see erase below), so the tree only contains runnable
+     * tasks.  rb_find_min() directly returns the task with the smallest
+     * vruntime in O(log n).
      */
     struct task_struct *next = NULL;
     struct rb_node *min_node = rb_find_min(&rq->ready_tree);
     if (min_node) {
-        /* Walk the tree in-order to find the first READY task */
-        struct rb_node *node = min_node;
-        while (node) {
-            /* Calculate the containing task_struct from the rb_node offset */
-            struct task_struct *candidate = (struct task_struct *)((uintptr_t)node - offsetof(struct task_struct, rb_node));
-            if ((candidate->state == TASK_READY || candidate->state == TASK_RUNNING)
-                && candidate != current) {
-                next = candidate;
-                break;
-            }
-            node = rb_next(node);
+        struct task_struct *candidate = (struct task_struct *)((uintptr_t)min_node - offsetof(struct task_struct, rb_node));
+        if (candidate != current) {
+            next = candidate;
         }
     }
 
@@ -677,7 +672,14 @@ void schedule(void) {
         prev->rb_node.key = prev->vruntime;
         rb_insert(&rq->ready_tree, &prev->rb_node);
     }
-    /* If prev->state was TASK_BLOCKED or TASK_ZOMBIE, leave vruntime unchanged */
+    /* FIXED (v4.4.4): P2-13 — remove blocked tasks from the RB tree so
+     * the tree only contains runnable tasks.  This makes rb_find_min()
+     * return the correct next task in O(log n).  Blocked tasks keep
+     * their vruntime and are re-inserted when they wake up. */
+    if (prev_state == TASK_BLOCKED) {
+        rb_erase(&rq->ready_tree, &prev->rb_node);
+    }
+    /* ZOMBIE tasks are removed from the tree in do_exit_current(). */
 
     /* Update min_vruntime: track the minimum vruntime across all ready tasks.
      * The scheduled task (next) has the minimum vruntime among ready tasks
@@ -912,6 +914,17 @@ void do_exit_current(int code) {
             log_printf(LOG_LEVEL_DEBUG, "exit: waking parent pid=%d\n",
                        current->parent->pid);
             current->parent->state = TASK_READY;
+            /* FIXED (v4.4.4): P2-13 — re-insert parent into the RB tree.
+             * When the parent blocked (in waitpid), it was removed from the
+             * tree.  Now it must be re-inserted so the scheduler can find it. */
+            {
+                int parent_cpu = current->parent->cpu_id;
+                if (parent_cpu >= 0 && parent_cpu < MAX_CPUS) {
+                    struct run_queue *parent_rq = &per_cpu_rq[parent_cpu];
+                    current->parent->rb_node.key = current->parent->vruntime;
+                    rb_insert(&parent_rq->ready_tree, &current->parent->rb_node);
+                }
+            }
         }
         spin_unlock((spinlock_t*)&current->parent->state_lock);
     }
@@ -1029,6 +1042,11 @@ retry:
                 continue;
             }
 
+            /* FIXED (v4.4.4): P2-14 — waitpid/exit: use child->state_lock
+             * to check state and read exit_code.  do_exit_current() sets
+             * TASK_ZOMBIE and exit_code under state_lock, so waitpid must
+             * use the same lock to avoid lost wakeups. */
+            spin_lock((spinlock_t*)&child->state_lock);
             if ((pid == -1 || child->pid == pid) &&
                 child->state == TASK_ZOMBIE) {
 
@@ -1041,6 +1059,8 @@ retry:
                  * Save values BEFORE releasing the reference (use-after-free safety). */
                 int collected_pid   = child->pid;
                 int collected_code  = child->exit_code;
+
+                spin_unlock((spinlock_t*)&child->state_lock);
 
                 if (status) *status = collected_code;
 
@@ -1064,6 +1084,8 @@ retry:
 
                 return collected_pid;
             }
+
+            spin_unlock((spinlock_t*)&child->state_lock);
 
             prev = node;
             node = node->next;
@@ -1119,9 +1141,15 @@ retry:
             struct child_node *node2 = current->children;
             while (node2) {
                 struct task_struct *child2 = node2->child;
-                if (child2 && child2->state == TASK_ZOMBIE) {
-                    spin_unlock((spinlock_t*)&current->child_lock);
-                    goto retry;  /* retry the outer loop to collect the zombie */
+                /* FIXED (v4.4.4): P2-14 — use state_lock for re-check */
+                if (child2) {
+                    spin_lock((spinlock_t*)&child2->state_lock);
+                    int is_zombie = (child2->state == TASK_ZOMBIE);
+                    spin_unlock((spinlock_t*)&child2->state_lock);
+                    if (is_zombie) {
+                        spin_unlock((spinlock_t*)&current->child_lock);
+                        goto retry;  /* retry the outer loop to collect the zombie */
+                    }
                 }
                 node2 = node2->next;
             }

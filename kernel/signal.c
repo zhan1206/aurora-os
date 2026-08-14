@@ -271,10 +271,22 @@ void check_signals(void) {
     struct signal_state *sig = current->sig;
 
     for (int s = 1; s < NSIG; ++s) {
-        if (!(sig->pending & (1U << s))) continue;
-        if (sig->blocked & (1U << s)) continue;
+        /* FIXED (v4.4.4): P1-10 — Signal pending: hold signal_lock for
+         * pending bit operations.  Without the lock, concurrent signal
+         * delivery from different CPUs can miss pending signals or
+         * corrupt the bitmask. */
+        spin_lock(&signal_lock);
+        if (!(sig->pending & (1U << s))) {
+            spin_unlock(&signal_lock);
+            continue;
+        }
+        if (sig->blocked & (1U << s)) {
+            spin_unlock(&signal_lock);
+            continue;
+        }
 
         sig->pending &= ~(1U << s);
+        spin_unlock(&signal_lock);
         sighandler_t handler = sig->actions[s].sa_handler;
 
         if (handler == SIG_DFL) {
@@ -299,7 +311,10 @@ void check_signals(void) {
          */
         if (sig->saved_rip != 0) {
             /* Signal already being handled — defer this signal */
+            /* FIXED (v4.4.4): P1-10 — hold signal_lock for re-queue */
+            spin_lock(&signal_lock);
             sig->pending |= (1U << s);  /* re-queue */
+            spin_unlock(&signal_lock);
             continue;
         }
 
@@ -487,7 +502,10 @@ void signal_reset_on_exec(struct task_struct *task) {
         }
     }
 
-    /* Clear pending signals */
+    /* FIXED (v4.4.4): P1-10 — hold signal_lock for clearing pending/blocked
+     * bitmasks to prevent race with concurrent do_sys_kill from another CPU. */
+    spin_lock(&signal_lock);
     task->sig->pending = 0;
     task->sig->blocked = 0;
+    spin_unlock(&signal_lock);
 }

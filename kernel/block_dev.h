@@ -15,9 +15,11 @@ struct block_device {
     uint32_t block_size;       /* usually 512 */
     uint64_t total_sectors;    /* device capacity in sectors */
 
-    /* Operations: self is implicit; caller holds bdev pointer */
-    int  (*read)(void *buf, uint64_t sector, int count);
-    int  (*write)(const void *buf, uint64_t sector, int count);
+    /* FIXED (v4.4.4): P2-12 — Block device: pass bdev pointer to callbacks
+     * so drivers can access bdev->priv instead of relying on global
+     * singletons.  This enables multiple block device instances. */
+    int  (*read)(struct block_device *bdev, void *buf, uint64_t sector, int count);
+    int  (*write)(struct block_device *bdev, const void *buf, uint64_t sector, int count);
     int  (*ioctl)(int cmd, void *arg);
 
     void *priv;                /* driver-private data */

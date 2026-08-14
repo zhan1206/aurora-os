@@ -237,6 +237,14 @@ static int dhcp_find_option(const uint8_t *pkt, int pkt_len,
         if (type == 0) { opt_off++; continue; }  /* padding */
         if (opt_off + 1 >= pkt_len) break;
         uint8_t len = pkt[opt_off + 1];
+        /* FIXED (v4.4.4): P1-9 — DHCP: prevent integer overflow in option
+         * parsing.  opt_off += 2 + len can overflow if len is maliciously
+         * large, bypassing the bounds check. */
+        if (len > (unsigned)(pkt_len - opt_off - 2)) {
+            log_printf(LOG_LEVEL_WARN, "dhcp: option length overflow at offset %d, len=%d\n",
+                       opt_off, len);
+            break;
+        }
         if (opt_off + 2 + len > pkt_len) break;
         if (type == opt_type) {
             int copy = (int)len;

@@ -14,6 +14,7 @@
 #include "../include/log.h"
 #include "../include/string.h"
 #include "../include/arch.h"
+#include "../smp.h"
 #include "../mem.h"
 #include <stdint.h>
 
@@ -23,6 +24,14 @@
 static struct xhci_controller *xhci_ctrl_list = NULL;
 static struct usb_device      *usb_dev_list     = NULL;
 static struct usb_device      *usb_dev_tail     = NULL;
+
+/*
+ * FIXED (v4.4.4): P1-8 — xHCI event ring: protect with spinlock.
+ * The event ring is consumed by both the interrupt handler and
+ * command submission code.  Without synchronization, entries can
+ * be consumed twice or missed.
+ */
+static spinlock_t xhci_event_lock = {0};
 
 /* ================================================================
  * USB Device List Management
@@ -206,11 +215,20 @@ static void xhci_ring_enqueue_trb(struct xhci_transfer_ring *ring,
  * Event Ring Helpers
  * ================================================================ */
 static struct xhci_trb *xhci_event_ring_dequeue(struct xhci_controller *hc) {
+    /* FIXED (v4.4.4): P1-8 — Protect event ring dequeue with spinlock + IRQ
+     * disable.  The event ring is consumed by both the interrupt handler
+     * (IRQ context) and polling code (command submission).  Without
+     * synchronization, entries can be consumed twice or missed. */
+    uint64_t irq_flags = irq_save();
+    spin_lock(&xhci_event_lock);
+
     uint32_t idx = hc->event_ring_dequeue;
     struct xhci_trb *evt = &hc->event_ring[idx];
 
     /* Check if the event is valid (cycle bit == consumer cycle state) */
     if ((evt->control & XHCI_TRB_C) != hc->event_ring_ccs) {
+        spin_unlock(&xhci_event_lock);
+        irq_restore(irq_flags);
         return NULL;
     }
 
@@ -219,6 +237,8 @@ static struct xhci_trb *xhci_event_ring_dequeue(struct xhci_controller *hc) {
         hc->event_ring_ccs ^= 1;
     }
 
+    spin_unlock(&xhci_event_lock);
+    irq_restore(irq_flags);
     return evt;
 }
 

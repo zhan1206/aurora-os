@@ -17,30 +17,45 @@
     .extern pit_irq_c_handler
 
 irq0_handler:
-    /* Save caller-saved registers */
+    /* FIXED (v4.4.4): P0-4 — Save/restore callee-saved registers (rbx, rbp, r12-r15)
+     * in addition to caller-saved.  If an IRQ fires while a C function is using
+     * these registers, the C handler can clobber them, corrupting the interrupted
+     * code's state.  Saving all 15 GPRs prevents this. */
     push %rax
+    push %rbx
     push %rcx
     push %rdx
     push %rsi
     push %rdi
+    push %rbp
     push %r8
     push %r9
     push %r10
     push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
 
     /* Call C handler (sets need_resched flag) */
     mov %rsp, %rdi
     call pit_irq_c_handler
 
     /* Restore registers */
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
     pop %r11
     pop %r10
     pop %r9
     pop %r8
+    pop %rbp
     pop %rdi
     pop %rsi
     pop %rdx
     pop %rcx
+    pop %rbx
     pop %rax
 
     /* Send EOI to master PIC */

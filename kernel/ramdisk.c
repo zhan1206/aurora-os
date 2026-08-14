@@ -22,42 +22,39 @@ struct ramdisk_priv {
 /* Static buffer for the ramdisk data — avoids buddy allocator fragmentation issues */
 static uint8_t ramdisk_buffer[RAMDISK_SIZE_BYTES] __attribute__((aligned(4096)));
 
-/* We store the ramdisk priv pointer globally so read/write can find it.
- * The read/write ops don't receive a bdev pointer.
- *
- * KNOWN LIMITATION: g_ramdisk_priv is a global singleton. Only one ramdisk
- * can be active at a time. Creating multiple ramdisks would require
- * refactoring the read/write ops to carry a per-device context pointer. */
-static struct ramdisk_priv *g_ramdisk_priv = NULL;
-static uint32_t g_ramdisk_block_size = 512;
+/* FIXED (v4.4.4): P2-12 — Block device: use bdev->priv instead of
+ * global singletons.  Each ramdisk accesses its ramdisk_priv through
+ * the block_device's priv field, enabling multiple ramdisk instances. */
 
-static int ramdisk_read(void *buf, uint64_t sector, int count) {
-    if (!g_ramdisk_priv) return -1;
+static int ramdisk_read(struct block_device *bdev, void *buf, uint64_t sector, int count) {
+    struct ramdisk_priv *priv = (struct ramdisk_priv *)bdev->priv;
+    if (!priv) return -1;
     if (!buf) return -1;
     if (count <= 0) return -1;
 
-    uint64_t byte_offset = sector * g_ramdisk_block_size;
-    uint64_t byte_count  = (uint64_t)count * g_ramdisk_block_size;
+    uint64_t byte_offset = sector * bdev->block_size;
+    uint64_t byte_count  = (uint64_t)count * bdev->block_size;
 
-    if (byte_offset + byte_count > g_ramdisk_priv->size) return -1;
+    if (byte_offset + byte_count > priv->size) return -1;
     if (byte_offset + byte_count < byte_offset) return -1;  /* overflow check */
 
-    memcpy(buf, g_ramdisk_priv->data + byte_offset, (size_t)byte_count);
+    memcpy(buf, priv->data + byte_offset, (size_t)byte_count);
     return 0;
 }
 
-static int ramdisk_write(const void *buf, uint64_t sector, int count) {
-    if (!g_ramdisk_priv) return -1;
+static int ramdisk_write(struct block_device *bdev, const void *buf, uint64_t sector, int count) {
+    struct ramdisk_priv *priv = (struct ramdisk_priv *)bdev->priv;
+    if (!priv) return -1;
     if (!buf) return -1;
     if (count <= 0) return -1;
 
-    uint64_t byte_offset = sector * g_ramdisk_block_size;
-    uint64_t byte_count  = (uint64_t)count * g_ramdisk_block_size;
+    uint64_t byte_offset = sector * bdev->block_size;
+    uint64_t byte_count  = (uint64_t)count * bdev->block_size;
 
-    if (byte_offset + byte_count > g_ramdisk_priv->size) return -1;
+    if (byte_offset + byte_count > priv->size) return -1;
     if (byte_offset + byte_count < byte_offset) return -1;  /* overflow check */
 
-    memcpy(g_ramdisk_priv->data + byte_offset, buf, (size_t)byte_count);
+    memcpy(priv->data + byte_offset, buf, (size_t)byte_count);
     return 0;
 }
 
@@ -95,9 +92,7 @@ int ramdisk_init(uint64_t size_mb) {
      */
     /* memset(priv->data, 0, (size_t)size); */
 
-    /* Store in globals for the read/write callbacks */
-    g_ramdisk_priv = priv;
-    g_ramdisk_block_size = 512;
+    /* FIXED (v4.4.4): P2-12 — priv is now accessed through bdev->priv */
 
     /* Build the block device descriptor */
     strncpy(bdev->name, "ramdisk0", sizeof(bdev->name) - 1);

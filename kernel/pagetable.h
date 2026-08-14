@@ -159,11 +159,15 @@ int exec_elf(const char *path);
  * @path:          VFS path to the ELF binary.
  * @new_rsp_out:   output — new user stack pointer.
  * @new_pml4_out:  output — new PML4 physical address.
+ * @argv:          argument vector (NULL-terminated, may be NULL).
+ * @envp:          environment vector (NULL-terminated, may be NULL).
  * Returns: new user entry point, or NULL on failure.
  * (Top 10 #1 / BUG-PROC-H1)
  */
+/* FIXED (v4.4.4): P0-3 — Added argv/envp parameters */
 void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
-                       uint64_t *new_pml4_out);
+                       uint64_t *new_pml4_out,
+                       char *const argv[], char *const envp[]);
 
 /*
  * rodata_protect: Mark the kernel's read-only data segment as

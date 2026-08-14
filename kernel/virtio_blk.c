@@ -644,21 +644,21 @@ static int virtio_blk_do_io(struct virtio_blk_dev *dev, uint32_t type,
     return result;
 }
 
-/* Global pointer for block device callback dispatch.
- * Since the block_device->read/write callbacks do not receive the
- * bdev pointer, we use a global to track the current active device.
- * Multi-device support can be added by extending this to a list. */
-static struct virtio_blk_dev *g_active_blk = NULL;
+/* FIXED (v4.4.4): P2-12 — Block device: use bdev->priv instead of
+ * global singleton.  Each virtio_blk_dev is accessed through its
+ * block_device's priv field, enabling multiple virtio-blk devices. */
 
-static int virtio_blk_read(void *buf, uint64_t sector, int count) {
-    if (!g_active_blk) return -1;
-    return virtio_blk_do_io(g_active_blk, VIRTIO_BLK_T_IN, sector, buf,
+static int virtio_blk_read(struct block_device *bdev, void *buf, uint64_t sector, int count) {
+    struct virtio_blk_dev *dev = (struct virtio_blk_dev *)bdev->priv;
+    if (!dev) return -1;
+    return virtio_blk_do_io(dev, VIRTIO_BLK_T_IN, sector, buf,
                             (uint32_t)count);
 }
 
-static int virtio_blk_write(const void *buf, uint64_t sector, int count) {
-    if (!g_active_blk) return -1;
-    return virtio_blk_do_io(g_active_blk, VIRTIO_BLK_T_OUT, sector,
+static int virtio_blk_write(struct block_device *bdev, const void *buf, uint64_t sector, int count) {
+    struct virtio_blk_dev *dev = (struct virtio_blk_dev *)bdev->priv;
+    if (!dev) return -1;
+    return virtio_blk_do_io(dev, VIRTIO_BLK_T_OUT, sector,
                             (void *)buf, (uint32_t)count);
 }
 
@@ -728,10 +728,8 @@ static int virtio_blk_probe_device(struct pci_device *pci) {
     dev->bdev.read          = virtio_blk_read;
     dev->bdev.write         = virtio_blk_write;
     dev->bdev.ioctl         = NULL;
-    dev->bdev.priv          = dev;
+    dev->bdev.priv          = (void *)dev;  /* FIXED (v4.4.4): P2-12 — driver uses bdev->priv */
 
-    /* Set driver as active for callback dispatch */
-    g_active_blk = dev;
     dev->bdev.next          = NULL;
 
     /* Register block device */

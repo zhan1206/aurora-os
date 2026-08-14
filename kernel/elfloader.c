@@ -1068,8 +1068,10 @@ void *elf_load(const char *path, uint64_t *pml4_out) {
  * Returns: interpreter entry point on success, NULL on failure.
  * On success: *new_rsp_out and *new_pml4_out are set.
  */
+/* FIXED (v4.4.4): P0-3 — Accept argv/envp to forward to elf_load_pie */
 static void *exec_elf_interp(const char *path, const char *interp_path,
-                              uint64_t *new_rsp_out, uint64_t *new_pml4_out) {
+                              uint64_t *new_rsp_out, uint64_t *new_pml4_out,
+                              char *const argv[], char *const envp[]) {
     if (!path || !interp_path || !new_rsp_out || !new_pml4_out) return NULL;
 
     log_printf(LOG_LEVEL_INFO, "exec_elf_interp: main=%s interp=%s\n",
@@ -1082,7 +1084,7 @@ static void *exec_elf_interp(const char *path, const char *interp_path,
                    "exec_elf_interp: cannot open interpreter %s, "
                    "falling back to static\n", interp_path);
         /* Fall back: load the main binary directly (static linking) */
-        return elf_load_pie(path, NULL, NULL, new_pml4_out, new_rsp_out);
+        return elf_load_pie(path, argv, envp, new_pml4_out, new_rsp_out);
     }
 
     /* 2. Read the interpreter's ELF header */
@@ -1230,8 +1232,12 @@ static void *exec_elf_interp(const char *path, const char *interp_path,
 void *elf_load_pie(const char *path, char *const argv[], char *const envp[],
                    uint64_t *pml4_out, uint64_t *stack_out);
 
+/* FIXED (v4.4.4): P0-3 — Accept argv/envp to forward to the ELF loader.
+ * Previously envp was parsed by sys_execve but never forwarded, so child
+ * programs received no environment variables and no argv. */
 void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
-                       uint64_t *new_pml4_out) {
+                       uint64_t *new_pml4_out,
+                       char *const argv[], char *const envp[]) {
     if (!path || !new_rsp_out || !new_pml4_out) return NULL;
 
     /* LDSO (v4.2.6): Check if the ELF has a PT_INTERP segment.
@@ -1284,7 +1290,7 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
 
     if (has_interp) {
         /* Dynamically linked: exec_elf_interp creates its own pml4 */
-        entry = exec_elf_interp(path, interp_path, &stack, &new_pml4);
+        entry = exec_elf_interp(path, interp_path, &stack, &new_pml4, argv, envp);
         if (!entry) {
             log_printf(LOG_LEVEL_ERR, "exec: exec_elf_interp failed for %s\n", path);
             return NULL;
@@ -1296,7 +1302,7 @@ void *exec_elf_replace(const char *path, uint64_t *new_rsp_out,
             log_printf(LOG_LEVEL_ERR, "exec: clone_kernel_pml4 failed\n");
             return NULL;
         }
-        entry = elf_load_pie(path, NULL, NULL, &new_pml4, &stack);
+        entry = elf_load_pie(path, argv, envp, &new_pml4, &stack);
         if (!entry) {
             log_printf(LOG_LEVEL_ERR, "exec: elf_load_pie failed for %s\n", path);
             free_pagetable(new_pml4);
