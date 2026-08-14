@@ -83,6 +83,13 @@ void phys_mem_init_uefi(void *bi);
 void *alloc_pages(uint32_t order);
 
 /*
+ * FIXED (v4.4.5): P3-01 — alloc_pages_zero: always-zero variant for
+ * callers that need zeroed huge pages.  alloc_pages() skips memset
+ * for order == MAX_ORDER for performance.
+ */
+void *alloc_pages_zero(uint32_t order);
+
+/*
  * free_pages: Free 2^order contiguous physical pages.
  * @ptr: physical address returned by alloc_pages.
  * @order: must match the order used at allocation.

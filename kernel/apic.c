@@ -266,12 +266,15 @@ void lapic_start_ap(int lapic_id, uint32_t entry_addr) {
     }
 
     /* 10ms delay — use PIT for approximate delay */
+    /* FIXED (v4.4.5): P2-05 — APIC: add timeout to INIT-SIPI-SIPI PIT delay loops
+     * Without timeout, if the PIT fails to respond, the BSP spins forever. */
     {
         uint32_t pit_delay = 11932;  /* ~10ms */
         outb(0x43, 0xB0);
         outb(0x42, (uint8_t)(pit_delay & 0xFF));
         outb(0x42, (uint8_t)((pit_delay >> 8) & 0xFF));
-        while (1) {
+        int delay_timeout = 100000;
+        while (delay_timeout-- > 0) {
             outb(0x43, 0xE2);
             uint8_t lo = inb(0x42);
             uint8_t hi = inb(0x42);
@@ -288,12 +291,14 @@ void lapic_start_ap(int lapic_id, uint32_t entry_addr) {
     }
 
     /* 200us delay */
+    /* FIXED (v4.4.5): P2-05 — add timeout to PIT delay loop */
     {
         uint32_t pit_delay = 238;  /* ~200us */
         outb(0x43, 0xB0);
         outb(0x42, (uint8_t)(pit_delay & 0xFF));
         outb(0x42, (uint8_t)((pit_delay >> 8) & 0xFF));
-        while (1) {
+        int delay_timeout = 100000;
+        while (delay_timeout-- > 0) {
             outb(0x43, 0xE2);
             uint8_t lo = inb(0x42);
             uint8_t hi = inb(0x42);
@@ -312,11 +317,13 @@ void lapic_start_ap(int lapic_id, uint32_t entry_addr) {
         }
 
         /* 200us delay between SIPIs */
+        /* FIXED (v4.4.5): P2-05 — add timeout to PIT delay loop */
         uint32_t pit_delay = 238;
         outb(0x43, 0xB0);
         outb(0x42, (uint8_t)(pit_delay & 0xFF));
         outb(0x42, (uint8_t)((pit_delay >> 8) & 0xFF));
-        while (1) {
+        int sipi_timeout = 100000;
+        while (sipi_timeout-- > 0) {
             outb(0x43, 0xE2);
             uint8_t lo = inb(0x42);
             uint8_t hi = inb(0x42);

@@ -689,12 +689,20 @@ void schedule(void) {
      * NOTE: min_vruntime is updated atomically via CAS loop for SMP safety.
      * The read at line 345 (new task vruntime init) is a single 64-bit load
      * and is naturally atomic on x86_64 where 64-bit aligned reads are atomic. */
+    /* FIXED (v4.4.5): P1-01 — min_vruntime CAS: advance when all tasks have same vruntime
+     * If all runnable tasks have the same vruntime, the CAS loop never updates
+     * min_vruntime, so new tasks start at vruntime=0 and starve existing tasks.
+     * Fix: If no task has vruntime > min_vruntime, advance min_vruntime by a small delta. */
     {
         uint64_t old, new_val;
+        new_val = next->vruntime;
+        if (new_val <= min_vruntime) {
+            /* All tasks at same vruntime: advance by minimum granularity */
+            new_val = min_vruntime + 1;
+        }
         do {
             old = min_vruntime;
-            if (next->vruntime <= old) break;
-            new_val = next->vruntime;
+            if (new_val <= old) break;
         } while (!__sync_bool_compare_and_swap(&min_vruntime, old, new_val));
     }
 

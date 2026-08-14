@@ -103,24 +103,33 @@ static void dns_cache_age(void) {
 /* ================================================================
  * Encode hostname into DNS label format
  * "www.example.com" -> 3www7example3com0
- * Returns encoded length
+ * Returns encoded length, or -1 on buffer overflow
  * ================================================================ */
-static int dns_encode_name(uint8_t *out, const char *hostname) {
+static int dns_encode_name(uint8_t *out, const char *hostname, int buf_len) {
     const char *p = hostname;
     uint8_t *start = out;
+    int pos = 0;
 
     while (*p) {
         const char *dot = p;
         while (*dot && *dot != '.') dot++;
         int seg_len = (int)(dot - p);
         if (seg_len > 63) seg_len = 63;  /* Max label length */
+        /* FIXED (v4.4.5): P2-06 — DNS: add bounds checking to name encoding
+         * Without bounds checking, a label with length > remaining buffer size
+         * can overflow the encoded name buffer. */
+        if (pos + 1 + seg_len + 1 > buf_len) {
+            return -1; /* Buffer overflow */
+        }
         *out++ = (uint8_t)seg_len;
         memcpy(out, p, (size_t)seg_len);
         out += seg_len;
+        pos += 1 + seg_len;
         p = dot;
         if (*p == '.') p++;
     }
 
+    if (pos + 1 > buf_len) return -1;
     *out++ = 0;  /* Terminating zero-length label */
     return (int)(out - start);
 }
@@ -181,7 +190,8 @@ static int dns_send_query(const char *hostname) {
     hdr->arcount = 0;
 
     uint8_t *q = pkt + sizeof(struct dns_header);
-    int name_len = dns_encode_name(q, hostname);
+    int name_len = dns_encode_name(q, hostname, name_max + 4);
+    if (name_len < 0) { kfree(pkt); return -1; }
     q[name_len] = 0;
     q[name_len + 1] = (uint8_t)DNS_TYPE_A;
     q[name_len + 2] = 0;
@@ -418,7 +428,8 @@ int dns_query(const char *hostname, uint8_t ip_out[4]) {
 
     /* Question section: encode name */
     uint8_t *q = pkt + sizeof(struct dns_header);
-    int name_len = dns_encode_name(q, hostname);
+    int name_len = dns_encode_name(q, hostname, name_max + 4);
+    if (name_len < 0) { kfree(pkt); return -1; }
 
     /* QTYPE = A (1), QCLASS = IN (1) */
     q[name_len] = 0;

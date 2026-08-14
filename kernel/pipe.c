@@ -104,6 +104,14 @@ static ssize_t pipe_read(struct file *filp, void *buf, size_t count,
     if (!ring) return -1;
 
     /*
+     * FIXED (v4.4.5): P3-02 — pipe: check ring->closed to reject
+     * reads on closed pipes.  The ring->closed flag was set in
+     * pipe_close() but never checked, allowing reads/writes on
+     * a pipe whose other end was already closed.
+     */
+    if (ring->closed) { current->t_errno = EPIPE; return -1; }
+
+    /*
      * FIXED (v4.2.7): BUG-PIPE-ADDR-VALIDATE
      * Validate user buffer address before copying data.  Without this
      * check, a malicious process could pass a kernel address and use
@@ -213,6 +221,14 @@ static ssize_t pipe_write(struct file *filp, const void *buf, size_t count,
     if (!filp || !filp->inode) return -1;
     struct pipe_ring *ring = (struct pipe_ring *)filp->inode->priv;
     if (!ring) return -1;
+
+    /*
+     * FIXED (v4.4.5): P3-02 — pipe: check ring->closed to reject
+     * writes on closed pipes.  The ring->closed flag was set in
+     * pipe_close() but never checked, allowing writes on a pipe
+     * whose other end was already closed.
+     */
+    if (ring->closed) { current->t_errno = EPIPE; return -1; }
 
     /*
      * FIXED (v4.2.7): BUG-PIPE-ADDR-VALIDATE

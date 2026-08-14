@@ -668,7 +668,18 @@ void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
             if (pt[i] != 0) { empty = 0; break; }
         }
         if (empty) {
-            free_page((void *)(uintptr_t)(pd[pd_idx] & PTE_ADDR_MASK));
+            /* FIXED (v4.4.5): P2-02 — unmap_page: check ref_count before freeing PT/PD/PDPT
+             * Page table pages can be shared via COW. If ref_count > 1, the page is
+             * still in use by another process and must not be freed. */
+            {
+                uint64_t pt_phys = pd[pd_idx] & PTE_ADDR_MASK;
+                struct page *pt_pg = get_page_struct(pt_phys);
+                if (pt_pg && pt_pg->ref_count <= 1) {
+                    free_page((void *)(uintptr_t)pt_phys);
+                } else if (pt_pg) {
+                    page_ref_dec(pt_phys);
+                }
+            }
             pd[pd_idx] = 0;
 
             /* Check if PD is now empty */
@@ -677,7 +688,15 @@ void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
                 if (pd[i] != 0) { empty = 0; break; }
             }
             if (empty) {
-                free_page((void *)(uintptr_t)(pdpt[pdpt_idx] & PTE_ADDR_MASK));
+                {
+                    uint64_t pd_phys = pdpt[pdpt_idx] & PTE_ADDR_MASK;
+                    struct page *pd_pg = get_page_struct(pd_phys);
+                    if (pd_pg && pd_pg->ref_count <= 1) {
+                        free_page((void *)(uintptr_t)pd_phys);
+                    } else if (pd_pg) {
+                        page_ref_dec(pd_phys);
+                    }
+                }
                 pdpt[pdpt_idx] = 0;
 
                 /* Check if PDPT is now empty */
@@ -686,7 +705,15 @@ void unmap_page(uint64_t pml4_phys, uint64_t vaddr) {
                     if (pdpt[i] != 0) { empty = 0; break; }
                 }
                 if (empty) {
-                    free_page((void *)(uintptr_t)(pml4[pml4_idx] & PTE_ADDR_MASK));
+                    {
+                        uint64_t pdpt_phys = pml4[pml4_idx] & PTE_ADDR_MASK;
+                        struct page *pdpt_pg = get_page_struct(pdpt_phys);
+                        if (pdpt_pg && pdpt_pg->ref_count <= 1) {
+                            free_page((void *)(uintptr_t)pdpt_phys);
+                        } else if (pdpt_pg) {
+                            page_ref_dec(pdpt_phys);
+                        }
+                    }
                     pml4[pml4_idx] = 0;
                 }
             }

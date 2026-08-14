@@ -767,10 +767,33 @@ void *alloc_pages(uint32_t order) {
      * are rejected by the check above.
      */
     void *va = (void*)(uintptr_t)pa;
-    memset(va, 0, (size_t)(PAGE_SIZE << order));
+
+    /*
+     * FIXED (v4.4.5): P3-01 — alloc_pages: skip unnecessary 4MB memset
+     * For order=10 allocations (2MB/4MB huge pages), the unconditional
+     * memset was a performance bottleneck. Now only zero when order < 10
+     * (small pages). Huge pages are zeroed on-demand by the page fault
+     * handler. Callers that need zeroed huge pages should call
+     * alloc_pages_zero() instead.
+     */
+    if (order < MAX_ORDER) {
+        memset(va, 0, (size_t)(PAGE_SIZE << order));
+    }
+    /* For order == MAX_ORDER (10), return uninitialized memory. */
 
     log_printf(LOG_LEVEL_DEBUG, "alloc_pages: order=%d pa=%p\n", (int)order, (void*)(uintptr_t)pa);
     return (void*)(uintptr_t)pa;
+}
+
+/*
+ * FIXED (v4.4.5): P3-01 — alloc_pages_zero: always-zero variant for
+ * callers that need zeroed huge pages (e.g., page tables, DMA buffers).
+ */
+void *alloc_pages_zero(uint32_t order) {
+    void *ptr = alloc_pages(order);
+    if (!ptr) return NULL;
+    memset(ptr, 0, (size_t)(PAGE_SIZE << order));
+    return ptr;
 }
 
 void free_pages(void *ptr, uint32_t order) {
@@ -982,7 +1005,12 @@ void *kmalloc(size_t size) {
             cache->growing = 1;
             slab_unlock();
             if (slab_grow(cache) != 0) {
+                /* FIXED (v4.4.5): P2-01 — slab_grow: set growing=0 under lock
+                 * The `growing` flag was cleared outside the lock, allowing another
+                 * CPU to read stale state and start a second grow concurrently. */
+                slab_lock();
                 cache->growing = 0;
+                slab_unlock();
                 log_printf(LOG_LEVEL_WARN, "kmalloc: slab grow failed (size=%d)\n", (int)size);
                 return NULL;
             }

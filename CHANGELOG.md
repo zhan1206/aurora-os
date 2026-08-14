@@ -1,6 +1,63 @@
 # AuroraOS Changelog
 
-## v4.4.4 (2026-08-13) — P0致命+P1高优+P2中等: 15项修复
+## v4.4.5 (2026-08-13) — 遗漏项补全: P1调度+P2锁/IDT/驱动+P3性能/死代码, 11项
+
+### 概述
+
+v4.4.5 补全 v4.4.4 报告中遗漏的 11 项修复，覆盖 P1（调度公平性）、P2（锁/IDT/驱动/挂载）和 P3（性能/死代码/诊断）。
+
+### P1: 调度 (1项)
+
+| 编号 | 文件 | 描述 | 修复 |
+|------|------|------|------|
+| P1-01 | `kernel/sched.c` | min_vruntime CAS 循环缺陷 | 所有任务 vruntime 相同时，强制 `new_val = min_vruntime + 1` |
+
+### P2: 锁/IDT/驱动/挂载 (7项)
+
+| 编号 | 文件 | 描述 | 修复 |
+|------|------|------|------|
+| P2-01 | `kernel/mem.c` | slab_grow TOCTOU 竞态 | `growing=0` 改为持锁写入 |
+| P2-02 | `kernel/pagetable.c` | unmap_page 绕过 COW | 释放 PT/PD/PDPT 前检查 ref_count |
+| P2-03 | `kernel/irq.c` | IDT 缺少 IRQ 向量 | 所有未用向量注册 `irq_default_handler` |
+| P2-04 | `kernel/usb/xhci.c` | xHCI 轮询路径未更新 ERDP | 提取 `xhci_update_erdp()`，轮询+中断统一调用 |
+| P2-05 | `kernel/apic.c` | APIC INIT-SIPI 无超时 | 3 个 PIT 延迟循环加 100000 次迭代上限 |
+| P2-06 | `kernel/net/dns.c` | DNS 名称编码无边界检查 | 加 `buf_len` 参数 + 溢出检查 |
+| P2-07 | `kernel/vfs.c` | vfs_mount 仅根级挂载 | 嵌套挂载: `vfs_lookup` 父目录 + 创建子 dentry |
+
+### P3: 性能/死代码/诊断 (3项)
+
+| 编号 | 文件 | 描述 | 修复 |
+|------|------|------|------|
+| P3-01 | `kernel/mem.c` + `mem.h` | alloc_pages 4MB 无条件清零 | order<10 才清零，新增 `alloc_pages_zero()` |
+| P3-02 | `kernel/pipe.c` | pipe.c `ring->closed` 死代码 | `pipe_read`/`pipe_write` 检查 `closed`→返回 EPIPE |
+| P3-03 | `kernel/main.c` | 驱动错误恢复缺失 | `DRIVER_INIT` 宏 + 错误计数 + 诊断日志 |
+
+### 变更统计
+
+| 指标 | 数值 |
+|------|------|
+| 修改文件 | 12 |
+| 新增代码 | ~300 行 |
+
+### 版本历史
+
+```
+v4.4.5 ← 当前 (遗漏项补全: P1调度+P2锁/IDT/驱动+P3性能, 11项)
+v4.4.4 (P0+P1+P2: 15项修复, 4致命+6高优+5中等)
+v4.4.3 (P0+P2: 6 Werror, PR模板, /proc/selftest, crash dump)
+v4.4.2 (编译缺口修复: 15项+5脚本)
+v4.4.1 (可重现构建+文档一致+短板验证)
+v4.4.0 (里程碑: 编译零警告)
+v4.3.9 (致命修复: 23项)
+v4.3.8 (全栈改进: 10类别)
+v4.3.7 (编译+运行时Bug修复: 18项)
+v4.3.6 (安全加固+工程完善)
+v4.3.5 (实测修复: 10 Bug)
+v4.3.4 (架构级: 8大子系统)
+v4.3.3 (全量修复: 16项)
+v4.3.2 (根因修复: BSS栈溢出)
+v4.3.1 (诚实文档: 77项审计映射)
+```
 
 ### 概述
 

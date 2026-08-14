@@ -134,6 +134,17 @@ static void ipi_tlb_handler(void *frame) {
 
 extern void keyboard_init(void);
 
+/* FIXED (v4.4.5): P2-03 — IDT: default handler for unregistered IRQ vectors
+ * Unregistered IRQ vectors can cause triple faults if the hardware
+ * delivers an unexpected interrupt. This handler logs the event and
+ * sends EOI to prevent an interrupt storm. */
+__attribute__((interrupt))
+static void irq_default_handler(void *frame) {
+    (void)frame;
+    log_printf(LOG_LEVEL_WARN, "irq: unexpected interrupt on unregistered vector\n");
+    lapic_eoi();
+}
+
 void irq_init(void) {
     /* Fill IDT gates at runtime (avoids assembler relocation issues) */
     idt_set_gate(0,  (uint64_t)(uintptr_t)exc_handler_0,  0x08, 0, 0x8E);
@@ -179,6 +190,18 @@ void irq_init(void) {
     idt_set_gate(IPI_TLB_VECTOR, (uint64_t)(uintptr_t)&ipi_tlb_handler, 0x08, 0, 0x8E);
     /* IPI: Reschedule (vector 0xFE) */
     idt_set_gate(IPI_RESCHED_VECTOR, (uint64_t)(uintptr_t)&ipi_resched_handler, 0x08, 0, 0x8E);
+
+    /* FIXED (v4.4.5): P2-03 — Register default handler for all unused IRQ vectors (32-255)
+     * Unregistered IRQ vectors can cause triple faults if the hardware
+     * delivers an unexpected interrupt. */
+    {
+        /* Vectors already registered: 0-31 (exceptions), 32 (IRQ0), 33 (IRQ1),
+         * 0xFD (IPI_TLB), 0xFE (IPI_RESCHED) */
+        for (int i = 34; i < 0xFD; i++) {
+            idt_set_gate(i, (uint64_t)(uintptr_t)&irq_default_handler, 0x08, 0, 0x8E);
+        }
+        idt_set_gate(0xFF, (uint64_t)(uintptr_t)&irq_default_handler, 0x08, 0, 0x8E);
+    }
 
     load_idt();
     pic_remap();

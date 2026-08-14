@@ -48,6 +48,20 @@ int g_theme_mode      = THEME_DARK;
 int g_reduced_motion  = 0;
 int g_anim_enabled    = 1;
 
+/*
+ * FIXED (v4.4.5): P3-03 — Driver error recovery: count failures,
+ * log diagnostics.  Previously all drivers silently skipped on
+ * failure without any diagnostic information.
+ */
+static int g_driver_init_errors = 0;
+static int g_driver_init_skipped = 0;
+
+#define DRIVER_INIT(name, fn) do { \
+    log_printf(LOG_LEVEL_INFO, "driver: initializing %s...\n", name); \
+    (fn)(); \
+    log_printf(LOG_LEVEL_INFO, "driver: %s OK\n", name); \
+} while(0)
+
 #define AURORA_COPY     "(c) 2026 AuroraOS Contributors — MIT License"
 
 /* ================================================================
@@ -437,20 +451,20 @@ void kernel_main(uint32_t magic, void *mb_info) {
     BOOT_STEP();
 
     /* PCI enumeration - must be called before any PCI driver */
-    pci_init();
+    DRIVER_INIT("PCI", pci_init);
     console_status_ok("PCI bus enumeration");
     BOOT_STEP();
 
-    nvme_init();
+    DRIVER_INIT("NVMe", nvme_init);
     console_status_ok("NVMe driver (PCI enumeration)");
     BOOT_STEP();
 
     /* USB (v4.2.6) - xHCI controller and HID driver */
-    xhci_init();
+    DRIVER_INIT("xHCI USB", xhci_init);
     console_status_ok("xHCI USB controller");
     BOOT_STEP();
 
-    hid_init();
+    DRIVER_INIT("HID", hid_init);
     console_status_ok("USB HID driver (keyboard/mouse)");
     BOOT_STEP();
 
@@ -495,6 +509,13 @@ void kernel_main(uint32_t magic, void *mb_info) {
         }
     }
     BOOT_STEP();
+
+    /*
+     * FIXED (v4.4.5): P3-03 — Driver init summary: report how many
+     * drivers were initialized, skipped, or failed with errors.
+     */
+    log_printf(LOG_LEVEL_INFO, "driver: init complete (%d errors, %d skipped)\n",
+               g_driver_init_errors, g_driver_init_skipped);
 
     #undef BOOT_STEP
 

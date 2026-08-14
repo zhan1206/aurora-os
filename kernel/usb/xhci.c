@@ -252,6 +252,19 @@ void xhci_ring_doorbell(struct xhci_controller *hc, uint8_t slot_id,
 }
 
 /* ================================================================
+ * FIXED (v4.4.5): P2-04 — xHCI: update ERDP in polling path
+ * Without updating ERDP in the poll path, the controller never sees
+ * dequeue pointer advances and may stop posting events.
+ * ================================================================ */
+static void xhci_update_erdp(struct xhci_controller *hc) {
+    uint64_t erdp = hc->event_ring_phys
+                  + (uint64_t)hc->event_ring_dequeue * sizeof(struct xhci_trb)
+                  | XHCI_ERDP_EHB;
+    xhci_write_runtime(hc, XHCI_ERDP_LO(0), (uint32_t)(erdp & 0xFFFFFFFFU));
+    xhci_write_runtime(hc, XHCI_ERDP_HI(0), (uint32_t)(erdp >> 32));
+}
+
+/* ================================================================
  * Send Command via Command Ring
  * ================================================================ */
 int xhci_send_command(struct xhci_controller *hc, struct xhci_trb *cmd_trb) {
@@ -285,6 +298,9 @@ int xhci_send_command(struct xhci_controller *hc, struct xhci_trb *cmd_trb) {
         log_printf(LOG_LEVEL_WARN, "xHCI: command timed out\n");
         return -1;
     }
+
+    /* FIXED (v4.4.5): P2-04 — update ERDP after polling events */
+    xhci_update_erdp(hc);
 
     if (cc != XHCI_CC_SUCCESS) {
         log_printf(LOG_LEVEL_WARN, "xHCI: command failed, cc=%d\n", cc);
@@ -333,6 +349,9 @@ int xhci_enable_slot(struct xhci_controller *hc) {
             asm volatile ("pause" ::: "memory");
         }
     }
+
+    /* FIXED (v4.4.5): P2-04 — update ERDP after polling events */
+    xhci_update_erdp(hc);
 
     if (slot_id <= 0 || slot_id > (int)hc->max_slots) {
         log_printf(LOG_LEVEL_WARN, "xHCI: enable slot failed, slot_id=%d\n", slot_id);
@@ -636,6 +655,9 @@ int xhci_get_descriptor(struct xhci_controller *hc, uint8_t slot_id,
         return -1;
     }
 
+    /* FIXED (v4.4.5): P2-04 — update ERDP after polling events */
+    xhci_update_erdp(hc);
+
     /* FIXED (v4.2.7): BUG-XHCI-DESC-RING — Do NOT reset ring pointers after
      * each descriptor transfer.  The transfer ring is a circular buffer;
      * resetting enqueue/dequeue to 0 and toggling pcs after every transfer
@@ -709,6 +731,8 @@ int xhci_set_configuration(struct xhci_controller *hc, uint8_t slot_id,
     }
 
     if (done) {
+        /* FIXED (v4.4.5): P2-04 — update ERDP after polling events */
+        xhci_update_erdp(hc);
         slot->configured = 1;
         return 0;
     }
@@ -959,17 +983,8 @@ void xhci_interrupt_handler(void *stack) {
                 }
             }
 
-            /* FIXED (v4.2.7): BUG-XHCI-ERDP - Write dequeue pointer to ERDP
-             * with ERDP_BUSY (EHB) bit set so the controller knows the
-             * event ring is being consumed.  Without this write the
-             * controller may think the ring is full and stop posting events. */
-            {
-                uint64_t erdp = hc->event_ring_phys
-                              + (uint64_t)hc->event_ring_dequeue * sizeof(struct xhci_trb)
-                              | XHCI_ERDP_EHB;
-                xhci_write_runtime(hc, XHCI_ERDP_LO(0), (uint32_t)(erdp & 0xFFFFFFFFU));
-                xhci_write_runtime(hc, XHCI_ERDP_HI(0), (uint32_t)(erdp >> 32));
-            }
+            /* FIXED (v4.4.5): P2-04 — update ERDP after processing events */
+            xhci_update_erdp(hc);
         }
 
         /* Clear port change bits */
